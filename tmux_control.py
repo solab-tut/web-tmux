@@ -359,6 +359,7 @@ class TmuxControl:
             ' "#{window_index}|#{window_name}|#{window_active}|#{window_layout}"'
         )
         windows, active_layout = [], ''
+        active_window_idx: int | None = None
         for line in win_raw.splitlines():
             p = line.split('|', 3)
             if len(p) < 4:
@@ -368,11 +369,15 @@ class TmuxControl:
             active = p[2] == '1'
             layout = p[3]
             if active:
+                active_window_idx = idx
                 active_layout = layout
             windows.append({'index': idx, 'name': name, 'active': active, 'layout': layout})
 
+        pane_target = self.session
+        if active_window_idx is not None:
+            pane_target = f'{self.session}:{active_window_idx}'
         pane_raw = await self.send_command(
-            f'list-panes -t {self.session} -F'
+            f'list-panes -t {pane_target} -F'
             ' "#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}"'
         )
         panes, active_pane = [], ''

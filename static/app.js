@@ -259,6 +259,7 @@ function onInit(msg) {
   const activeWin = msg.windows.find(w => w.active);
   currentWinIdx = activeWin ? activeWin.index : 0;
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
+  scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
 }
 
 function onWindowSwitched(msg) {
@@ -272,6 +273,7 @@ function onWindowSwitched(msg) {
   destroyAllPanes();
   markSnapshotPending((msg.panes || []).map(p => p.id));
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
+  scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
 }
 
 function onSnapshot(msg) {
@@ -338,7 +340,10 @@ function onLayoutChange(msg) {
     scheduleLayout(lp, msg.layout);
   }
 
-  if (newIds.length > 0) markSnapshotPending(newIds);
+  if (newIds.length > 0) {
+    markSnapshotPending(newIds);
+    scheduleSnapshotRefresh(newIds);
+  }
 
   // Refresh sidebar pane list (debounced) so commands etc. show up
   scheduleStateRefresh();
@@ -391,13 +396,18 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
     lp.forEach(({ id, cols, rows }) => ensurePane('%' + id, cols, rows));
   }
 
+  const fallbackActivePane =
+    (activePane && panes[activePane] && activePane) ||
+    (lp && lp.length > 0 ? '%' + lp[0].id : null) ||
+    (panesInfo && panesInfo.length > 0 ? panesInfo[0].id : null);
+
   // IMPORTANT: mark the active pane BEFORE positioning, so the `.active`
   // class makes the element visible (mobile CSS hides non-active panes).
   // Otherwise fit() would measure a `display: none` element as 0×0.
-  setActivePaneVisual(activePane);
-  if (activePane && panes[activePane]) {
-    activePaneId = activePane;
-    panes[activePane].term.focus();
+  if (fallbackActivePane) {
+    setActivePaneVisual(fallbackActivePane);
+    activePaneId = fallbackActivePane;
+    panes[fallbackActivePane]?.term.focus();
   }
 
   // Now position; fit() will see the active pane at its real container size.
