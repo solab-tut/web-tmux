@@ -24,10 +24,8 @@ import termios
 log = logging.getLogger(__name__)
 
 _ZSH_EOL_MARK_RE = re.compile(
-    br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *\r ?\r'
+    br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
 )
-_ZSH_EOL_MARK_PREFIX = b'\x1b[1m\x1b[7m'
-_ZSH_EOL_MARK_SUFFIX = b'\x1b[27m\x1b[1m\x1b[0m'
 
 
 def _decode_output(s: str) -> bytes:
@@ -70,64 +68,68 @@ def _decode_output(s: str) -> bytes:
     return b''.join(out)
 
 
-def _strip_zsh_eol_marks(data: bytes) -> bytes:
-    return _ZSH_EOL_MARK_RE.sub(b'', data)
+def _decode_output_stream(s: str, remainder: str = '') -> tuple[bytes, str]:
+    """Decode vis-encoded tmux output with chunk-boundary safety.
 
-
-def _split_clean_output(data: bytes) -> tuple[bytes, bytes]:
-    """Strip zsh's prompt EOL mark while tolerating chunked tmux output."""
+    `%output` payload can be split at arbitrary boundaries, including inside
+    escape sequences such as `\\`, `\\n`, `\\033`. Keep incomplete tail bytes as
+    remainder and decode them with the next chunk.
+    """
+    src = remainder + s
     out = bytearray()
     i = 0
-    prefix_len = len(_ZSH_EOL_MARK_PREFIX)
-    suffix_len = len(_ZSH_EOL_MARK_SUFFIX)
-
-    while i < len(data):
-        if not data.startswith(_ZSH_EOL_MARK_PREFIX, i):
-            out.append(data[i])
+    n = len(src)
+    while i < n:
+        if src[i] != '\\':
+            out.extend(src[i].encode('latin-1', errors='replace'))
             i += 1
             continue
 
-        symbol_idx = i + prefix_len
-        if symbol_idx >= len(data):
+        if i + 1 >= n:
             break
-        if data[symbol_idx] not in (ord('%'), ord('#')):
-            out.append(data[i])
-            i += 1
-            continue
 
-        suffix_idx = symbol_idx + 1
-        if suffix_idx + suffix_len > len(data):
-            break
-        if not data.startswith(_ZSH_EOL_MARK_SUFFIX, suffix_idx):
-            out.append(data[i])
-            i += 1
+        nxt = src[i + 1]
+        if nxt == 'n':
+            out.append(0x0a)
+            i += 2
             continue
-
-        j = suffix_idx + suffix_len
-        while j < len(data) and data[j] == 0x20:
-            j += 1
-        if j >= len(data):
-            break
-        if data[j] != 0x0d:
-            out.append(data[i])
-            i += 1
+        if nxt == 'r':
+            out.append(0x0d)
+            i += 2
             continue
-
-        j += 1
-        if j >= len(data):
-            break
-        if data[j] == 0x20:
-            j += 1
-            if j >= len(data):
+        if nxt == 't':
+            out.append(0x09)
+            i += 2
+            continue
+        if nxt == '\\':
+            out.append(0x5c)
+            i += 2
+            continue
+        if nxt in '01234567':
+            j = i + 1
+            oct_s = ''
+            while j < n and len(oct_s) < 3 and src[j] in '01234567':
+                oct_s += src[j]
+                j += 1
+            # Octal escape is 1-3 digits. If chunk ended before 3 digits,
+            # keep it for the next chunk to avoid splitting `\033`.
+            if j == n and len(oct_s) < 3:
                 break
-        if data[j] != 0x0d:
-            out.append(data[i])
-            i += 1
+            out.append(int(oct_s, 8) & 0xff)
+            i = j
             continue
 
-        i = j + 1
+        # Unknown escape. Preserve the backslash literally.
+        out.append(0x5c)
+        i += 1
 
-    return bytes(out), data[i:]
+    return bytes(out), src[i:]
+
+
+def _strip_zsh_eol_marks(data: bytes) -> bytes:
+    # Remove the visible mark but keep cursor rewind (\r ?\r), otherwise
+    # line-editor redraw on wrapped input can break.
+    return _ZSH_EOL_MARK_RE.sub(b'\\1', data)
 
 
 class TmuxControl:
@@ -142,7 +144,7 @@ class TmuxControl:
         self._in_resp: bool = False
         self._restart_lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
-        self._output_remainder: dict[str, bytes] = {}
+        self._decode_remainder: dict[str, str] = {}
 
     # ──────────────────────────────────────── lifecycle
 
@@ -230,7 +232,7 @@ class TmuxControl:
         self._buf = ''
         self._cur_resp = []
         self._in_resp = False
-        self._output_remainder = {}
+        self._decode_remainder = {}
         while self._pending:
             fut = self._pending.pop(0)
             if not fut.done():
@@ -405,6 +407,84 @@ class TmuxControl:
 
     # ──────────────────────────────────────── event parsing
 
+    def _handle_notification_line(self, line: str) -> bool:
+        if line.startswith('%extended-output '):
+            # tmux may emit: %extended-output <pane> <age> <vis-encoded-bytes>
+            # Treat it the same as %output.
+            parts = line.split(' ', 3)
+            if len(parts) >= 4:
+                pane_id = parts[1]
+                data, rem = _decode_output_stream(
+                    parts[3],
+                    self._decode_remainder.get(pane_id, ''),
+                )
+                if rem:
+                    self._decode_remainder[pane_id] = rem
+                elif pane_id in self._decode_remainder:
+                    del self._decode_remainder[pane_id]
+                if not data:
+                    return True
+                self._broadcast({
+                    'type': 'output',
+                    'pane': pane_id,
+                    'data': base64.b64encode(data).decode('ascii'),
+                })
+            return True
+        if line.startswith('%output '):
+            parts = line.split(' ', 2)
+            if len(parts) >= 3:
+                pane_id = parts[1]
+                data, rem = _decode_output_stream(
+                    parts[2],
+                    self._decode_remainder.get(pane_id, ''),
+                )
+                if rem:
+                    self._decode_remainder[pane_id] = rem
+                elif pane_id in self._decode_remainder:
+                    del self._decode_remainder[pane_id]
+                if not data:
+                    return True
+                self._broadcast({
+                    'type': 'output',
+                    'pane': pane_id,
+                    'data': base64.b64encode(data).decode('ascii'),
+                })
+            return True
+        if line.startswith('%layout-change '):
+            parts = line.split(' ', 2)
+            if len(parts) >= 3:
+                self._broadcast({
+                    'type':   'layout_change',
+                    'target': parts[1],
+                    'layout': parts[2],
+                })
+            return True
+        if line.startswith('%window-add '):
+            self._broadcast({'type': 'window_add',    'target': line[12:]})
+            return True
+        if line.startswith('%window-close '):
+            self._broadcast({'type': 'window_close',  'target': line[14:]})
+            return True
+        if line.startswith('%window-renamed '):
+            p = line.split(' ', 2)
+            self._broadcast({
+                'type':   'window_renamed',
+                'target': p[1] if len(p) > 1 else '',
+                'name':   p[2] if len(p) > 2 else '',
+            })
+            return True
+        if line.startswith('%pane-focus-in '):
+            self._broadcast({'type': 'focus', 'pane': line[15:].strip()})
+            return True
+        if line.startswith('%sessions-changed'):
+            self._broadcast({'type': 'sessions_changed'})
+            return True
+        if line.startswith('%exit'):
+            log.info('tmux session exited')
+            self._schedule_restart()
+            return True
+        return False
+
     def _handle_line(self, line: str) -> None:
         # ── response demux ──
         if line.startswith('%begin '):
@@ -419,54 +499,13 @@ class TmuxControl:
                     fut.set_result(result)
             self._cur_resp = []
             return
+        if self._handle_notification_line(line):
+            return
         if self._in_resp:
             self._cur_resp.append(line)
             return
-
-        # ── notifications ──
-        if line.startswith('%output '):
-            parts = line.split(' ', 2)
-            if len(parts) >= 3:
-                pane_id = parts[1]
-                raw_data = self._output_remainder.get(pane_id, b'') + _decode_output(parts[2])
-                data, remainder = _split_clean_output(raw_data)
-                if remainder:
-                    self._output_remainder[pane_id] = remainder
-                elif pane_id in self._output_remainder:
-                    del self._output_remainder[pane_id]
-                if not data:
-                    return
-                self._broadcast({
-                    'type': 'output',
-                    'pane': pane_id,
-                    'data': base64.b64encode(data).decode('ascii'),
-                })
-        elif line.startswith('%layout-change '):
-            parts = line.split(' ', 2)
-            if len(parts) >= 3:
-                self._broadcast({
-                    'type':   'layout_change',
-                    'target': parts[1],
-                    'layout': parts[2],
-                })
-        elif line.startswith('%window-add '):
-            self._broadcast({'type': 'window_add',    'target': line[12:]})
-        elif line.startswith('%window-close '):
-            self._broadcast({'type': 'window_close',  'target': line[14:]})
-        elif line.startswith('%window-renamed '):
-            p = line.split(' ', 2)
-            self._broadcast({
-                'type':   'window_renamed',
-                'target': p[1] if len(p) > 1 else '',
-                'name':   p[2] if len(p) > 2 else '',
-            })
-        elif line.startswith('%pane-focus-in '):
-            self._broadcast({'type': 'focus', 'pane': line[15:].strip()})
-        elif line.startswith('%sessions-changed'):
-            self._broadcast({'type': 'sessions_changed'})
-        elif line.startswith('%exit'):
-            log.info('tmux session exited')
-            self._schedule_restart()
+        if line.startswith('%'):
+            log.debug('unhandled control line: %s', line[:200])
 
     def _broadcast(self, msg: dict) -> None:
         if not self.subscribers:

@@ -68,7 +68,7 @@ let _layoutApplying = false;
 const _pendingSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
-const TMUX_COL_SAFETY_MARGIN = 1;
+const TMUX_COL_SAFETY_MARGIN = 0;
 
 function markClientActive() {
   _clientActive = true;
