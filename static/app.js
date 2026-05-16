@@ -36,6 +36,7 @@ let ws             = null;
 let panes          = {};     // pane_id → { term, fitAddon, el }
 let activePaneId   = null;
 let currentWinIdx  = 0;      // tmux window index currently displayed
+let currentWinId   = '';     // tmux window id currently displayed, e.g. @42
 let totalCols      = 80;
 let totalRows      = 24;
 
@@ -318,6 +319,13 @@ function drainBufferedOutput(paneId) {
   p.term.write(data, () => drainBufferedOutput(paneId));
 }
 
+function updateCurrentWindow(windows) {
+  const activeWin = (windows || []).find(w => w.active);
+  if (!activeWin) return;
+  currentWinIdx = activeWin.index;
+  currentWinId = activeWin.id || '';
+}
+
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
 function connect() {
@@ -372,10 +380,16 @@ function onState(msg) {
   if (msg.sessions) renderSessionList(msg.sessions);
   if (msg.windows) {
     renderWindowList(msg.windows);
-    const activeWin = msg.windows.find(w => w.active);
-    if (activeWin) currentWinIdx = activeWin.index;
+    updateCurrentWindow(msg.windows);
   }
   if (msg.panes)   renderPaneList(msg.panes, msg.active_pane);
+  if (msg.active_pane) {
+    if (panes[msg.active_pane]) {
+      setActivePaneVisual(msg.active_pane);
+    } else {
+      activePaneId = msg.active_pane;
+    }
+  }
 }
 
 function onCurrentViewChanged(msg) {
@@ -387,11 +401,15 @@ function onPaneModeChanged(msg) {
   if (paneId) {
     markSnapshotPending([paneId]);
     scheduleSnapshotRefresh([paneId]);
+    if (paneId === activePaneId) {
+      focusActivePane({ defer: true, retries: 2 });
+    }
   }
 }
 
 function onWindowPaneChanged(msg) {
   if (msg.pane) setActivePaneVisual(msg.pane);
+  focusActivePane({ defer: true, retries: 3 });
   scheduleStateRefresh();
 }
 
@@ -401,8 +419,7 @@ function onInit(msg) {
   renderSessionList(msg.sessions);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
-  const activeWin = msg.windows.find(w => w.active);
-  currentWinIdx = activeWin ? activeWin.index : 0;
+  updateCurrentWindow(msg.windows);
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
   scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
 }
@@ -413,8 +430,7 @@ function onWindowSwitched(msg) {
   renderSessionList(msg.sessions);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
-  const activeWin = msg.windows.find(w => w.active);
-  currentWinIdx = activeWin ? activeWin.index : 0;
+  updateCurrentWindow(msg.windows);
   destroyAllPanes();
   markSnapshotPending((msg.panes || []).map(p => p.id));
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
@@ -446,11 +462,15 @@ function onOutput(msg) {
 function onLayoutChange(msg) {
   if (!msg.layout) return;
 
-  // target = "session:window_idx" — only handle the current window
+  // tmux may send either "session:window_idx" or a window id such as "@42".
   if (msg.target) {
-    const parts = msg.target.split(':');
-    const winIdx = parts.length > 1 ? parseInt(parts[1], 10) : -1;
-    if (!isNaN(winIdx) && winIdx !== currentWinIdx) return;
+    if (msg.target.startsWith('@')) {
+      if (currentWinId && msg.target !== currentWinId) return;
+    } else {
+      const parts = msg.target.split(':');
+      const winIdx = parts.length > 1 ? parseInt(parts[1], 10) : NaN;
+      if (!isNaN(winIdx) && winIdx !== currentWinIdx) return;
+    }
   }
 
   const lp = parseLayout(msg.layout);
@@ -490,6 +510,8 @@ function onLayoutChange(msg) {
     scheduleSnapshotRefresh(newIds);
   }
 
+  focusActivePane({ defer: true, retries: 3 });
+
   // Refresh sidebar pane list (debounced) so commands etc. show up
   scheduleStateRefresh();
 }
@@ -507,7 +529,7 @@ function scheduleStateRefresh() {
 
 function onFocus(msg) {
   setActivePaneVisual(msg.pane);
-  focusActivePane();
+  focusActivePane({ defer: _layoutApplying, retries: 3 });
 }
 
 function onWindowsChanged(msg) {
@@ -624,6 +646,7 @@ function positionPanes(layoutPanes, layoutStr) {
       maybeSendResize(Math.floor(W / charW), Math.floor(H / charH));
     }
     _layoutApplying = false;
+    focusActivePane({ defer: true, retries: 2 });
   });
 }
 
@@ -645,6 +668,7 @@ function positionSinglePane(paneId) {
     try { p.fitAddon.fit(); } catch (e) { console.error('fit error:', e); }
     maybeSendResize(p.term.cols, p.term.rows);
     _layoutApplying = false;
+    focusActivePane({ defer: true, retries: 2 });
   }));
 }
 
@@ -727,16 +751,43 @@ function selectPane(paneId) {
   markClientActive();
   activePaneId = paneId;
   setActivePaneVisual(paneId);
-  panes[paneId]?.term.focus();
+  focusActivePane({ retries: 2 });
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'select_pane', pane: paneId }));
   }
 }
 
-function focusActivePane() {
-  const p = activePaneId && panes[activePaneId];
-  if (p) {
+function focusActivePane(opts) {
+  const options = opts || {};
+  const retries = Number.isInteger(options.retries) ? options.retries : 0;
+  const defer = !!options.defer;
+
+  const focusOnce = (remaining) => {
+    if (document.visibilityState === 'hidden') return;
+
+    let paneId = activePaneId;
+    if (!paneId || !panes[paneId]) {
+      paneId = Object.keys(panes)[0];
+      if (!paneId) return;
+      setActivePaneVisual(paneId);
+    }
+
+    const p = panes[paneId];
+    if (!p) return;
+
     try { p.term.focus(); } catch (_) {}
+
+    if (remaining <= 0) return;
+    const textarea = p.term && p.term.textarea;
+    if (!textarea || document.activeElement !== textarea) {
+      requestAnimationFrame(() => focusOnce(remaining - 1));
+    }
+  };
+
+  if (defer) {
+    requestAnimationFrame(() => focusOnce(retries));
+  } else {
+    focusOnce(retries);
   }
 }
 
