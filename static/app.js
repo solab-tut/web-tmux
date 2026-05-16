@@ -1,0 +1,955 @@
+'use strict';
+
+// WebSocket URL: when served over HTTPS (e.g. Tailscale serve), use wss://.
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8765`;
+const FONT_FAMILY = '"SF Mono", Menlo, "Cascadia Code", "Fira Code", monospace';
+const MOBILE_BP   = 768;
+
+const VIRTUAL_KEYS = {
+  esc:   '\x1b',
+  tab:   '\t',
+  enter: '\r',
+  up:    '\x1b[A',
+  down:  '\x1b[B',
+  left:  '\x1b[D',
+  right: '\x1b[C',
+};
+
+const XTERM_THEME = {
+  background:  '#1e1e1e',
+  foreground:  '#d4d4d4',
+  cursor:      '#aeafad',
+  black:       '#1e1e1e', brightBlack:   '#808080',
+  red:         '#f44747', brightRed:     '#f44747',
+  green:       '#608b4e', brightGreen:   '#608b4e',
+  yellow:      '#dcdcaa', brightYellow:  '#dcdcaa',
+  blue:        '#569cd6', brightBlue:    '#569cd6',
+  magenta:     '#c586c0', brightMagenta: '#c586c0',
+  cyan:        '#4ec9b0', brightCyan:    '#4ec9b0',
+  white:       '#d4d4d4', brightWhite:   '#d4d4d4',
+};
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+let ws             = null;
+let panes          = {};     // pane_id → { term, fitAddon, el }
+let activePaneId   = null;
+let currentWinIdx  = 0;      // tmux window index currently displayed
+let totalCols      = 80;
+let totalRows      = 24;
+
+// Remembered layout — used by the window-resize handler to re-flow panes
+let _currentLayoutStr   = '';
+let _currentLayoutPanes = [];
+
+// Debounce: prevent positionPanes from being called too frequently
+let _layoutRafId   = null;
+let _pendingLayout = null;
+
+function scheduleLayout(lp, layoutStr) {
+  _pendingLayout = { lp, layoutStr };
+  if (_layoutRafId) cancelAnimationFrame(_layoutRafId);
+  _layoutRafId = requestAnimationFrame(() => {
+    _layoutRafId = null;
+    if (_pendingLayout) {
+      positionPanes(_pendingLayout.lp, _pendingLayout.layoutStr);
+      _pendingLayout = null;
+    }
+  });
+}
+
+// Only the active tab/device should drive tmux's real size. This matters when a
+// phone and desktop are both open: tmux has one shared window size.
+let _clientActive = false;
+let _resizeSendTimer = null;
+let _pendingResize = null;
+let _snapshotRefreshTimer = null;
+let _layoutApplying = false;
+const _pendingSnapshotPanes = new Set();
+const _bufferedPaneOutput = new Map();
+let _lastViewportSize = { width: 0, height: 0 };
+const TMUX_COL_SAFETY_MARGIN = 1;
+
+function markClientActive() {
+  _clientActive = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'client_active' }));
+  }
+}
+
+function refitCurrentLayout() {
+  resetResizeCache();
+  if (_currentLayoutPanes.length === 1) {
+    positionSinglePane('%' + _currentLayoutPanes[0].id);
+  } else if (_currentLayoutPanes.length > 1) {
+    scheduleLayout(_currentLayoutPanes, _currentLayoutStr);
+  }
+}
+
+function activateClient() {
+  markClientActive();
+  refitCurrentLayout();
+}
+
+function validResize(cols, rows) {
+  return Number.isFinite(cols) && Number.isFinite(rows) && cols >= 10 && rows >= 5;
+}
+
+// Only send resize when the size actually changed (avoids feedback loops)
+let _lastResize = { cols: 0, rows: 0 };
+function maybeSendResize(cols, rows) {
+  cols = Math.floor(cols) - TMUX_COL_SAFETY_MARGIN;
+  rows = Math.floor(rows);
+  if (cols < 10) cols = 10;
+  if (!_clientActive || document.visibilityState === 'hidden') return;
+  if (!validResize(cols, rows)) return;
+  if (cols === _lastResize.cols && rows === _lastResize.rows) {
+    if (_pendingSnapshotPanes.size > 0) {
+      scheduleSnapshotRefresh([..._pendingSnapshotPanes]);
+    }
+    return;
+  }
+  _pendingResize = { cols, rows };
+  if (_resizeSendTimer) clearTimeout(_resizeSendTimer);
+  _resizeSendTimer = setTimeout(() => {
+    _resizeSendTimer = null;
+    if (!_pendingResize) return;
+    const next = _pendingResize;
+    _pendingResize = null;
+    if (next.cols === _lastResize.cols && next.rows === _lastResize.rows) {
+      if (_pendingSnapshotPanes.size > 0) {
+        scheduleSnapshotRefresh([..._pendingSnapshotPanes]);
+      }
+      return;
+    }
+    if (!_clientActive || document.visibilityState === 'hidden') return;
+    _lastResize = next;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols: next.cols, rows: next.rows }));
+      if (_pendingSnapshotPanes.size > 0) {
+        scheduleSnapshotRefresh([..._pendingSnapshotPanes]);
+      }
+    }
+  }, 80);
+}
+function resetResizeCache() { _lastResize = { cols: 0, rows: 0 }; }
+
+function scheduleSnapshotRefresh(paneIds) {
+  const ids = paneIds && paneIds.length ? [...paneIds] : Object.keys(panes);
+  if (_snapshotRefreshTimer) clearTimeout(_snapshotRefreshTimer);
+  _snapshotRefreshTimer = setTimeout(() => {
+    _snapshotRefreshTimer = null;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ids.forEach((paneId) => {
+      if (!panes[paneId]) return;
+      _pendingSnapshotPanes.add(paneId);
+      ws.send(JSON.stringify({ type: 'get_snapshot', pane: paneId }));
+    });
+  }, 260);
+}
+
+function markSnapshotPending(paneIds) {
+  (paneIds || []).forEach((paneId) => {
+    if (paneId) _pendingSnapshotPanes.add(paneId);
+  });
+}
+
+function queuePaneOutput(paneId, data) {
+  if (!paneId || !data || data.length === 0) return;
+  const queued = _bufferedPaneOutput.get(paneId);
+  if (queued) {
+    queued.push(data);
+  } else {
+    _bufferedPaneOutput.set(paneId, [data]);
+  }
+}
+
+function drainBufferedOutput(paneId) {
+  const p = panes[paneId];
+  if (!p) {
+    _bufferedPaneOutput.delete(paneId);
+    _pendingSnapshotPanes.delete(paneId);
+    return;
+  }
+  const queued = _bufferedPaneOutput.get(paneId);
+  if (!queued || queued.length === 0) {
+    _bufferedPaneOutput.delete(paneId);
+    _pendingSnapshotPanes.delete(paneId);
+    return;
+  }
+  _bufferedPaneOutput.delete(paneId);
+  const data = queued.length === 1 ? queued[0] : concatBytes(queued);
+  p.term.write(data, () => drainBufferedOutput(paneId));
+}
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    if (document.visibilityState !== 'hidden') {
+      markClientActive();
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected');
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => setStatus('disconnected');
+
+  ws.onmessage = (ev) => {
+    try { handleMsg(JSON.parse(ev.data)); }
+    catch (e) { console.error('parse error', e); }
+  };
+}
+
+// ─── Message handlers ─────────────────────────────────────────────────────────
+
+function handleMsg(msg) {
+  switch (msg.type) {
+    case 'init':            onInit(msg);           break;
+    case 'window_switched': onWindowSwitched(msg); break;
+    case 'snapshot':        onSnapshot(msg);        break;
+    case 'output':          onOutput(msg);          break;
+    case 'layout_change':   onLayoutChange(msg);   break;
+    case 'focus':           onFocus(msg);           break;
+    case 'window_add':
+    case 'window_close':
+    case 'window_renamed':  onWindowsChanged(msg); break;
+    case 'sessions_changed': onSessionsChanged(msg); break;
+    case 'state':           onState(msg);          break;
+  }
+}
+
+function onState(msg) {
+  if (msg.session) document.getElementById('session-name').textContent = msg.session;
+  if (msg.sessions) renderSessionList(msg.sessions);
+  if (msg.windows) {
+    renderWindowList(msg.windows);
+    const activeWin = msg.windows.find(w => w.active);
+    if (activeWin) currentWinIdx = activeWin.index;
+  }
+  if (msg.panes)   renderPaneList(msg.panes, msg.active_pane);
+}
+
+function onInit(msg) {
+  resetResizeCache();
+  document.getElementById('session-name').textContent = msg.session;
+  renderSessionList(msg.sessions);
+  renderWindowList(msg.windows);
+  renderPaneList(msg.panes, msg.active_pane);
+  const activeWin = msg.windows.find(w => w.active);
+  currentWinIdx = activeWin ? activeWin.index : 0;
+  applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
+}
+
+function onWindowSwitched(msg) {
+  resetResizeCache();   // new window → terminal size may differ
+  if (msg.session) document.getElementById('session-name').textContent = msg.session;
+  renderSessionList(msg.sessions);
+  renderWindowList(msg.windows);
+  renderPaneList(msg.panes, msg.active_pane);
+  const activeWin = msg.windows.find(w => w.active);
+  currentWinIdx = activeWin ? activeWin.index : 0;
+  destroyAllPanes();
+  markSnapshotPending((msg.panes || []).map(p => p.id));
+  applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
+}
+
+function onSnapshot(msg) {
+  const p = panes[msg.pane];
+  if (!p) {
+    _bufferedPaneOutput.delete(msg.pane);
+    _pendingSnapshotPanes.delete(msg.pane);
+    return;
+  }
+  const frame = buildSnapshotFrame(msg, p.term);
+  try { p.term.reset(); } catch (_) {}
+  p.term.write(frame, () => drainBufferedOutput(msg.pane));
+}
+
+function onOutput(msg) {
+  const p = panes[msg.pane];
+  const data = b64ToUint8(msg.data);
+  if (_pendingSnapshotPanes.has(msg.pane)) {
+    queuePaneOutput(msg.pane, data);
+    return;
+  }
+  if (p) p.term.write(data);
+}
+
+function onLayoutChange(msg) {
+  if (!msg.layout) return;
+
+  // target = "session:window_idx" — only handle the current window
+  if (msg.target) {
+    const parts = msg.target.split(':');
+    const winIdx = parts.length > 1 ? parseInt(parts[1], 10) : -1;
+    if (!isNaN(winIdx) && winIdx !== currentWinIdx) return;
+  }
+
+  const lp = parseLayout(msg.layout);
+  if (lp.length === 0) return;
+  _currentLayoutStr   = msg.layout;
+  _currentLayoutPanes = lp;
+
+  // Pane IDs now in layout
+  const layoutIds = new Set(lp.map(p => '%' + p.id));
+
+  // Destroy panes that disappeared
+  Object.keys(panes).forEach(id => {
+    if (!layoutIds.has(id)) destroyPane(id);
+  });
+
+  // Create panes that are new
+  const newIds = [];
+  lp.forEach(({ id, cols, rows }) => {
+    const pid = '%' + id;
+    if (!panes[pid]) {
+      ensurePane(pid, cols, rows);
+      newIds.push(pid);
+    }
+  });
+
+  // Reposition — debounced to avoid rapid flickering
+  if (lp.length === 1) {
+    _layoutApplying = true;
+    positionSinglePane('%' + lp[0].id);
+  } else {
+    _layoutApplying = true;
+    scheduleLayout(lp, msg.layout);
+  }
+
+  if (newIds.length > 0) markSnapshotPending(newIds);
+
+  // Refresh sidebar pane list (debounced) so commands etc. show up
+  scheduleStateRefresh();
+}
+
+let _stateRefreshTimer = null;
+function scheduleStateRefresh() {
+  if (_stateRefreshTimer) clearTimeout(_stateRefreshTimer);
+  _stateRefreshTimer = setTimeout(() => {
+    _stateRefreshTimer = null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'get_state' }));
+    }
+  }, 250);
+}
+
+function onFocus(msg) {
+  setActivePaneVisual(msg.pane);
+  focusActivePane();
+}
+
+function onWindowsChanged(msg) {
+  // tmux control notifications only include the target/name, not the full
+  // sidebar model, so ask the server for a fresh windows/panes snapshot.
+  scheduleStateRefresh();
+  if (msg.sessions) renderSessionList(msg.sessions);
+  if (msg.windows) renderWindowList(msg.windows);
+}
+
+function onSessionsChanged(msg) {
+  scheduleStateRefresh();
+  if (msg.sessions) renderSessionList(msg.sessions);
+}
+
+// ─── Layout ───────────────────────────────────────────────────────────────────
+
+function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
+  _layoutApplying = true;
+  markSnapshotPending((panesInfo || []).map(p => p.id));
+  const lp = layoutPanes && layoutPanes.length > 0 ? layoutPanes : null;
+  _currentLayoutStr   = layoutStr || '';
+  _currentLayoutPanes = lp || [];
+
+  // Create pane elements first (they're hidden via mobile CSS until .active is set)
+  if (!lp) {
+    if (panesInfo && panesInfo.length > 0) {
+      ensurePane(panesInfo[0].id, panesInfo[0].cols, panesInfo[0].rows);
+    }
+  } else {
+    lp.forEach(({ id, cols, rows }) => ensurePane('%' + id, cols, rows));
+  }
+
+  // IMPORTANT: mark the active pane BEFORE positioning, so the `.active`
+  // class makes the element visible (mobile CSS hides non-active panes).
+  // Otherwise fit() would measure a `display: none` element as 0×0.
+  setActivePaneVisual(activePane);
+  if (activePane && panes[activePane]) {
+    activePaneId = activePane;
+    panes[activePane].term.focus();
+  }
+
+  // Now position; fit() will see the active pane at its real container size.
+  if (!lp) {
+    if (panesInfo && panesInfo.length > 0) {
+      positionSinglePane(panesInfo[0].id);
+    } else {
+      _layoutApplying = false;
+    }
+  } else if (lp.length === 1) {
+    positionSinglePane('%' + lp[0].id);
+  } else {
+    scheduleLayout(lp, layoutStr);
+  }
+}
+
+function positionPanes(layoutPanes, layoutStr) {
+  applyViewportFix();   // pin #app to real viewport height before measuring
+  const area = document.getElementById('pane-area');
+  const W = area.clientWidth;
+  const H = area.clientHeight;
+  if (!W || !H) {
+    _layoutApplying = false;
+    return;
+  }
+
+  const m = layoutStr && layoutStr.match(/,(\d+)x(\d+),/);
+  if (m) { totalCols = +m[1]; totalRows = +m[2]; }
+
+  const cellW = totalCols > 0 ? W / totalCols : 10;
+  const cellH = totalRows > 0 ? H / totalRows : 20;
+
+  // Set container pixel sizes proportional to tmux layout
+  layoutPanes.forEach(({ id, x, y, cols, rows }) => {
+    const pid = '%' + id;
+    const p = panes[pid];
+    if (!p) return;
+    p.el.style.left   = `${x * cellW}px`;
+    p.el.style.top    = `${y * cellH}px`;
+    p.el.style.width  = `${cols * cellW}px`;
+    p.el.style.height = `${rows * cellH}px`;
+  });
+
+  // After CSS is painted: fit every pane to its container using fitAddon.
+  // fitAddon computes the exact cols/rows that fill the pixel area without
+  // overflow — no manual ratio needed, no term.resize() override needed.
+  // We send maybeSendResize so tmux's layout converges to the browser's size.
+  requestAnimationFrame(() => {
+    let charW = 0, charH = 0;
+
+    // Fit all panes; measure char dimensions from the largest one
+    const refLp = layoutPanes.reduce((best, lp) =>
+      lp.cols * lp.rows > best.cols * best.rows ? lp : best, layoutPanes[0]);
+
+    layoutPanes.forEach(({ id }) => {
+      const pid = '%' + id;
+      const p = panes[pid];
+      if (!p) return;
+      try { p.fitAddon.fit(); } catch (_) {}
+      if (pid === '%' + refLp.id && p.term.cols > 0) {
+        charW = p.el.clientWidth  / p.term.cols;
+        charH = p.el.clientHeight / p.term.rows;
+      }
+    });
+
+    // Tell tmux the total terminal dimensions derived from actual char size.
+    // The server's resize-master guard ensures only one tab does this.
+    if (charW > 0 && charH > 0) {
+      maybeSendResize(Math.floor(W / charW), Math.floor(H / charH));
+    }
+    _layoutApplying = false;
+  });
+}
+
+function positionSinglePane(paneId) {
+  applyViewportFix();   // pin #app to real viewport height before measuring
+  const p = panes[paneId];
+  if (!p) {
+    _layoutApplying = false;
+    return;
+  }
+  p.el.style.left   = '0';
+  p.el.style.top    = '0';
+  p.el.style.width  = '100%';
+  p.el.style.height = '100%';
+  // Two rAFs: the first lets the CSS settle, the second runs after the next
+  // browser layout pass so el.clientWidth/Height is non-zero.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    applyViewportFix();   // re-pin after layout, in case URL bar moved
+    try { p.fitAddon.fit(); } catch (e) { console.error('fit error:', e); }
+    maybeSendResize(p.term.cols, p.term.rows);
+    _layoutApplying = false;
+  }));
+}
+
+// ─── Pane management ──────────────────────────────────────────────────────────
+
+function ensurePane(paneId, cols, rows) {
+  if (panes[paneId]) return;
+
+  const area = document.getElementById('pane-area');
+  const el = document.createElement('div');
+  el.className = 'pane-wrap';
+  el.dataset.paneId = paneId;
+  // Pre-size with a rough placeholder so term.open() doesn't open against a
+  // 0×0 element (which causes a one-frame flicker until positionPanes runs).
+  // ~8px char width, ~16px line height is a reasonable rough size.
+  el.style.width  = `${cols * 8}px`;
+  el.style.height = `${rows * 16}px`;
+  area.appendChild(el);
+
+  const term = new Terminal({
+    cols, rows,
+    fontFamily:  FONT_FAMILY,
+    fontSize:    13,
+    scrollback:  10000,
+    cursorBlink: true,
+    convertEol:  true,
+    theme:       XTERM_THEME,
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(el);
+
+  // Send keyboard input to the active pane only.
+  // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
+  term.onData((data) => {
+    markClientActive();
+    const sendData = applyCtrlModifier(data);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', pane: activePaneId || paneId, data: sendData }));
+    }
+  });
+
+  // Click to focus this pane
+  el.addEventListener('mousedown', () => selectPane(paneId));
+
+  panes[paneId] = { term, fitAddon, el };
+}
+
+function destroyPane(paneId) {
+  const p = panes[paneId];
+  if (!p) return;
+  p.term.dispose();
+  p.el.remove();
+  delete panes[paneId];
+  _bufferedPaneOutput.delete(paneId);
+  _pendingSnapshotPanes.delete(paneId);
+  if (activePaneId === paneId) activePaneId = null;
+}
+
+function destroyAllPanes() {
+  Object.keys(panes).forEach(destroyPane);
+}
+
+function selectPane(paneId) {
+  markClientActive();
+  activePaneId = paneId;
+  setActivePaneVisual(paneId);
+  panes[paneId]?.term.focus();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'select_pane', pane: paneId }));
+  }
+}
+
+function focusActivePane() {
+  const p = activePaneId && panes[activePaneId];
+  if (p) {
+    try { p.term.focus(); } catch (_) {}
+  }
+}
+
+function setActivePaneVisual(paneId) {
+  if (!paneId) return;
+  activePaneId = paneId;
+  for (const [id, p] of Object.entries(panes)) {
+    p.el.classList.toggle('active', id === paneId);
+  }
+  // On mobile, the active pane fills the screen — refit it to the new size
+  if (isMobileWidth() && !_layoutApplying) {
+    const p = panes[paneId];
+    if (p) {
+      requestAnimationFrame(() => {
+        try { p.fitAddon.fit(); } catch (_) {}
+        maybeSendResize(p.term.cols, p.term.rows);
+      });
+    }
+  }
+}
+
+// ─── Window list ──────────────────────────────────────────────────────────────
+
+function renderWindowList(windows) {
+  const list = document.getElementById('window-list');
+  list.innerHTML = '';
+  windows.forEach((w) => {
+    const div = document.createElement('div');
+    div.className = 'window-item' + (w.active ? ' active' : '');
+    div.innerHTML =
+      `<span class="window-idx">${w.index}</span>` +
+      `<span class="window-name">${escHtml(w.name)}</span>`;
+    div.addEventListener('click', () => {
+      switchWindow(w.index);
+      if (isMobileWidth()) setSidebarOpen(false);
+      focusActivePane();
+    });
+    list.appendChild(div);
+  });
+}
+
+function renderSessionList(sessions) {
+  const list = document.getElementById('session-list');
+  list.innerHTML = '';
+  (sessions || []).forEach((s) => {
+    const div = document.createElement('div');
+    div.className = 'session-item' + (s.active ? ' active' : '');
+    div.innerHTML =
+      `<span class="window-idx">${escHtml(s.name)}</span>` +
+      `<span class="window-name">${s.windows} window${s.windows === 1 ? '' : 's'}</span>`;
+    div.title = s.attached ? 'attached' : 'detached';
+    div.addEventListener('click', () => {
+      selectSession(s.name);
+      if (isMobileWidth()) setSidebarOpen(false);
+      focusActivePane();
+    });
+    list.appendChild(div);
+  });
+}
+
+function renderPaneList(panesInfo, activePane) {
+  const list = document.getElementById('pane-list');
+  list.innerHTML = '';
+  (panesInfo || []).forEach((p) => {
+    const div = document.createElement('div');
+    const isActive = p.active || p.id === activePane;
+    div.className = 'pane-item' + (isActive ? ' active' : '');
+    div.innerHTML =
+      `<span class="pane-id">${escHtml(p.id)}</span>` +
+      `<span class="pane-cmd">${escHtml(p.command || '')}</span>`;
+    div.addEventListener('click', () => {
+      selectPane(p.id);
+      if (isMobileWidth()) setSidebarOpen(false);
+      focusActivePane();
+    });
+    list.appendChild(div);
+  });
+}
+
+function switchWindow(idx) {
+  markClientActive();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'select_window', window: idx }));
+  }
+}
+
+function selectSession(name) {
+  markClientActive();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'select_session', session: name }));
+  }
+}
+
+// ─── Sidebar action buttons ───────────────────────────────────────────────────
+
+function wsSendType(type, extra) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  markClientActive();
+  ws.send(JSON.stringify({ type, ...(extra || {}) }));
+}
+
+document.getElementById('btn-new-window').addEventListener('click', () => {
+  wsSendType('new_window');
+  focusActivePane();
+});
+document.getElementById('btn-new-session').addEventListener('click', () => {
+  wsSendType('new_session');
+  focusActivePane();
+});
+document.getElementById('btn-split-h').addEventListener('click', () => {
+  wsSendType('split_window', { direction: 'h', pane: activePaneId || '' });
+  focusActivePane();
+});
+document.getElementById('btn-split-v').addEventListener('click', () => {
+  wsSendType('split_window', { direction: 'v', pane: activePaneId || '' });
+  focusActivePane();
+});
+
+// ─── Browser window resize ────────────────────────────────────────────────────
+
+let _resizeDebounce = null;
+
+window.addEventListener('resize', () => {
+  // Debounce: many resize events fire during a drag — collapse to one.
+  if (_resizeDebounce) clearTimeout(_resizeDebounce);
+  _resizeDebounce = setTimeout(() => {
+    _resizeDebounce = null;
+    if (_currentLayoutPanes.length === 0) return;
+    if (_currentLayoutPanes.length === 1) {
+      positionSinglePane('%' + _currentLayoutPanes[0].id);
+    } else {
+      scheduleLayout(_currentLayoutPanes, _currentLayoutStr);
+    }
+  }, 100);
+});
+
+// ─── Layout string parser (client-side mirror of layout_parser.py) ────────────
+
+function parseLayout(layoutStr) {
+  const idx = layoutStr.indexOf(',');
+  if (idx < 0) return [];
+  const panes = [];
+  parseNode(layoutStr.slice(idx + 1), panes);
+  return panes;
+}
+
+function parseNode(s, out) {
+  const m = s.match(/^(\d+)x(\d+),(\d+),(\d+)(.*)/);
+  if (!m) return;
+  const [, cols, rows, x, y, rest] = m;
+  if (rest[0] === ',') {
+    const numMatch = rest.slice(1).match(/^(\d+)/);
+    if (numMatch) out.push({ id: +numMatch[1], x: +x, y: +y, cols: +cols, rows: +rows });
+  } else if (rest[0] === '{' || rest[0] === '[') {
+    const inner = extractBracket(rest);
+    splitChildren(inner).forEach(child => parseNode(child, out));
+  }
+}
+
+function extractBracket(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ('{['.includes(s[i])) depth++;
+    else if ('}]'.includes(s[i])) { depth--; if (depth === 0) return s.slice(1, i); }
+  }
+  return s.slice(1);
+}
+
+function splitChildren(s) {
+  const parts = [], re = /^\d+x\d+/;
+  let depth = 0, start = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ('{['.includes(s[i])) depth++;
+    else if ('}]'.includes(s[i])) depth--;
+    else if (s[i] === ',' && depth === 0 && re.test(s.slice(i + 1))) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function b64ToUint8(b64) {
+  const bin = atob(b64);
+  const u8  = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+
+const _asciiEncoder = new TextEncoder();
+
+function clamp(n, min, max) {
+  return Math.min(Math.max(n, min), max);
+}
+
+function asciiBytes(s) {
+  return _asciiEncoder.encode(s);
+}
+
+function concatBytes(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  parts.forEach((part) => {
+    out.set(part, offset);
+    offset += part.length;
+  });
+  return out;
+}
+
+function splitSnapshotLines(data) {
+  const lines = [];
+  let start = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 0x0a) continue;
+    let end = i;
+    if (end > start && data[end - 1] === 0x0d) end -= 1;
+    lines.push(data.slice(start, end));
+    start = i + 1;
+  }
+  if (start <= data.length) {
+    let end = data.length;
+    if (end > start && data[end - 1] === 0x0d) end -= 1;
+    lines.push(data.slice(start, end));
+  }
+  return lines;
+}
+
+function buildSnapshotFrame(msg, term) {
+  const lines = splitSnapshotLines(b64ToUint8(msg.data || ''));
+  const paneRows = Math.max(1, msg.pane_rows || term.rows || lines.length || 1);
+  const paneCols = Math.max(1, msg.pane_cols || term.cols || 1);
+  const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
+  const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
+
+  const parts = [asciiBytes('\x1b[?25l\x1b[H\x1b[2J')];
+  for (let i = 0; i < paneRows; i++) {
+    parts.push(asciiBytes(`\x1b[${i + 1};1H\x1b[2K`));
+    if (i < lines.length) parts.push(lines[i]);
+  }
+  parts.push(asciiBytes(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
+  return concatBytes(parts);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function setStatus(state) {
+  const el = document.getElementById('status');
+  el.className = state;
+  el.title     = state;
+}
+
+// ─── Sidebar drawer (hamburger) ───────────────────────────────────────────────
+
+function isMobileWidth() {
+  return window.innerWidth <= MOBILE_BP;
+}
+
+function setSidebarOpen(open) {
+  const sidebar  = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  sidebar.classList.toggle('open',   open);
+  sidebar.classList.toggle('closed', !open);
+  backdrop.classList.toggle('visible', open && isMobileWidth());
+}
+
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  setSidebarOpen(!sidebar.classList.contains('open'));
+}
+
+document.getElementById('hamburger').addEventListener('click', () => {
+  toggleSidebar();
+  focusActivePane();
+});
+document.getElementById('sidebar-backdrop').addEventListener('click', () => {
+  setSidebarOpen(false);
+  focusActivePane();
+});
+
+window.addEventListener('focus', activateClient);
+document.addEventListener('pointerdown', markClientActive, { passive: true });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    _clientActive = false;
+  } else if (document.hasFocus()) {
+    activateClient();
+  }
+});
+
+// Initial state: open on desktop, closed on mobile
+setSidebarOpen(!isMobileWidth());
+
+// Re-evaluate sidebar visibility and pane layout on width crossing the breakpoint
+let _prevMobile = isMobileWidth();
+window.addEventListener('resize', () => {
+  const nowMobile = isMobileWidth();
+  if (nowMobile !== _prevMobile) {
+    setSidebarOpen(!nowMobile);
+    _prevMobile = nowMobile;
+    resetResizeCache();   // CSS mode swap — old _lastResize is stale
+
+    // Re-apply layout: refresh inline styles for all panes and refit.
+    if (_currentLayoutPanes.length === 1) {
+      positionSinglePane('%' + _currentLayoutPanes[0].id);
+    } else if (_currentLayoutPanes.length > 1) {
+      scheduleLayout(_currentLayoutPanes, _currentLayoutStr);
+    }
+    focusActivePane();
+  }
+});
+
+// ─── Bottom bar (virtual keys + Ctrl toggle) ──────────────────────────────────
+
+let _ctrlActive = false;
+
+function setCtrlActive(on) {
+  _ctrlActive = on;
+  document.getElementById('ctrl-toggle').classList.toggle('active', on);
+}
+
+function applyCtrlModifier(data) {
+  if (!_ctrlActive || data.length !== 1) return data;
+  const code = data.charCodeAt(0);
+  // A-Z / a-z / @ [ \ ] ^ _ → Ctrl+<key>
+  if (code >= 0x40 && code < 0x80) {
+    setCtrlActive(false);
+    return String.fromCharCode(code & 0x1f);
+  }
+  return data;
+}
+
+function sendVirtualKey(name) {
+  const data = VIRTUAL_KEYS[name];
+  if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
+  markClientActive();
+  const pane = activePaneId || Object.keys(panes)[0];
+  if (!pane) return;
+  ws.send(JSON.stringify({ type: 'input', pane, data }));
+}
+
+document.querySelectorAll('#bottombar .vkey').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    sendVirtualKey(btn.dataset.key);
+    focusActivePane();
+  });
+});
+
+document.getElementById('ctrl-toggle').addEventListener('click', () => {
+  markClientActive();
+  setCtrlActive(!_ctrlActive);
+  focusActivePane();
+});
+
+// ─── Soft keyboard / viewport handling (mobile) ───────────────────────────────
+// On iOS, `height: 100vh` returns the LARGEST possible viewport (URL bar hidden),
+// which is bigger than the actually visible area when the URL bar is showing.
+// We pin #app's height to visualViewport.height so the layout always fits the
+// real visible area — and re-fit the active terminal whenever that changes.
+
+function applyViewportFix() {
+  const vv  = window.visualViewport;
+  const app = document.getElementById('app');
+  if (!vv || !app) return;
+  const width = Math.round(vv.width);
+  const height = Math.round(vv.height);
+  const widthChanged = width !== _lastViewportSize.width;
+  const heightChanged = height !== _lastViewportSize.height;
+  _lastViewportSize = { width, height };
+  if (isMobileWidth()) {
+    app.style.height = `${vv.height}px`;
+    // Re-fit the active pane so xterm.js can resize to the new viewport,
+    // and inform tmux of the new dimensions so output formatting matches.
+    const p = activePaneId && panes[activePaneId];
+    if (p && !_layoutApplying && (widthChanged || heightChanged)) {
+      try { p.fitAddon.fit(); } catch (_) {}
+      if (widthChanged) maybeSendResize(p.term.cols, p.term.rows);
+    }
+  } else {
+    app.style.height = '';
+  }
+}
+
+(function setupViewportEvents() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  vv.addEventListener('resize', applyViewportFix);
+  window.addEventListener('resize', applyViewportFix);
+  applyViewportFix();
+})();
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+
+connect();

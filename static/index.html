@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>web-tmux</title>
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── Top Bar (always visible) ─────────────────────────── -->
+    <div id="topbar">
+      <button id="hamburger" type="button" aria-label="toggle sidebar">☰</button>
+      <div id="session-name">—</div>
+      <div id="topbar-spacer"></div>
+      <div id="status" class="disconnected" title="disconnected">●</div>
+    </div>
+
+    <!-- ── Middle: Sidebar + Pane Area ──────────────────────── -->
+    <div id="middle">
+      <div id="sidebar-backdrop"></div>
+      <div id="sidebar">
+        <div class="side-section">
+          <div class="side-head">
+            <span>sessions</span>
+          </div>
+          <div id="session-list"></div>
+        </div>
+        <div class="side-section">
+          <div class="side-head">
+            <span>windows</span>
+            <button class="side-btn" id="btn-new-window" title="new window">+</button>
+          </div>
+          <div id="window-list"></div>
+        </div>
+        <div class="side-section">
+          <div class="side-head">
+            <span>panes</span>
+            <button class="side-btn" id="btn-split-h" title="split horizontally">⇿</button>
+            <button class="side-btn" id="btn-split-v" title="split vertically">⇕</button>
+          </div>
+          <div id="pane-list"></div>
+        </div>
+        <div class="side-section side-footer">
+          <button class="side-btn wide" id="btn-new-session">+ new session</button>
+        </div>
+      </div>
+      <div id="main">
+        <div id="pane-area"></div>
+      </div>
+    </div>
+
+    <!-- ── Bottom Bar (≤768px width only) ───────────────────── -->
+    <div id="bottombar">
+      <button class="vkey" data-key="esc"   type="button">Esc</button>
+      <button class="vkey" data-key="tab"   type="button">Tab</button>
+      <button class="vkey" data-key="enter" type="button">Enter</button>
+      <button id="ctrl-toggle" type="button">Ctrl</button>
+      <button class="vkey" data-key="up"    type="button">↑</button>
+      <button class="vkey" data-key="down"  type="button">↓</button>
+      <button class="vkey" data-key="left"  type="button">←</button>
+      <button class="vkey" data-key="right" type="button">→</button>
+    </div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
