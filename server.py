@@ -88,13 +88,13 @@ async def _run_tmux(*args: str) -> int:
 
 
 async def _run_tmux_size_safe(*args: str) -> int:
-    # tmux 3.6a exits the control-mode client when windows/sessions are created
-    # while window-size=manual. Temporarily use latest for the mutating command.
+    # Keep window-size=latest so the active control client size is reflected in
+    # the current window. Reassert it around mutating commands for tmux 3.6a.
     await _run_tmux('set-option', '-g', 'window-size', 'latest')
     try:
         return await _run_tmux(*args)
     finally:
-        await _run_tmux('set-option', '-g', 'window-size', 'manual')
+        await _run_tmux('set-option', '-g', 'window-size', 'latest')
 
 
 # ──────────────────────────────────────────── HTTP (static files, background thread)
@@ -172,7 +172,7 @@ async def _handle_msg(websocket, msg: dict) -> None:
         cols = int(msg.get('cols', 80))
         rows = int(msg.get('rows', 24))
         log.info('resize request cols=%d rows=%d', cols, rows)
-        await tmux.send_command(f'refresh-client -C {cols},{rows}')
+        await tmux.send_command(f'refresh-client -C {cols}x{rows}')
 
     elif t == 'new_window':
         await _run_tmux_size_safe('new-window', '-t', tmux.session)

@@ -17,10 +17,17 @@ import json
 import logging
 import os
 import pty
+import re
 import struct
 import termios
 
 log = logging.getLogger(__name__)
+
+_ZSH_EOL_MARK_RE = re.compile(
+    br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *\r ?\r'
+)
+_ZSH_EOL_MARK_PREFIX = b'\x1b[1m\x1b[7m'
+_ZSH_EOL_MARK_SUFFIX = b'\x1b[27m\x1b[1m\x1b[0m'
 
 
 def _decode_output(s: str) -> bytes:
@@ -63,6 +70,66 @@ def _decode_output(s: str) -> bytes:
     return b''.join(out)
 
 
+def _strip_zsh_eol_marks(data: bytes) -> bytes:
+    return _ZSH_EOL_MARK_RE.sub(b'', data)
+
+
+def _split_clean_output(data: bytes) -> tuple[bytes, bytes]:
+    """Strip zsh's prompt EOL mark while tolerating chunked tmux output."""
+    out = bytearray()
+    i = 0
+    prefix_len = len(_ZSH_EOL_MARK_PREFIX)
+    suffix_len = len(_ZSH_EOL_MARK_SUFFIX)
+
+    while i < len(data):
+        if not data.startswith(_ZSH_EOL_MARK_PREFIX, i):
+            out.append(data[i])
+            i += 1
+            continue
+
+        symbol_idx = i + prefix_len
+        if symbol_idx >= len(data):
+            break
+        if data[symbol_idx] not in (ord('%'), ord('#')):
+            out.append(data[i])
+            i += 1
+            continue
+
+        suffix_idx = symbol_idx + 1
+        if suffix_idx + suffix_len > len(data):
+            break
+        if not data.startswith(_ZSH_EOL_MARK_SUFFIX, suffix_idx):
+            out.append(data[i])
+            i += 1
+            continue
+
+        j = suffix_idx + suffix_len
+        while j < len(data) and data[j] == 0x20:
+            j += 1
+        if j >= len(data):
+            break
+        if data[j] != 0x0d:
+            out.append(data[i])
+            i += 1
+            continue
+
+        j += 1
+        if j >= len(data):
+            break
+        if data[j] == 0x20:
+            j += 1
+            if j >= len(data):
+                break
+        if data[j] != 0x0d:
+            out.append(data[i])
+            i += 1
+            continue
+
+        i = j + 1
+
+    return bytes(out), data[i:]
+
+
 class TmuxControl:
     def __init__(self, session: str = 'web'):
         self.session    = session
@@ -75,6 +142,7 @@ class TmuxControl:
         self._in_resp: bool = False
         self._restart_lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
+        self._output_remainder: dict[str, bytes] = {}
 
     # ──────────────────────────────────────── lifecycle
 
@@ -85,7 +153,7 @@ class TmuxControl:
         async with self._restart_lock:
             await self._cleanup_client()
             await self._ensure_session_exists()
-            await self._set_window_size_mode('manual')
+            await self._set_window_size_mode('latest')
             await self._attach_control_client()
 
     async def _ensure_session_exists(self) -> None:
@@ -162,6 +230,7 @@ class TmuxControl:
         self._buf = ''
         self._cur_resp = []
         self._in_resp = False
+        self._output_remainder = {}
         while self._pending:
             fut = self._pending.pop(0)
             if not fut.done():
@@ -248,7 +317,7 @@ class TmuxControl:
     async def capture_pane(self, pane_id: str) -> bytes:
         raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
         # Response content uses the same vis(3) encoding as %output data.
-        return _decode_output(raw)
+        return _strip_zsh_eol_marks(_decode_output(raw))
 
     async def get_pane_cursor(self, pane_id: str) -> dict:
         raw = await self.send_command(
@@ -354,7 +423,14 @@ class TmuxControl:
             parts = line.split(' ', 2)
             if len(parts) >= 3:
                 pane_id = parts[1]
-                data    = _decode_output(parts[2])
+                raw_data = self._output_remainder.get(pane_id, b'') + _decode_output(parts[2])
+                data, remainder = _split_clean_output(raw_data)
+                if remainder:
+                    self._output_remainder[pane_id] = remainder
+                elif pane_id in self._output_remainder:
+                    del self._output_remainder[pane_id]
+                if not data:
+                    return
                 self._broadcast({
                     'type': 'output',
                     'pane': pane_id,
