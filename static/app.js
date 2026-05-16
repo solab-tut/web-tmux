@@ -134,6 +134,20 @@ function maybeSendResize(cols, rows) {
 }
 function resetResizeCache() { _lastResize = { cols: 0, rows: 0 }; }
 
+function getActivePane() {
+  if (activePaneId && panes[activePaneId]) return panes[activePaneId];
+  const firstPaneId = Object.keys(panes)[0];
+  return firstPaneId ? panes[firstPaneId] : null;
+}
+
+function sendPaneInput(data, paneId) {
+  if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const targetPaneId = paneId || activePaneId || Object.keys(panes)[0];
+  if (!targetPaneId) return;
+  markClientActive();
+  ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data }));
+}
+
 function scheduleSnapshotRefresh(paneIds) {
   const ids = paneIds && paneIds.length ? [...paneIds] : Object.keys(panes);
   if (_snapshotRefreshTimer) clearTimeout(_snapshotRefreshTimer);
@@ -501,27 +515,32 @@ function ensurePane(paneId, cols, rows) {
     fontSize:    13,
     scrollback:  10000,
     cursorBlink: true,
-    convertEol:  true,
+    scrollOnUserInput: true,
+    smoothScrollDuration: 80,
     theme:       XTERM_THEME,
   });
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(el);
+  if (term.textarea) {
+    term.textarea.setAttribute('autocapitalize', 'none');
+    term.textarea.setAttribute('autocomplete', 'off');
+    term.textarea.setAttribute('autocorrect', 'off');
+    term.textarea.setAttribute('spellcheck', 'false');
+    term.textarea.setAttribute('enterkeyhint', 'enter');
+    term.textarea.style.fontSize = '16px';
+  }
 
   // Send keyboard input to the active pane only.
   // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
   term.onData((data) => {
-    markClientActive();
     const sendData = applyCtrlModifier(data);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', pane: activePaneId || paneId, data: sendData }));
-    }
+    sendPaneInput(sendData, activePaneId || paneId);
   });
 
   // Click to focus this pane
   el.addEventListener('mousedown', () => selectPane(paneId));
-
   panes[paneId] = { term, fitAddon, el };
 }
 
@@ -893,24 +912,137 @@ function applyCtrlModifier(data) {
 
 function sendVirtualKey(name) {
   const data = VIRTUAL_KEYS[name];
-  if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
-  markClientActive();
-  const pane = activePaneId || Object.keys(panes)[0];
-  if (!pane) return;
-  ws.send(JSON.stringify({ type: 'input', pane, data }));
+  if (!data) return;
+  sendPaneInput(data);
 }
+
+function scrollActivePaneHalfPage(direction) {
+  const pane = getActivePane();
+  if (!pane) return;
+  const delta = Math.max(1, Math.floor(pane.term.rows / 2)) * direction;
+  pane.term.scrollLines(delta);
+}
+
+function hideSoftwareKeyboard() {
+  const pane = getActivePane();
+  if (pane) {
+    try { pane.term.blur(); } catch (_) {}
+  }
+  const activeEl = document.activeElement;
+  if (activeEl && typeof activeEl.blur === 'function') {
+    try { activeEl.blur(); } catch (_) {}
+  }
+}
+
+function getActivePaneViewportText() {
+  const pane = getActivePane();
+  if (!pane) return '';
+  const buffer = pane.term.buffer.active;
+  const start = Math.max(0, buffer.viewportY);
+  const end = Math.min(buffer.length, start + pane.term.rows);
+  const lines = [];
+  for (let i = start; i < end; i++) {
+    const line = buffer.getLine(i);
+    if (!line) continue;
+    lines.push(line.translateToString(true));
+  }
+  return lines.join('\n');
+}
+
+function setClipboardSheetOpen(open) {
+  const sheet = document.getElementById('clipboard-sheet');
+  if (!sheet) return;
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function openClipboardSheet() {
+  const copyBox = document.getElementById('clipboard-copy-text');
+  const pasteBox = document.getElementById('clipboard-paste-text');
+  copyBox.value = getActivePaneViewportText();
+  pasteBox.value = '';
+  setClipboardSheetOpen(true);
+}
+
+function closeClipboardSheet() {
+  setClipboardSheetOpen(false);
+  focusActivePane();
+}
+
+async function copyClipboardSheetText() {
+  const copyBox = document.getElementById('clipboard-copy-text');
+  if (!copyBox.value) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(copyBox.value);
+      return;
+    } catch (_) {}
+  }
+  copyBox.focus();
+  copyBox.select();
+}
+
+function sendClipboardSheetPaste() {
+  const pasteBox = document.getElementById('clipboard-paste-text');
+  if (!pasteBox.value) {
+    closeClipboardSheet();
+    return;
+  }
+  sendPaneInput(pasteBox.value);
+  closeClipboardSheet();
+}
+
+function preserveKeyboardState(ev) {
+  // Keep virtual-key buttons from stealing focus away from xterm's textarea on iPhone.
+  ev.preventDefault();
+  markClientActive();
+}
+
+document.querySelectorAll('#bottombar button, #topbar-actions button').forEach((btn) => {
+  btn.addEventListener('pointerdown', preserveKeyboardState);
+});
 
 document.querySelectorAll('#bottombar .vkey').forEach((btn) => {
   btn.addEventListener('click', () => {
     sendVirtualKey(btn.dataset.key);
-    focusActivePane();
   });
+});
+
+document.getElementById('scroll-up-half').addEventListener('click', () => {
+  hideSoftwareKeyboard();
+  scrollActivePaneHalfPage(-1);
+});
+
+document.getElementById('scroll-down-half').addEventListener('click', () => {
+  hideSoftwareKeyboard();
+  scrollActivePaneHalfPage(1);
 });
 
 document.getElementById('ctrl-toggle').addEventListener('click', () => {
   markClientActive();
   setCtrlActive(!_ctrlActive);
+  // Ctrl should reopen the software keyboard if it was closed.
   focusActivePane();
+});
+
+document.getElementById('clipboard-toggle').addEventListener('click', () => {
+  openClipboardSheet();
+});
+
+document.getElementById('clipboard-close').addEventListener('click', () => {
+  closeClipboardSheet();
+});
+
+document.querySelector('#clipboard-sheet .sheet-backdrop').addEventListener('click', () => {
+  closeClipboardSheet();
+});
+
+document.getElementById('clipboard-send').addEventListener('click', () => {
+  sendClipboardSheetPaste();
+});
+
+document.getElementById('clipboard-copy-all').addEventListener('click', () => {
+  copyClipboardSheetText();
 });
 
 // ─── Soft keyboard / viewport handling (mobile) ───────────────────────────────

@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>web-tmux</title>
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
@@ -16,6 +16,26 @@
       <button id="hamburger" type="button" aria-label="toggle sidebar">☰</button>
       <div id="session-name">—</div>
       <div id="topbar-spacer"></div>
+      <div id="topbar-actions">
+        <button id="scroll-up-half" class="topbar-btn" type="button" aria-label="Scroll up" title="Scroll up half page">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4l6 8H6z" fill="currentColor"/>
+            <rect x="6" y="17" width="12" height="2" rx="1" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="scroll-down-half" class="topbar-btn" type="button" aria-label="Scroll down" title="Scroll down half page">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="5" width="12" height="2" rx="1" fill="currentColor"/>
+            <path d="M12 20l-6-8h12z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="clipboard-toggle" class="topbar-btn" type="button" aria-label="Clipboard" title="Clipboard">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="7" y="4" width="10" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <rect x="9" y="2.5" width="6" height="3.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+        </button>
+      </div>
       <div id="status" class="disconnected" title="disconnected">●</div>
     </div>
 
@@ -55,14 +75,69 @@
 
     <!-- ── Bottom Bar (≤768px width only) ───────────────────── -->
     <div id="bottombar">
-      <button class="vkey" data-key="esc"   type="button">Esc</button>
-      <button class="vkey" data-key="tab"   type="button">Tab</button>
-      <button class="vkey" data-key="enter" type="button">Enter</button>
-      <button id="ctrl-toggle" type="button">Ctrl</button>
-      <button class="vkey" data-key="up"    type="button">↑</button>
-      <button class="vkey" data-key="down"  type="button">↓</button>
-      <button class="vkey" data-key="left"  type="button">←</button>
-      <button class="vkey" data-key="right" type="button">→</button>
+      <button class="vkey icon-btn key-wide" data-key="esc" type="button" aria-label="Escape" title="Escape">
+        <svg viewBox="0 0 40 24" aria-hidden="true">
+          <rect x="2.5" y="3.5" width="35" height="17" rx="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="20" y="15.2" text-anchor="middle">ESC</text>
+        </svg>
+      </button>
+      <button class="vkey icon-btn key-wide" data-key="tab" type="button" aria-label="Tab" title="Tab">
+        <svg viewBox="0 0 32 24" aria-hidden="true">
+          <path d="M6 6v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M9 12h13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M18 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button class="vkey icon-btn key-wide" data-key="enter" type="button" aria-label="Enter" title="Enter">
+        <svg viewBox="0 0 32 24" aria-hidden="true">
+          <path d="M25 6v7H10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M14 9l-4 4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button id="ctrl-toggle" class="icon-btn key-wide" type="button" aria-label="Control" title="Control">
+        <svg viewBox="0 0 40 24" aria-hidden="true">
+          <path d="M10 13.5l10-8 10 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="20" y="21.4" text-anchor="middle">CTRL</text>
+        </svg>
+      </button>
+      <button class="vkey icon-btn" data-key="up" type="button" aria-label="Up" title="Up">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 6l6 9H6z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="vkey icon-btn" data-key="down" type="button" aria-label="Down" title="Down">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 18l-6-9h12z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="vkey icon-btn" data-key="left" type="button" aria-label="Left" title="Left">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 12l9-6v12z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="vkey icon-btn" data-key="right" type="button" aria-label="Right" title="Right">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 12l-9 6V6z" fill="currentColor"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="clipboard-sheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="clipboard-title">
+        <div class="sheet-head">
+          <div id="clipboard-title">Clipboard</div>
+          <button id="clipboard-close" class="sheet-close" type="button" aria-label="Close clipboard">×</button>
+        </div>
+        <label class="sheet-label" for="clipboard-copy-text">Copy text</label>
+        <textarea id="clipboard-copy-text" readonly spellcheck="false"></textarea>
+        <label class="sheet-label" for="clipboard-paste-text">Paste text</label>
+        <textarea id="clipboard-paste-text" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Paste here, then send to terminal"></textarea>
+        <div class="sheet-actions">
+          <button id="clipboard-send" type="button">Send</button>
+          <button id="clipboard-copy-all" type="button">Copy all</button>
+        </div>
+      </div>
     </div>
 
   </div>
