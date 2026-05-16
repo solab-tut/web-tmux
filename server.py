@@ -63,6 +63,16 @@ def _session_name(value) -> str:
     return value if value.replace('-', '').replace('_', '').isalnum() else ''
 
 
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return False
+
+
 async def _send_current_view(websocket, msg_type: str = 'window_switched') -> None:
     state = await tmux.get_initial_state()
     layout_panes = parse_layout(state.get('layout', ''))
@@ -243,8 +253,15 @@ async def _handle_msg(websocket, msg: dict) -> None:
     elif t == 'select_pane':
         _resize_master = websocket
         pane = _pane_id(msg.get('pane'))
+        force_zoom = _to_bool(msg.get('force_zoom'))
         if pane:
             await tmux.send_command(f'select-pane -t {pane}')
+            if force_zoom:
+                zoomed = (await tmux.send_command(
+                    f'display-message -p -t {pane} "#{{window_zoomed_flag}}"'
+                )).strip()
+                if zoomed != '1':
+                    await tmux.send_command(f'resize-pane -Z -t {pane}')
 
     elif t == 'select_window':
         _resize_master = websocket
@@ -260,6 +277,18 @@ async def _handle_msg(websocket, msg: dict) -> None:
             tmux.subscribers.remove(websocket)
         try:
             await tmux.send_command(f'select-window -t {tmux.session}:{win}')
+            # When switching via WINDOW list, show multi-pane windows unzoomed.
+            zoom_info = (await tmux.send_command(
+                f'display-message -p -t {tmux.session}:{win} '
+                '"#{window_zoomed_flag}|#{window_panes}|#{pane_id}"'
+            )).strip()
+            zoom_parts = zoom_info.split('|', 2)
+            zoomed = len(zoom_parts) > 0 and zoom_parts[0] == '1'
+            pane_count = int(zoom_parts[1]) if len(zoom_parts) > 1 and zoom_parts[1].isdigit() else 0
+            pane_id = _pane_id(zoom_parts[2] if len(zoom_parts) > 2 else '')
+            if zoomed and pane_count > 1:
+                target = f' -t {pane_id}' if pane_id else ''
+                await tmux.send_command(f'resize-pane -Z{target}')
             await _send_current_view(websocket)
         finally:
             if was_subscribed:

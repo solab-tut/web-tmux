@@ -747,13 +747,16 @@ function destroyAllPanes() {
   Object.keys(panes).forEach(destroyPane);
 }
 
-function selectPane(paneId) {
+function selectPane(paneId, opts) {
+  const options = opts || {};
   markClientActive();
   activePaneId = paneId;
   setActivePaneVisual(paneId);
   focusActivePane({ retries: 2 });
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'select_pane', pane: paneId }));
+    const payload = { type: 'select_pane', pane: paneId };
+    if (options.forceZoom) payload.force_zoom = true;
+    ws.send(JSON.stringify(payload));
   }
 }
 
@@ -865,7 +868,7 @@ function renderPaneList(panesInfo, activePane) {
       `<span class="pane-id">${escHtml(p.id)}</span>` +
       `<span class="pane-cmd">${escHtml(p.command || '')}</span>`;
     div.addEventListener('click', () => {
-      selectPane(p.id);
+      selectPane(p.id, { forceZoom: true });
       if (isMobileWidth()) setSidebarOpen(false);
       focusActivePane();
     });
@@ -905,7 +908,7 @@ function activateSidebarItem(item) {
   } else if (item.classList.contains('window-item')) {
     switchWindow(Number(item.dataset.windowIndex));
   } else if (item.classList.contains('pane-item')) {
-    selectPane(item.dataset.paneId || '');
+    selectPane(item.dataset.paneId || '', { forceZoom: true });
   }
   if (isMobileWidth()) setSidebarOpen(false);
 }
