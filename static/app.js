@@ -4,6 +4,7 @@
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8765`;
 const FONT_FAMILY = '"SF Mono", Menlo, "Cascadia Code", "Fira Code", monospace';
 const MOBILE_BP   = 768;
+const CLIENT_PREFIX_KEY = '\x01'; // Ctrl+A, matching this app's tmux setup.
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -64,7 +65,11 @@ let _clientActive = false;
 let _resizeSendTimer = null;
 let _pendingResize = null;
 let _snapshotRefreshTimer = null;
+let _currentViewRefreshTimer = null;
 let _layoutApplying = false;
+let _heldClientPrefix = false;
+let _heldClientPrefixPaneId = null;
+let _heldClientPrefixTimer = null;
 const _pendingSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
@@ -148,6 +153,113 @@ function sendPaneInput(data, paneId) {
   ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data }));
 }
 
+function flushHeldClientPrefix() {
+  if (!_heldClientPrefix) return;
+  const paneId = _heldClientPrefixPaneId;
+  _heldClientPrefix = false;
+  _heldClientPrefixPaneId = null;
+  if (_heldClientPrefixTimer) {
+    clearTimeout(_heldClientPrefixTimer);
+    _heldClientPrefixTimer = null;
+  }
+  sendPaneInput(CLIENT_PREFIX_KEY, paneId);
+}
+
+function focusSidebarChooser(listId, itemSelector) {
+  setSidebarOpen(true);
+  const list = document.getElementById(listId);
+  const target = list.querySelector(`${itemSelector}.active`) || list.querySelector(itemSelector);
+  if (target) {
+    target.focus();
+    target.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function focusSessionChooser() {
+  focusSidebarChooser('session-list', '.session-item');
+}
+
+function focusWindowChooser() {
+  focusSidebarChooser('window-list', '.window-item');
+}
+
+function focusPaneChooser() {
+  focusSidebarChooser('pane-list', '.pane-item');
+}
+
+function handleClientPrefixShortcut(key, paneId) {
+  if (key === 's') {
+    focusSessionChooser();
+    return true;
+  }
+  if (key === 'w') {
+    focusWindowChooser();
+    return true;
+  }
+  if (key === 'q') {
+    focusPaneChooser();
+    return true;
+  }
+  sendPaneInput(CLIENT_PREFIX_KEY + key, paneId);
+  return true;
+}
+
+function handleTerminalInput(data, paneId) {
+  if (!data) return;
+
+  if (_heldClientPrefix) {
+    if (_heldClientPrefixTimer) {
+      clearTimeout(_heldClientPrefixTimer);
+      _heldClientPrefixTimer = null;
+    }
+    const prefixPaneId = _heldClientPrefixPaneId || paneId;
+    _heldClientPrefix = false;
+    _heldClientPrefixPaneId = null;
+    if (data.length === 1 && handleClientPrefixShortcut(data, prefixPaneId)) return;
+    sendPaneInput(CLIENT_PREFIX_KEY + data, prefixPaneId);
+    return;
+  }
+
+  if (data.startsWith(CLIENT_PREFIX_KEY) && data.length > 1) {
+    if (data[1] === 's') {
+      focusSessionChooser();
+      if (data.length > 2) sendPaneInput(data.slice(2), paneId);
+      return;
+    }
+    if (data[1] === 'w') {
+      focusWindowChooser();
+      if (data.length > 2) sendPaneInput(data.slice(2), paneId);
+      return;
+    }
+    if (data[1] === 'q') {
+      focusPaneChooser();
+      if (data.length > 2) sendPaneInput(data.slice(2), paneId);
+      return;
+    }
+    sendPaneInput(data, paneId);
+    return;
+  }
+
+  if (data === CLIENT_PREFIX_KEY) {
+    _heldClientPrefix = true;
+    _heldClientPrefixPaneId = paneId;
+    _heldClientPrefixTimer = setTimeout(() => {
+      _heldClientPrefixTimer = null;
+      flushHeldClientPrefix();
+    }, 700);
+    return;
+  }
+
+  sendPaneInput(data, paneId);
+}
+
+function shouldPreventBrowserCtrlShortcut(ev, textarea) {
+  if (!ev || ev.type !== 'keydown') return false;
+  if (!textarea) return false;
+  if (!ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+  return true;
+}
+
 function scheduleSnapshotRefresh(paneIds) {
   const ids = paneIds && paneIds.length ? [...paneIds] : Object.keys(panes);
   if (_snapshotRefreshTimer) clearTimeout(_snapshotRefreshTimer);
@@ -166,6 +278,16 @@ function markSnapshotPending(paneIds) {
   (paneIds || []).forEach((paneId) => {
     if (paneId) _pendingSnapshotPanes.add(paneId);
   });
+}
+
+function scheduleCurrentViewRefresh() {
+  if (_currentViewRefreshTimer) clearTimeout(_currentViewRefreshTimer);
+  _currentViewRefreshTimer = setTimeout(() => {
+    _currentViewRefreshTimer = null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'get_current_view' }));
+    }
+  }, 80);
 }
 
 function queuePaneOutput(paneId, data) {
@@ -231,6 +353,12 @@ function handleMsg(msg) {
     case 'output':          onOutput(msg);          break;
     case 'layout_change':   onLayoutChange(msg);   break;
     case 'focus':           onFocus(msg);           break;
+    case 'session_changed':
+    case 'session_window_changed':
+      onCurrentViewChanged(msg);
+      break;
+    case 'pane_mode_changed': onPaneModeChanged(msg); break;
+    case 'window_pane_changed': onWindowPaneChanged(msg); break;
     case 'window_add':
     case 'window_close':
     case 'window_renamed':  onWindowsChanged(msg); break;
@@ -248,6 +376,23 @@ function onState(msg) {
     if (activeWin) currentWinIdx = activeWin.index;
   }
   if (msg.panes)   renderPaneList(msg.panes, msg.active_pane);
+}
+
+function onCurrentViewChanged(msg) {
+  scheduleCurrentViewRefresh();
+}
+
+function onPaneModeChanged(msg) {
+  const paneId = msg.pane || activePaneId;
+  if (paneId) {
+    markSnapshotPending([paneId]);
+    scheduleSnapshotRefresh([paneId]);
+  }
+}
+
+function onWindowPaneChanged(msg) {
+  if (msg.pane) setActivePaneVisual(msg.pane);
+  scheduleStateRefresh();
 }
 
 function onInit(msg) {
@@ -542,11 +687,20 @@ function ensurePane(paneId, cols, rows) {
     term.textarea.style.fontSize = '16px';
   }
 
+  term.attachCustomKeyEventHandler((ev) => {
+    if (shouldPreventBrowserCtrlShortcut(ev, term.textarea)) {
+      // xterm still handles the key and emits onData, we only suppress browser defaults.
+      ev.preventDefault();
+      markClientActive();
+    }
+    return true;
+  });
+
   // Send keyboard input to the active pane only.
   // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
   term.onData((data) => {
     const sendData = applyCtrlModifier(data);
-    sendPaneInput(sendData, activePaneId || paneId);
+    handleTerminalInput(sendData, activePaneId || paneId);
   });
 
   // Click to focus this pane
@@ -612,6 +766,8 @@ function renderWindowList(windows) {
   windows.forEach((w) => {
     const div = document.createElement('div');
     div.className = 'window-item' + (w.active ? ' active' : '');
+    div.tabIndex = 0;
+    div.dataset.windowIndex = String(w.index);
     div.innerHTML =
       `<span class="window-idx">${w.index}</span>` +
       `<span class="window-name">${escHtml(w.name)}</span>`;
@@ -630,6 +786,8 @@ function renderSessionList(sessions) {
   (sessions || []).forEach((s) => {
     const div = document.createElement('div');
     div.className = 'session-item' + (s.active ? ' active' : '');
+    div.tabIndex = 0;
+    div.dataset.sessionName = s.name;
     div.innerHTML =
       `<span class="window-idx">${escHtml(s.name)}</span>` +
       `<span class="window-name">${s.windows} window${s.windows === 1 ? '' : 's'}</span>`;
@@ -650,6 +808,8 @@ function renderPaneList(panesInfo, activePane) {
     const div = document.createElement('div');
     const isActive = p.active || p.id === activePane;
     div.className = 'pane-item' + (isActive ? ' active' : '');
+    div.tabIndex = 0;
+    div.dataset.paneId = p.id;
     div.innerHTML =
       `<span class="pane-id">${escHtml(p.id)}</span>` +
       `<span class="pane-cmd">${escHtml(p.command || '')}</span>`;
@@ -675,6 +835,50 @@ function selectSession(name) {
     ws.send(JSON.stringify({ type: 'select_session', session: name }));
   }
 }
+
+function moveSidebarFocus(list, delta) {
+  const items = [...list.querySelectorAll('.session-item, .window-item, .pane-item')];
+  if (items.length === 0) return;
+  const current = document.activeElement;
+  const currentIdx = items.indexOf(current);
+  const activeIdx = items.findIndex((item) => item.classList.contains('active'));
+  const start = currentIdx >= 0 ? currentIdx : Math.max(activeIdx, 0);
+  const next = items[(start + delta + items.length) % items.length];
+  next.focus();
+  next.scrollIntoView({ block: 'nearest' });
+}
+
+function activateSidebarItem(item) {
+  if (item.classList.contains('session-item')) {
+    selectSession(item.dataset.sessionName || '');
+  } else if (item.classList.contains('window-item')) {
+    switchWindow(Number(item.dataset.windowIndex));
+  } else if (item.classList.contains('pane-item')) {
+    selectPane(item.dataset.paneId || '');
+  }
+  if (isMobileWidth()) setSidebarOpen(false);
+}
+
+function handleSidebarListKeydown(ev) {
+  const list = ev.currentTarget;
+  if (ev.key === 'ArrowDown') {
+    ev.preventDefault();
+    moveSidebarFocus(list, 1);
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    moveSidebarFocus(list, -1);
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
+    activateSidebarItem(document.activeElement);
+  } else if (ev.key === 'Escape') {
+    ev.preventDefault();
+    focusActivePane();
+  }
+}
+
+document.getElementById('session-list').addEventListener('keydown', handleSidebarListKeydown);
+document.getElementById('window-list').addEventListener('keydown', handleSidebarListKeydown);
+document.getElementById('pane-list').addEventListener('keydown', handleSidebarListKeydown);
 
 // ─── Sidebar action buttons ───────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 .claude/
+.pycache/
 *.log
 server.pid
 .DS_Store

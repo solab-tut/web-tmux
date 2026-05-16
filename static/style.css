@@ -170,6 +170,11 @@ html, body {
 }
 .session-item:hover  { background: #2e2e2e; }
 .session-item.active { border-left-color: #4af; color: #fff; }
+.session-item:focus {
+  outline: 1px solid #4af;
+  outline-offset: -1px;
+  background: #303030;
+}
 
 .pane-item {
   padding: 8px 10px;
@@ -185,6 +190,11 @@ html, body {
 }
 .pane-item:hover  { background: #2e2e2e; }
 .pane-item.active { border-left-color: #4af; color: #fff; }
+.pane-item:focus {
+  outline: 1px solid #4af;
+  outline-offset: -1px;
+  background: #303030;
+}
 .pane-id  { color: #666; min-width: 32px; font-size: 11px; }
 .pane-cmd { color: #ccc; overflow: hidden; text-overflow: ellipsis; }
 
@@ -201,6 +211,11 @@ html, body {
 }
 .window-item:hover  { background: #2e2e2e; }
 .window-item.active { border-left-color: #4af; color: #fff; }
+.window-item:focus {
+  outline: 1px solid #4af;
+  outline-offset: -1px;
+  background: #303030;
+}
 
 .window-idx {
   color: #666;

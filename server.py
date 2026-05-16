@@ -237,6 +237,9 @@ async def _handle_msg(websocket, msg: dict) -> None:
             'active_pane': state['active_pane'],
         }))
 
+    elif t == 'get_current_view':
+        await _send_current_view(websocket)
+
     elif t == 'select_pane':
         _resize_master = websocket
         pane = _pane_id(msg.get('pane'))

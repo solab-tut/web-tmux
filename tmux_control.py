@@ -7,7 +7,7 @@ tmux control mode (-CC) subprocess wrapper.
 tmux -CC requires a real TTY; we create a PTY pair and run tmux with the
 slave end as its controlling terminal.  The master end is used for I/O.
 
-Input to panes:    via `send-keys -H <hex>...` (proper input injection)
+Input to panes:    via `send-keys -H <hex>...` plus prefix-table routing
 Output from panes: `%output` notifications → vis-decoded → base64 → broadcast
 """
 import asyncio
@@ -26,6 +26,31 @@ log = logging.getLogger(__name__)
 _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
 )
+
+_TMUX_ESCAPED_KEYS: tuple[tuple[bytes, str], ...] = (
+    (b'\x1b[A', 'Up'),
+    (b'\x1b[B', 'Down'),
+    (b'\x1b[C', 'Right'),
+    (b'\x1b[D', 'Left'),
+    (b'\x1b[H', 'Home'),
+    (b'\x1b[F', 'End'),
+    (b'\x1b[1~', 'Home'),
+    (b'\x1b[4~', 'End'),
+    (b'\x1b[5~', 'PageUp'),
+    (b'\x1b[6~', 'PageDown'),
+)
+
+_TMUX_CONTROL_KEYS = {
+    0x00: 'C-Space',
+    0x09: 'Tab',
+    0x0d: 'Enter',
+    0x1b: 'Escape',
+    0x1c: 'C-\\',
+    0x1d: 'C-]',
+    0x1e: 'C-^',
+    0x1f: 'C-_',
+    0x7f: 'BSpace',
+}
 
 
 def _decode_output(s: str) -> bytes:
@@ -132,6 +157,26 @@ def _strip_zsh_eol_marks(data: bytes) -> bytes:
     return _ZSH_EOL_MARK_RE.sub(b'\\1', data)
 
 
+def _tmux_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _tmux_key_from_bytes(data: bytes) -> tuple[str, int] | None:
+    if not data:
+        return None
+    for seq, name in _TMUX_ESCAPED_KEYS:
+        if data.startswith(seq):
+            return name, len(seq)
+    b = data[0]
+    if 0x01 <= b <= 0x1a:
+        return f'C-{chr(ord("a") + b - 1)}', 1
+    if b in _TMUX_CONTROL_KEYS:
+        return _TMUX_CONTROL_KEYS[b], 1
+    if 0x20 <= b <= 0x7e:
+        return chr(b), 1
+    return None
+
+
 class TmuxControl:
     def __init__(self, session: str = 'web'):
         self.session    = session
@@ -145,6 +190,8 @@ class TmuxControl:
         self._restart_lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
         self._decode_remainder: dict[str, str] = {}
+        self._prefix_key_names: set[str] | None = None
+        self._prefix_pending: bool = False
 
     # ──────────────────────────────────────── lifecycle
 
@@ -233,6 +280,8 @@ class TmuxControl:
         self._cur_resp = []
         self._in_resp = False
         self._decode_remainder = {}
+        self._prefix_key_names = None
+        self._prefix_pending = False
         while self._pending:
             fut = self._pending.pop(0)
             if not fut.done():
@@ -298,23 +347,73 @@ class TmuxControl:
                 return ''
         return ''
 
-    async def write_input(self, pane_id: str, data: bytes) -> None:
-        """Inject input into a pane via tmux send-keys -H.
+    async def _ensure_prefix_key_names(self) -> set[str]:
+        if self._prefix_key_names is not None:
+            return self._prefix_key_names
 
-        Writing to the slave TTY only produces output; to deliver real input
-        to the shell running in the pane we must go through tmux's master PTY,
-        which send-keys does internally.
-        """
+        names: set[str] = set()
+        for option in ('prefix', 'prefix2'):
+            value = (await self.send_command(f'show-options -gv {option}')).strip()
+            if value and value != 'None':
+                names.add(value)
+        self._prefix_key_names = names or {'C-b'}
+        return self._prefix_key_names
+
+    async def _send_literal_input(self, pane_id: str, data: bytes) -> None:
         if not data:
             return
-        # send-keys -H accepts space-separated 2-digit hex values.
-        # Each hex value is one byte delivered as keyboard input.
-        # Chunk to avoid overly long command lines (max ~200 bytes at once).
         chunk_size = 100
+        target = f' -t {pane_id}' if pane_id else ''
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i + chunk_size]
             hex_args = ' '.join(f'{b:02x}' for b in chunk)
-            await self.send_command(f'send-keys -t {pane_id} -H {hex_args}')
+            await self.send_command(f'send-keys{target} -H {hex_args}')
+
+    async def _send_prefix_key(self, data: bytes) -> int:
+        key = _tmux_key_from_bytes(data)
+        if not key:
+            self._prefix_pending = False
+            return 0
+        key_name, used = key
+        await self.send_command(f'send-keys -K {_tmux_quote(key_name)}')
+        self._prefix_pending = False
+        return used
+
+    async def write_input(self, pane_id: str, data: bytes) -> None:
+        """Inject input into a pane, preserving tmux prefix key bindings.
+
+        Normal input goes directly to the selected pane. When the configured
+        prefix key is seen, switch the control client to the `prefix` key table
+        and send the following key through tmux's key processing.
+        """
+        if not data:
+            return
+
+        prefix_keys = await self._ensure_prefix_key_names()
+        literal_start = 0
+        i = 0
+        while i < len(data):
+            if self._prefix_pending:
+                await self._send_literal_input(pane_id, data[literal_start:i])
+                used = await self._send_prefix_key(data[i:])
+                if used:
+                    i += used
+                    literal_start = i
+                    continue
+                literal_start = i
+
+            key = _tmux_key_from_bytes(data[i:])
+            if key and key[0] in prefix_keys:
+                await self._send_literal_input(pane_id, data[literal_start:i])
+                await self.send_command('switch-client -T prefix')
+                self._prefix_pending = True
+                i += key[1]
+                literal_start = i
+                continue
+
+            i += 1
+
+        await self._send_literal_input(pane_id, data[literal_start:])
 
     async def capture_pane(self, pane_id: str) -> bytes:
         raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
@@ -358,7 +457,7 @@ class TmuxControl:
 
         win_raw = await self.send_command(
             f'list-windows -t {self.session} -F'
-            ' "#{window_index}|#{window_name}|#{window_active}|#{window_layout}"'
+            ' "#{window_index}|#{window_name}|#{window_active}|#{window_visible_layout}"'
         )
         windows, active_layout = [], ''
         active_window_idx: int | None = None
@@ -451,12 +550,12 @@ class TmuxControl:
                 })
             return True
         if line.startswith('%layout-change '):
-            parts = line.split(' ', 2)
+            parts = line.split(' ', 4)
             if len(parts) >= 3:
                 self._broadcast({
                     'type':   'layout_change',
                     'target': parts[1],
-                    'layout': parts[2],
+                    'layout': parts[3] if len(parts) >= 4 else parts[2],
                 })
             return True
         if line.startswith('%window-add '):
@@ -473,8 +572,35 @@ class TmuxControl:
                 'name':   p[2] if len(p) > 2 else '',
             })
             return True
+        if line.startswith('%session-window-changed '):
+            p = line.split(' ', 2)
+            self._broadcast({
+                'type':    'session_window_changed',
+                'session': p[1] if len(p) > 1 else '',
+                'window':  p[2] if len(p) > 2 else '',
+            })
+            return True
+        if line.startswith('%session-changed '):
+            p = line.split(' ', 2)
+            self._broadcast({
+                'type':    'session_changed',
+                'session': p[2] if len(p) > 2 else '',
+                'target':  p[1] if len(p) > 1 else '',
+            })
+            return True
+        if line.startswith('%pane-mode-changed '):
+            self._broadcast({'type': 'pane_mode_changed', 'pane': line[19:].strip()})
+            return True
         if line.startswith('%pane-focus-in '):
             self._broadcast({'type': 'focus', 'pane': line[15:].strip()})
+            return True
+        if line.startswith('%window-pane-changed '):
+            p = line.split(' ', 2)
+            self._broadcast({
+                'type':   'window_pane_changed',
+                'window': p[1] if len(p) > 1 else '',
+                'pane':   p[2] if len(p) > 2 else '',
+            })
             return True
         if line.startswith('%sessions-changed'):
             self._broadcast({'type': 'sessions_changed'})
