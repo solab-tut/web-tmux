@@ -457,22 +457,29 @@ class TmuxControl:
 
         win_raw = await self.send_command(
             f'list-windows -t {self.session} -F'
-            ' "#{window_index}|#{window_name}|#{window_active}|#{window_visible_layout}"'
+            ' "#{window_index}|#{window_id}|#{window_name}|#{window_active}|#{window_visible_layout}"'
         )
         windows, active_layout = [], ''
         active_window_idx: int | None = None
         for line in win_raw.splitlines():
-            p = line.split('|', 3)
-            if len(p) < 4:
+            p = line.split('|', 4)
+            if len(p) < 5:
                 continue
             idx    = int(p[0]) if p[0].isdigit() else 0
-            name   = p[1]
-            active = p[2] == '1'
-            layout = p[3]
+            wid    = p[1]
+            name   = p[2]
+            active = p[3] == '1'
+            layout = p[4]
             if active:
                 active_window_idx = idx
                 active_layout = layout
-            windows.append({'index': idx, 'name': name, 'active': active, 'layout': layout})
+            windows.append({
+                'index': idx,
+                'id': wid,
+                'name': name,
+                'active': active,
+                'layout': layout,
+            })
 
         pane_target = self.session
         if active_window_idx is not None:
