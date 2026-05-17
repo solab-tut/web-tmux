@@ -81,6 +81,12 @@
           <text x="20" y="15.2" text-anchor="middle">ESC</text>
         </svg>
       </button>
+      <button id="ctrl-toggle" class="icon-btn key-wide" type="button" aria-label="Control" title="Control">
+        <svg viewBox="0 0 40 24" aria-hidden="true">
+          <rect x="2.5" y="3.5" width="35" height="17" rx="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="20" y="15.2" text-anchor="middle">CTRL</text>
+        </svg>
+      </button>
       <button class="vkey icon-btn key-wide" data-key="tab" type="button" aria-label="Tab" title="Tab">
         <svg viewBox="0 0 32 24" aria-hidden="true">
           <path d="M6 6v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
@@ -92,12 +98,6 @@
         <svg viewBox="0 0 32 24" aria-hidden="true">
           <path d="M25 6v7H10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
           <path d="M14 9l-4 4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-      <button id="ctrl-toggle" class="icon-btn key-wide" type="button" aria-label="Control" title="Control">
-        <svg viewBox="0 0 40 24" aria-hidden="true">
-          <path d="M10 13.5l10-8 10 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          <text x="20" y="21.4" text-anchor="middle">CTRL</text>
         </svg>
       </button>
       <button class="vkey icon-btn" data-key="up" type="button" aria-label="Up" title="Up">
@@ -144,6 +144,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-unicode11@0.4.0/lib/xterm-addon-unicode11.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

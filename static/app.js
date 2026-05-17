@@ -5,6 +5,7 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.ho
 const FONT_FAMILY = '"SF Mono", Menlo, "Cascadia Code", "Fira Code", monospace';
 const MOBILE_BP   = 768;
 const CLIENT_PREFIX_KEY = '\x01'; // Ctrl+A, matching this app's tmux setup.
+const NON_ASCII_DUPLICATE_SUPPRESS_MS = 120;
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -259,6 +260,41 @@ function shouldPreventBrowserCtrlShortcut(ev, textarea) {
   if (!textarea) return false;
   if (!ev.ctrlKey || ev.metaKey || ev.altKey) return false;
   return true;
+}
+
+function loadUnicode11Addon(term) {
+  const addonCtor = window.Unicode11Addon && window.Unicode11Addon.Unicode11Addon;
+  if (!addonCtor) return;
+
+  try {
+    term.loadAddon(new addonCtor());
+    term.unicode.activeVersion = '11';
+  } catch (e) {
+    console.warn('unicode11 addon failed to load', e);
+  }
+}
+
+function hasNonAsciiText(data) {
+  return /[^\x00-\x7f]/.test(data);
+}
+
+function createInputDeduper() {
+  return { data: '', at: 0 };
+}
+
+function shouldSuppressDuplicateTextInput(deduper, data) {
+  if (!deduper || !data || !hasNonAsciiText(data)) return false;
+
+  const now = Date.now();
+  if (data === deduper.data && now - deduper.at <= NON_ASCII_DUPLICATE_SUPPRESS_MS) {
+    deduper.data = '';
+    deduper.at = 0;
+    return true;
+  }
+
+  deduper.data = data;
+  deduper.at = now;
+  return false;
 }
 
 function scheduleSnapshotRefresh(paneIds) {
@@ -699,15 +735,19 @@ function ensurePane(paneId, cols, rows) {
     theme:       XTERM_THEME,
   });
 
+  loadUnicode11Addon(term);
+
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(el);
+  const inputDeduper = createInputDeduper();
   if (term.textarea) {
     term.textarea.setAttribute('autocapitalize', 'none');
     term.textarea.setAttribute('autocomplete', 'off');
     term.textarea.setAttribute('autocorrect', 'off');
     term.textarea.setAttribute('spellcheck', 'false');
     term.textarea.setAttribute('enterkeyhint', 'enter');
+    term.textarea.style.fontFamily = FONT_FAMILY;
     term.textarea.style.fontSize = '16px';
   }
 
@@ -723,6 +763,7 @@ function ensurePane(paneId, cols, rows) {
   // Send keyboard input to the active pane only.
   // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
   term.onData((data) => {
+    if (shouldSuppressDuplicateTextInput(inputDeduper, data)) return;
     const sendData = applyCtrlModifier(data);
     handleTerminalInput(sendData, activePaneId || paneId);
   });
@@ -1334,8 +1375,14 @@ function applyViewportFix() {
     // and inform tmux of the new dimensions so output formatting matches.
     const p = activePaneId && panes[activePaneId];
     if (p && !_layoutApplying && (widthChanged || heightChanged)) {
+      const wasFocused = p.term.textarea && document.activeElement === p.term.textarea;
       try { p.fitAddon.fit(); } catch (_) {}
-      if (widthChanged) maybeSendResize(p.term.cols, p.term.rows);
+      maybeSendResize(p.term.cols, p.term.rows);
+      if (wasFocused) {
+        requestAnimationFrame(() => {
+          try { p.term.focus(); } catch (_) {}
+        });
+      }
     }
   } else {
     app.style.height = '';
