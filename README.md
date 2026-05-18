@@ -80,6 +80,42 @@ python3 -m pip install websockets
 ./start.sh
 ```
 
+### `install.sh` だけで導入する
+
+`install.sh` 自身に全ソースが埋め込まれているため、`install.sh` 1 本だけあれば任意のディレクトリにサービスを展開できます。リポジトリをクローンしない運用に便利です。
+
+```bash
+mkdir web-tmux && cd web-tmux
+# install.sh を配置（scp / curl / コピー & ペーストなど任意の方法で）
+chmod +x install.sh
+./install.sh
+```
+
+実行すると次のファイルがカレントディレクトリに生成されます。
+
+```text
+server.py
+tmux_control.py
+layout_parser.py
+static/index.html
+static/style.css
+static/app.js
+start.sh
+```
+
+そのあとは通常どおり依存関係の導入と起動を行います。
+
+```bash
+python3 -m pip install --user websockets
+./start.sh
+```
+
+ソースを更新したあと `install.sh` を作り直したい場合は、リポジトリ内で次を実行します。
+
+```bash
+python3 .pycache/build_install.py
+```
+
 起動に成功すると、次のアドレスが表示されます。
 
 ```text
