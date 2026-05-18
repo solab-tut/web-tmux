@@ -14,6 +14,7 @@
     <!-- ── Top Bar (always visible) ─────────────────────────── -->
     <div id="topbar">
       <button id="hamburger" type="button" aria-label="toggle sidebar">☰</button>
+      <div id="topbar-host"></div>
       <div id="session-name">—</div>
       <div id="topbar-spacer"></div>
       <div id="topbar-actions">
@@ -144,5 +145,10 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-unicode11@0.4.0/lib/xterm-addon-unicode11.js"></script>
   <script src="app.js"></script>
+  <script>
+    const _host = location.hostname.split('.')[0];
+    document.title = _host + ' - web-tmux';
+    document.getElementById('topbar-host').textContent = _host;
+  </script>
 </body>
 </html>

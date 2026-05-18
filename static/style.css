@@ -49,6 +49,16 @@ html, body {
 #hamburger:hover  { background: #2e2e2e; color: #fff; }
 #hamburger:active { background: #383838; }
 
+#topbar-host {
+  color: #aaa;
+  white-space: nowrap;
+}
+
+#topbar-host::after {
+  content: ' /';
+  color: #555;
+}
+
 #session-name {
   color: #4af;
   font-weight: bold;
