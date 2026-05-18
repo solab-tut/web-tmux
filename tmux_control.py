@@ -161,6 +161,13 @@ def _tmux_quote(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def _tmux_text(value: str) -> str:
+    try:
+        return value.encode('latin-1').decode('utf-8')
+    except UnicodeDecodeError:
+        return value
+
+
 def _tmux_key_from_bytes(data: bytes) -> tuple[str, int] | None:
     if not data:
         return None
@@ -326,7 +333,7 @@ class TmuxControl:
             fut: asyncio.Future = loop.create_future()
             self._pending.append(fut)
             try:
-                os.write(self._master_fd, (cmd + '\n').encode())
+                os.write(self._master_fd, (cmd + '\n').encode('utf-8'))
             except OSError as e:
                 if fut in self._pending:
                     self._pending.remove(fut)
@@ -445,7 +452,7 @@ class TmuxControl:
             p = line.split('|', 2)
             if len(p) < 3:
                 continue
-            name = p[0]
+            name = _tmux_text(p[0])
             windows = int(p[1]) if p[1].isdigit() else 0
             attached = p[2] not in ('', '0')
             sessions.append({
@@ -456,7 +463,7 @@ class TmuxControl:
             })
 
         win_raw = await self.send_command(
-            f'list-windows -t {self.session} -F'
+            f'list-windows -t {_tmux_quote(self.session)} -F'
             ' "#{window_index}|#{window_id}|#{window_name}|#{window_active}|#{window_visible_layout}"'
         )
         windows, active_layout = [], ''
@@ -467,7 +474,7 @@ class TmuxControl:
                 continue
             idx    = int(p[0]) if p[0].isdigit() else 0
             wid    = p[1]
-            name   = p[2]
+            name   = _tmux_text(p[2])
             active = p[3] == '1'
             layout = p[4]
             if active:
@@ -485,7 +492,7 @@ class TmuxControl:
         if active_window_idx is not None:
             pane_target = f'{self.session}:{active_window_idx}'
         pane_raw = await self.send_command(
-            f'list-panes -t {pane_target} -F'
+            f'list-panes -t {_tmux_quote(pane_target)} -F'
             ' "#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}"'
         )
         panes, active_pane = [], ''

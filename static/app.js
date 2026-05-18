@@ -72,6 +72,8 @@ let _layoutApplying = false;
 let _heldClientPrefix = false;
 let _heldClientPrefixPaneId = null;
 let _heldClientPrefixTimer = null;
+let _editingSessionName = '';
+let _editingWindowIndex = null;
 const _pendingSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
@@ -858,42 +860,82 @@ function setActivePaneVisual(paneId) {
 function renderWindowList(windows) {
   const list = document.getElementById('window-list');
   list.innerHTML = '';
-  windows.forEach((w) => {
+  [...(windows || [])]
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
+    .forEach((w) => {
     const div = document.createElement('div');
     div.className = 'window-item' + (w.active ? ' active' : '');
-    div.tabIndex = 0;
     div.dataset.windowIndex = String(w.index);
-    div.innerHTML =
-      `<span class="window-idx">${w.index}</span>` +
-      `<span class="window-name">${escHtml(w.name)}</span>`;
-    div.addEventListener('click', () => {
-      switchWindow(w.index);
-      if (isMobileWidth()) setSidebarOpen(false);
-      focusActivePane();
-    });
+    if (_editingWindowIndex === w.index) {
+      div.classList.add('editing');
+      div.appendChild(buildInlineEditor({
+        kind: 'window',
+        value: w.name,
+        label: `window ${w.index}`,
+        onSave: (name) => renameWindow(w.index, name),
+        onCancel: () => {
+          _editingWindowIndex = null;
+          renderWindowList(windows);
+        },
+      }));
+    } else {
+      div.tabIndex = 0;
+      div.innerHTML =
+        `<span class="window-idx">${w.index}</span>` +
+        `<span class="window-name">${escHtml(w.name)}</span>`;
+      div.appendChild(buildRenameButton(`Rename window ${w.index}`, () => {
+        _editingSessionName = '';
+        _editingWindowIndex = w.index;
+        renderWindowList(windows);
+      }));
+      div.addEventListener('click', () => {
+        switchWindow(w.index);
+        if (isMobileWidth()) setSidebarOpen(false);
+        focusActivePane();
+      });
+    }
     list.appendChild(div);
-  });
+    });
 }
 
 function renderSessionList(sessions) {
   const list = document.getElementById('session-list');
   list.innerHTML = '';
-  (sessions || []).forEach((s) => {
+  [...(sessions || [])]
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
+    .forEach((s) => {
     const div = document.createElement('div');
     div.className = 'session-item' + (s.active ? ' active' : '');
-    div.tabIndex = 0;
     div.dataset.sessionName = s.name;
-    div.innerHTML =
-      `<span class="window-idx">${escHtml(s.name)}</span>` +
-      `<span class="window-name">${s.windows} window${s.windows === 1 ? '' : 's'}</span>`;
-    div.title = s.attached ? 'attached' : 'detached';
-    div.addEventListener('click', () => {
-      selectSession(s.name);
-      if (isMobileWidth()) setSidebarOpen(false);
-      focusActivePane();
-    });
+    if (_editingSessionName === s.name) {
+      div.classList.add('editing');
+      div.appendChild(buildInlineEditor({
+        kind: 'session',
+        value: s.name,
+        label: s.name,
+        onSave: (name) => renameSession(s.name, name),
+        onCancel: () => {
+          _editingSessionName = '';
+          renderSessionList(sessions);
+        },
+      }));
+    } else {
+      div.tabIndex = 0;
+      div.innerHTML = `<span class="session-name">${escHtml(`(${s.windows}) ${s.name}`)}</span>`;
+      div.title = s.attached ? 'attached' : 'detached';
+      div.appendChild(buildRenameButton(`Rename session ${s.name}`, () => {
+        _editingWindowIndex = null;
+        _editingSessionName = s.name;
+        renderSessionList(sessions);
+      }));
+      div.addEventListener('click', () => {
+        selectSession(s.name);
+        if (isMobileWidth()) setSidebarOpen(false);
+        focusActivePane();
+      });
+    }
     list.appendChild(div);
-  });
+    });
 }
 
 function renderPaneList(panesInfo, activePane) {
@@ -924,11 +966,96 @@ function switchWindow(idx) {
   }
 }
 
+function renameWindow(idx, name) {
+  const nextName = (name || '').trim();
+  if (!nextName || !ws || ws.readyState !== WebSocket.OPEN) return;
+  _editingWindowIndex = null;
+  markClientActive();
+  ws.send(JSON.stringify({ type: 'rename_window', window: idx, name: nextName }));
+}
+
 function selectSession(name) {
   markClientActive();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'select_session', session: name }));
   }
+}
+
+function renameSession(currentName, nextName) {
+  const trimmed = (nextName || '').trim();
+  if (!trimmed || !ws || ws.readyState !== WebSocket.OPEN) return;
+  _editingSessionName = '';
+  markClientActive();
+  ws.send(JSON.stringify({ type: 'rename_session', session: currentName, name: trimmed }));
+}
+
+function buildRenameButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item-edit-btn';
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.textContent = '✎';
+  button.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
+  const editor = document.createElement('div');
+  editor.className = 'item-inline-editor';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'item-inline-input';
+  input.value = value || '';
+  input.setAttribute('aria-label', `Rename ${kind} ${label}`);
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'item-inline-btn';
+  save.textContent = 'save';
+
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'item-inline-btn secondary';
+  cancel.textContent = 'cancel';
+
+  const stop = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+  [editor, input, save, cancel].forEach((el) => {
+    el.addEventListener('mousedown', stop);
+    el.addEventListener('click', (ev) => ev.stopPropagation());
+  });
+
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      onSave(input.value);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      onCancel();
+    }
+  });
+
+  save.addEventListener('click', () => onSave(input.value));
+  cancel.addEventListener('click', onCancel);
+
+  editor.appendChild(input);
+  editor.appendChild(save);
+  editor.appendChild(cancel);
+
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+
+  return editor;
 }
 
 function moveSidebarFocus(list, delta) {
@@ -944,6 +1071,7 @@ function moveSidebarFocus(list, delta) {
 }
 
 function activateSidebarItem(item) {
+  if (!item || item.classList.contains('editing')) return;
   if (item.classList.contains('session-item')) {
     selectSession(item.dataset.sessionName || '');
   } else if (item.classList.contains('window-item')) {
@@ -956,6 +1084,7 @@ function activateSidebarItem(item) {
 
 function handleSidebarListKeydown(ev) {
   const list = ev.currentTarget;
+  if (ev.target instanceof HTMLInputElement) return;
   if (ev.key === 'ArrowDown') {
     ev.preventDefault();
     moveSidebarFocus(list, 1);
@@ -1095,36 +1224,14 @@ function concatBytes(parts) {
   return out;
 }
 
-function splitSnapshotLines(data) {
-  const lines = [];
-  let start = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 0x0a) continue;
-    let end = i;
-    if (end > start && data[end - 1] === 0x0d) end -= 1;
-    lines.push(data.slice(start, end));
-    start = i + 1;
-  }
-  if (start <= data.length) {
-    let end = data.length;
-    if (end > start && data[end - 1] === 0x0d) end -= 1;
-    lines.push(data.slice(start, end));
-  }
-  return lines;
-}
-
 function buildSnapshotFrame(msg, term) {
-  const lines = splitSnapshotLines(b64ToUint8(msg.data || ''));
-  const paneRows = Math.max(1, msg.pane_rows || term.rows || lines.length || 1);
+  const snapshot = b64ToUint8(msg.data || '');
+  const paneRows = Math.max(1, msg.pane_rows || term.rows || 1);
   const paneCols = Math.max(1, msg.pane_cols || term.cols || 1);
   const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
   const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
 
-  const parts = [asciiBytes('\x1b[?25l\x1b[H\x1b[2J')];
-  for (let i = 0; i < paneRows; i++) {
-    parts.push(asciiBytes(`\x1b[${i + 1};1H\x1b[2K`));
-    if (i < lines.length) parts.push(lines[i]);
-  }
+  const parts = [asciiBytes('\x1b[?25l\x1b[H'), snapshot];
   parts.push(asciiBytes(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
   return concatBytes(parts);
 }

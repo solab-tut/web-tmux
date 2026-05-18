@@ -44,9 +44,17 @@ Python で `tmux -CC` を制御し、WebSocket 経由で端末入出力を中継
 - Python 3.10 以上
 - `tmux`
 - `pip` で `websockets` を導入できること
-- `start.sh` を使う場合は `lsof` と `pkill` が使えること
+- `start.sh` を使う場合は `bash` が使えること
+- `start.sh` のポート解放は `lsof` または `fuser` があれば実行されます
 - ブラウザから `jsdelivr` にアクセスできること
   - `xterm.js` と `xterm-addon-fit` を CDN から読み込みます
+
+## 対応環境
+
+- 動作前提は `macOS` と `Linux` です
+- `tmux -CC` と PTY 制御に依存するため、現状のままでは `Windows` ネイティブ動作は想定していません
+- ブラウザはモダンブラウザ前提です
+- モバイル表示は `visualViewport` と `navigator.clipboard` が使える環境で最も安定します
 
 ## 設置方法
 
@@ -130,7 +138,7 @@ TMUX_SESSION=my-session ./start.sh
 
 ## 注意点
 
-- `start.sh` は起動前に既存の `server.py` を停止し、`8765` と `8766` の待受プロセスを終了します
+- `start.sh` は起動前に既存の `server.py` を停止し、見つけられる範囲で `8765` と `8766` の待受プロセスを終了します
 - `start.sh` は `tmux -L webtmux-ctl kill-server` を実行して、制御用 tmux サーバーを作り直します
 - サーバーは `127.0.0.1` にのみ bind します
 - 認証機構はありません。外部公開する場合は必ずリバースプロキシやアクセス制限を前段に置いてください

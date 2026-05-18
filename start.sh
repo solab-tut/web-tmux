@@ -3,11 +3,66 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SERVER_SOCKET="webtmux-ctl"
 SERVER_SESSION="server"
+HTTP_PORT="8766"
+WS_PORT="8765"
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "required command not found: $1" >&2
+    exit 1
+  fi
+}
+
+kill_by_pattern() {
+  local pattern="$1"
+  if command -v pgrep >/dev/null 2>&1; then
+    local pids
+    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill $pids 2>/dev/null || true
+    fi
+    return
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    local pids
+    pids="$(
+      ps -ax -o pid= -o command= 2>/dev/null \
+        | awk -v pat="$pattern" '$0 ~ pat {print $1}'
+    )"
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill $pids 2>/dev/null || true
+    fi
+  fi
+}
+
+kill_by_port() {
+  local port="$1"
+
+  if command -v lsof >/dev/null 2>&1; then
+    local pids
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill $pids 2>/dev/null || true
+    fi
+    return
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+  fi
+}
+
+need_cmd tmux
+need_cmd python3
 
 # 既存プロセスを停止
-pkill -f "[Pp]ython.*server.py" 2>/dev/null || true
-lsof -tiTCP:8765 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
-lsof -tiTCP:8766 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+kill_by_pattern "[Pp]ython.*server.py"
+kill_by_port "$WS_PORT"
+kill_by_port "$HTTP_PORT"
 tmux -L "$SERVER_SOCKET" kill-server 2>/dev/null || true
 sleep 0.5
 
@@ -22,5 +77,5 @@ if ! tmux -L "$SERVER_SOCKET" has-session -t "$SERVER_SESSION" 2>/dev/null; then
 fi
 
 echo "server started: tmux socket=$SERVER_SOCKET session=$SERVER_SESSION"
-echo "HTTP  http://127.0.0.1:8766/"
-echo "WS    ws://127.0.0.1:8765/"
+echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
+echo "WS    ws://127.0.0.1:${WS_PORT}/"

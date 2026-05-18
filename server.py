@@ -58,9 +58,21 @@ def _window_index(value) -> int | None:
 
 
 def _session_name(value) -> str:
-    value = str(value or '')
-    # tmux session names are targets in command strings here; keep this strict.
-    return value if value.replace('-', '').replace('_', '').isalnum() else ''
+    value = str(value or '').strip()
+    if not value or any(ch in value for ch in '\r\n\0:'):
+        return ''
+    return value[:128]
+
+
+def _window_name(value) -> str:
+    value = str(value or '').strip()
+    if not value or any(ch in value for ch in '\r\n\0'):
+        return ''
+    return value[:128]
+
+
+def _tmux_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 def _to_bool(value) -> bool:
@@ -192,7 +204,7 @@ async def _handle_msg(websocket, msg: dict) -> None:
         import time
         name = _session_name(msg.get('name')) or f'sess-{int(time.time())}'
         await _run_tmux_size_safe('new-session', '-d', '-s', name)
-        await tmux.send_command(f'switch-client -t {name}')
+        await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
         tmux.session = name
         await _send_current_view(websocket)
 
@@ -200,9 +212,37 @@ async def _handle_msg(websocket, msg: dict) -> None:
         name = _session_name(msg.get('session'))
         if not name:
             return
-        await tmux.send_command(f'switch-client -t {name}')
+        await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
         tmux.session = name
         await _send_current_view(websocket)
+
+    elif t == 'rename_session':
+        current_name = _session_name(msg.get('session'))
+        next_name = _session_name(msg.get('name'))
+        if not current_name or not next_name or current_name == next_name:
+            return
+        await _run_tmux('rename-session', '-t', current_name, next_name)
+        if tmux.session == current_name:
+            tmux.session = next_name
+            await _send_current_view(websocket)
+        else:
+            state = await tmux.get_initial_state()
+            await websocket.send(json.dumps({
+                'type':        'state',
+                'session':     state['session'],
+                'sessions':    state['sessions'],
+                'windows':     state['windows'],
+                'panes':       state['panes'],
+                'active_pane': state['active_pane'],
+            }))
+
+    elif t == 'rename_window':
+        win = _window_index(msg.get('window'))
+        name = _window_name(msg.get('name'))
+        if win is None or not name:
+            return
+        await _run_tmux('rename-window', '-t', f'{tmux.session}:{win}', name)
+        await _send_current_view(websocket, msg_type='state')
 
     elif t == 'split_window':
         direction = msg.get('direction', 'h')   # 'h' (side-by-side) or 'v' (top-bottom)
@@ -276,10 +316,11 @@ async def _handle_msg(websocket, msg: dict) -> None:
         if was_subscribed:
             tmux.subscribers.remove(websocket)
         try:
-            await tmux.send_command(f'select-window -t {tmux.session}:{win}')
+            target = f'{tmux.session}:{win}'
+            await tmux.send_command(f'select-window -t {_tmux_quote(target)}')
             # When switching via WINDOW list, show multi-pane windows unzoomed.
             zoom_info = (await tmux.send_command(
-                f'display-message -p -t {tmux.session}:{win} '
+                f'display-message -p -t {_tmux_quote(target)} '
                 '"#{window_zoomed_flag}|#{window_panes}|#{pane_id}"'
             )).strip()
             zoom_parts = zoom_info.split('|', 2)

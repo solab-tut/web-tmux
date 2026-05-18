@@ -96,8 +96,8 @@ html, body {
 
 /* ── Sidebar ─────────────────────────────────────── */
 #sidebar {
-  width: 160px;
-  min-width: 160px;
+  width: 240px;
+  min-width: 240px;
   background: #252525;
   border-right: 1px solid #333;
   overflow-x: hidden;
@@ -170,6 +170,7 @@ html, body {
 }
 .session-item:hover  { background: #2e2e2e; }
 .session-item.active { border-left-color: #4af; color: #fff; }
+.session-item.editing { cursor: default; }
 .session-item:focus {
   outline: 1px solid #4af;
   outline-offset: -1px;
@@ -211,6 +212,7 @@ html, body {
 }
 .window-item:hover  { background: #2e2e2e; }
 .window-item.active { border-left-color: #4af; color: #fff; }
+.window-item.editing { cursor: default; }
 .window-item:focus {
   outline: 1px solid #4af;
   outline-offset: -1px;
@@ -227,6 +229,79 @@ html, body {
   color: #ccc;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-name {
+  color: #ccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-edit-btn {
+  margin-left: auto;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  background: #303030;
+  color: #a8a8a8;
+  border: 1px solid #3f3f3f;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.item-edit-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+.item-inline-editor {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.item-inline-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 24px;
+  padding: 0 7px;
+  color: #e6e6e6;
+  background: #1f1f1f;
+  border: 1px solid #4a4a4a;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.item-inline-input:focus {
+  outline: 1px solid #4af;
+  border-color: #4af;
+}
+
+.item-inline-btn {
+  height: 22px;
+  padding: 0 6px;
+  background: #2f4b2f;
+  color: #d7f5d7;
+  border: 1px solid #426742;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.item-inline-btn.secondary {
+  background: #343434;
+  color: #cfcfcf;
+  border-color: #474747;
 }
 
 /* ── Backdrop (mobile drawer overlay) ────────────── */
