@@ -36,6 +36,7 @@ const XTERM_THEME = {
 let ws             = null;
 let panes          = {};     // pane_id → { term, fitAddon, el }
 let activePaneId   = null;
+let currentSession = '';     // tmux session currently displayed
 let currentWinIdx  = 0;      // tmux window index currently displayed
 let currentWinId   = '';     // tmux window id currently displayed, e.g. @42
 let totalCols      = 80;
@@ -414,7 +415,10 @@ function handleMsg(msg) {
 }
 
 function onState(msg) {
-  if (msg.session) document.getElementById('session-name').textContent = msg.session;
+  if (msg.session) {
+    currentSession = msg.session;
+    document.getElementById('session-name').textContent = msg.session;
+  }
   if (msg.sessions) renderSessionList(msg.sessions);
   if (msg.windows) {
     renderWindowList(msg.windows);
@@ -453,6 +457,7 @@ function onWindowPaneChanged(msg) {
 
 function onInit(msg) {
   resetResizeCache();
+  currentSession = msg.session || '';
   document.getElementById('session-name').textContent = msg.session;
   renderSessionList(msg.sessions);
   renderWindowList(msg.windows);
@@ -464,7 +469,10 @@ function onInit(msg) {
 
 function onWindowSwitched(msg) {
   resetResizeCache();   // new window → terminal size may differ
-  if (msg.session) document.getElementById('session-name').textContent = msg.session;
+  if (msg.session) {
+    currentSession = msg.session;
+    document.getElementById('session-name').textContent = msg.session;
+  }
   renderSessionList(msg.sessions);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
@@ -505,8 +513,10 @@ function onLayoutChange(msg) {
     if (msg.target.startsWith('@')) {
       if (currentWinId && msg.target !== currentWinId) return;
     } else {
-      const parts = msg.target.split(':');
-      const winIdx = parts.length > 1 ? parseInt(parts[1], 10) : NaN;
+      const sep = msg.target.lastIndexOf(':');
+      const sessionName = sep >= 0 ? msg.target.slice(0, sep) : '';
+      const winIdx = sep >= 0 ? parseInt(msg.target.slice(sep + 1), 10) : NaN;
+      if (currentSession && sessionName && sessionName !== currentSession) return;
       if (!isNaN(winIdx) && winIdx !== currentWinIdx) return;
     }
   }
@@ -543,9 +553,10 @@ function onLayoutChange(msg) {
     scheduleLayout(lp, msg.layout);
   }
 
-  if (newIds.length > 0) {
-    markSnapshotPending(newIds);
-    scheduleSnapshotRefresh(newIds);
+  const refreshIds = [...layoutIds];
+  if (refreshIds.length > 0) {
+    markSnapshotPending(refreshIds);
+    scheduleSnapshotRefresh(refreshIds);
   }
 
   focusActivePane({ defer: true, retries: 3 });
@@ -1224,14 +1235,31 @@ function concatBytes(parts) {
   return out;
 }
 
+// capture-pane uses LF only between rows, and rows shorter than the pane width
+// are not padded. xterm.js (LNM reset, convertEol off) treats LF as "down only"
+// without resetting the column, so the next row would start at the previous
+// row's end column. Inserting CR before every LF makes each row start at col 1.
+function lfToCrlf(bytes) {
+  let count = 0;
+  for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x0A) count++;
+  if (count === 0) return bytes;
+  const out = new Uint8Array(bytes.length + count);
+  let j = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0x0A) out[j++] = 0x0D;
+    out[j++] = bytes[i];
+  }
+  return out;
+}
+
 function buildSnapshotFrame(msg, term) {
-  const snapshot = b64ToUint8(msg.data || '');
+  const snapshot = lfToCrlf(b64ToUint8(msg.data || ''));
   const paneRows = Math.max(1, msg.pane_rows || term.rows || 1);
   const paneCols = Math.max(1, msg.pane_cols || term.cols || 1);
   const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
   const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
 
-  const parts = [asciiBytes('\x1b[?25l\x1b[H'), snapshot];
+  const parts = [asciiBytes('\x1b[?25l\x1b[H\x1b[2J'), snapshot];
   parts.push(asciiBytes(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
   return concatBytes(parts);
 }

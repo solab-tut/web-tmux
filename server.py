@@ -203,18 +203,32 @@ async def _handle_msg(websocket, msg: dict) -> None:
     elif t == 'new_session':
         import time
         name = _session_name(msg.get('name')) or f'sess-{int(time.time())}'
-        await _run_tmux_size_safe('new-session', '-d', '-s', name)
-        await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
-        tmux.session = name
-        await _send_current_view(websocket)
+        was_subscribed = websocket in tmux.subscribers
+        if was_subscribed:
+            tmux.subscribers.remove(websocket)
+        try:
+            await _run_tmux_size_safe('new-session', '-d', '-s', name)
+            await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
+            tmux.session = name
+            await _send_current_view(websocket)
+        finally:
+            if was_subscribed:
+                tmux.subscribers.append(websocket)
 
     elif t == 'select_session':
         name = _session_name(msg.get('session'))
         if not name:
             return
-        await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
-        tmux.session = name
-        await _send_current_view(websocket)
+        was_subscribed = websocket in tmux.subscribers
+        if was_subscribed:
+            tmux.subscribers.remove(websocket)
+        try:
+            await tmux.send_command(f'switch-client -t {_tmux_quote(name)}')
+            tmux.session = name
+            await _send_current_view(websocket)
+        finally:
+            if was_subscribed:
+                tmux.subscribers.append(websocket)
 
     elif t == 'rename_session':
         current_name = _session_name(msg.get('session'))
