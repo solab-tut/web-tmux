@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,17 +13,19 @@ for cmd in tmux python3; do
 done
 
 # Python 3.10 以上チェック
-py_ver="$(python3 -c 'import sys; print(sys.version_info[:2])' 2>/dev/null)"
-if [[ "$py_ver" == "(3, "$((${py_ver##3,}")")" ]] && (( "${py_ver##3,}" < 10 )); then
+py_major=$(python3 -c 'import sys; print(sys.version_info[0])')
+py_minor=$(python3 -c 'import sys; print(sys.version_info[1])')
+if (( py_major < 3 || (py_major == 3 && py_minor < 10) )); then
+  py_ver="${py_major}.${py_minor}"
   echo "python3 3.10+ is required (found $py_ver)" >&2
   exit 1
 fi
-echo "python3 $py_ver OK"
+echo "python3 ${py_major}.${py_minor} OK"
 
-# websockets のインストールチェック
+# websockets のインストール
 if ! python3 -c "import websockets" 2>/dev/null; then
   echo "installing websockets ..."
-  python3 -m pip install --user websockets 2>&1
+  python3 -m pip install --user websockets 2>&1 || true
 fi
 
 # start.sh の実行権限付与
