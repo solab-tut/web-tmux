@@ -258,6 +258,28 @@ async def _handle_msg(websocket, msg: dict) -> None:
         await _run_tmux('rename-window', '-t', f'{tmux.session}:{win}', name)
         await _send_current_view(websocket, msg_type='state')
 
+    elif t == 'kill_session':
+        name = _session_name(msg.get('session'))
+        if not name:
+            return
+        await _run_tmux('kill-session', '-t', name)
+        state = await tmux.get_initial_state()
+        await websocket.send(json.dumps({
+            'type':        'state',
+            'session':     state['session'],
+            'sessions':    state['sessions'],
+            'windows':     state['windows'],
+            'panes':       state['panes'],
+            'active_pane': state['active_pane'],
+        }))
+
+    elif t == 'kill_window':
+        win = _window_index(msg.get('window'))
+        if win is None:
+            return
+        await _run_tmux('kill-window', '-t', f'{tmux.session}:{win}')
+        await _send_current_view(websocket, msg_type='state')
+
     elif t == 'split_window':
         direction = msg.get('direction', 'h')   # 'h' (side-by-side) or 'v' (top-bottom)
         flag = '-h' if direction == 'h' else '-v'

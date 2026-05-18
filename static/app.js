@@ -899,6 +899,7 @@ function renderWindowList(windows) {
         _editingWindowIndex = w.index;
         renderWindowList(windows);
       }));
+      div.appendChild(buildDeleteButton(`Close window ${w.index}`, () => killWindow(w.index)));
       div.addEventListener('click', () => {
         switchWindow(w.index);
         if (isMobileWidth()) setSidebarOpen(false);
@@ -939,6 +940,7 @@ function renderSessionList(sessions) {
         _editingSessionName = s.name;
         renderSessionList(sessions);
       }));
+      div.appendChild(buildDeleteButton(`Kill session ${s.name}`, () => killSession(s.name)));
       div.addEventListener('click', () => {
         selectSession(s.name);
         if (isMobileWidth()) setSidebarOpen(false);
@@ -1003,16 +1005,53 @@ function renameSession(currentName, nextName) {
 function buildRenameButton(label, onClick) {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'item-edit-btn';
+  button.className = 'item-icon-btn';
   button.setAttribute('aria-label', label);
   button.title = label;
-  button.textContent = '✎';
+  button.innerHTML =
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"` +
+    ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M11 2.5l2.5 2.5L5.5 13H3v-2.5L11 2.5z"/>` +
+    `<path d="M9 4.5l2.5 2.5"/>` +
+    `</svg>`;
   button.addEventListener('click', (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
     onClick();
   });
   return button;
+}
+
+function buildDeleteButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item-icon-btn item-delete-btn';
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.innerHTML =
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"` +
+    ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M2.5 4.5h11"/>` +
+    `<path d="M5.5 4.5V3.5a1 1 0 011-1h3a1 1 0 011 1v1"/>` +
+    `<path d="M12.5 4.5l-.8 8a1 1 0 01-1 .9H5.3a1 1 0 01-1-.9l-.8-8"/>` +
+    `<path d="M6.5 7.5v3M9.5 7.5v3"/>` +
+    `</svg>`;
+  button.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function killSession(name) {
+  if (!confirm(`Kill session "${name}"?`)) return;
+  ws.send(JSON.stringify({ type: 'kill_session', session: name }));
+}
+
+function killWindow(idx) {
+  if (!confirm(`Close window ${idx}?`)) return;
+  ws.send(JSON.stringify({ type: 'kill_window', window: idx }));
 }
 
 function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
