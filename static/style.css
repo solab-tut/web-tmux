@@ -330,6 +330,26 @@ html, body {
   border-color: #474747;
 }
 
+.item-inline-btn.danger {
+  background: #4a1a1a;
+  color: #f08080;
+  border-color: #7a3030;
+}
+
+.item-inline-btn.danger:hover {
+  background: #6a2020;
+  color: #ffaaaa;
+}
+
+.item-confirm-label {
+  flex: 1;
+  font-size: 11px;
+  color: #bbb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Backdrop (mobile drawer overlay) ────────────── */
 #sidebar-backdrop {
   display: none;

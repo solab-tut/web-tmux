@@ -75,6 +75,8 @@ let _heldClientPrefixPaneId = null;
 let _heldClientPrefixTimer = null;
 let _editingSessionName = '';
 let _editingWindowIndex = null;
+let _confirmDeleteSession = '';
+let _confirmDeleteWindow = null;
 const _pendingSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
@@ -889,17 +891,36 @@ function renderWindowList(windows) {
           renderWindowList(windows);
         },
       }));
+    } else if (_confirmDeleteWindow === w.index) {
+      div.classList.add('confirming');
+      div.appendChild(buildInlineConfirm({
+        label: `Close window ${w.index}?`,
+        onConfirm: () => {
+          _confirmDeleteWindow = null;
+          killWindow(w.index);
+        },
+        onCancel: () => {
+          _confirmDeleteWindow = null;
+          renderWindowList(windows);
+        },
+      }));
     } else {
       div.tabIndex = 0;
       div.innerHTML =
         `<span class="window-idx">${w.index}</span>` +
         `<span class="window-name">${escHtml(w.name)}</span>`;
+      if (windows.length > 1) {
+        div.appendChild(buildDeleteButton(`Close window ${w.index}`, () => {
+          _editingWindowIndex = null;
+          _confirmDeleteWindow = w.index;
+          renderWindowList(windows);
+        }));
+      }
       div.appendChild(buildRenameButton(`Rename window ${w.index}`, () => {
-        _editingSessionName = '';
+        _confirmDeleteWindow = null;
         _editingWindowIndex = w.index;
         renderWindowList(windows);
       }));
-      div.appendChild(buildDeleteButton(`Close window ${w.index}`, () => killWindow(w.index)));
       div.addEventListener('click', () => {
         switchWindow(w.index);
         if (isMobileWidth()) setSidebarOpen(false);
@@ -931,16 +952,33 @@ function renderSessionList(sessions) {
           renderSessionList(sessions);
         },
       }));
+    } else if (_confirmDeleteSession === s.name) {
+      div.classList.add('confirming');
+      div.appendChild(buildInlineConfirm({
+        label: `Kill session "${s.name}"?`,
+        onConfirm: () => {
+          _confirmDeleteSession = '';
+          killSession(s.name);
+        },
+        onCancel: () => {
+          _confirmDeleteSession = '';
+          renderSessionList(sessions);
+        },
+      }));
     } else {
       div.tabIndex = 0;
       div.innerHTML = `<span class="session-name">${escHtml(`(${s.windows}) ${s.name}`)}</span>`;
       div.title = s.attached ? 'attached' : 'detached';
+      div.appendChild(buildDeleteButton(`Kill session ${s.name}`, () => {
+        _editingSessionName = '';
+        _confirmDeleteSession = s.name;
+        renderSessionList(sessions);
+      }));
       div.appendChild(buildRenameButton(`Rename session ${s.name}`, () => {
-        _editingWindowIndex = null;
+        _confirmDeleteSession = '';
         _editingSessionName = s.name;
         renderSessionList(sessions);
       }));
-      div.appendChild(buildDeleteButton(`Kill session ${s.name}`, () => killSession(s.name)));
       div.addEventListener('click', () => {
         selectSession(s.name);
         if (isMobileWidth()) setSidebarOpen(false);
@@ -1045,13 +1083,44 @@ function buildDeleteButton(label, onClick) {
 }
 
 function killSession(name) {
-  if (!confirm(`Kill session "${name}"?`)) return;
   ws.send(JSON.stringify({ type: 'kill_session', session: name }));
 }
 
 function killWindow(idx) {
-  if (!confirm(`Close window ${idx}?`)) return;
   ws.send(JSON.stringify({ type: 'kill_window', window: idx }));
+}
+
+function buildInlineConfirm({ label, onConfirm, onCancel }) {
+  const div = document.createElement('div');
+  div.className = 'item-inline-editor';
+
+  const text = document.createElement('span');
+  text.className = 'item-confirm-label';
+  text.textContent = label;
+
+  const yes = document.createElement('button');
+  yes.type = 'button';
+  yes.className = 'item-inline-btn danger';
+  yes.textContent = 'delete';
+
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'item-inline-btn secondary';
+  cancel.textContent = 'cancel';
+
+  const stop = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+  [div, yes, cancel].forEach((el) => {
+    el.addEventListener('mousedown', stop);
+    el.addEventListener('click', (ev) => ev.stopPropagation());
+  });
+
+  yes.addEventListener('click', onConfirm);
+  cancel.addEventListener('click', onCancel);
+
+  div.appendChild(text);
+  div.appendChild(yes);
+  div.appendChild(cancel);
+  return div;
 }
 
 function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
