@@ -17,19 +17,63 @@ const VIRTUAL_KEYS = {
   right: '\x1b[C',
 };
 
-const XTERM_THEME = {
-  background:  '#1e1e1e',
-  foreground:  '#d4d4d4',
-  cursor:      '#aeafad',
-  black:       '#1e1e1e', brightBlack:   '#808080',
-  red:         '#f44747', brightRed:     '#f44747',
-  green:       '#608b4e', brightGreen:   '#608b4e',
-  yellow:      '#dcdcaa', brightYellow:  '#dcdcaa',
-  blue:        '#569cd6', brightBlue:    '#569cd6',
-  magenta:     '#c586c0', brightMagenta: '#c586c0',
-  cyan:        '#4ec9b0', brightCyan:    '#4ec9b0',
-  white:       '#d4d4d4', brightWhite:   '#d4d4d4',
+const XTERM_THEMES = {
+  dark: {
+    background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#aeafad',
+    black:   '#1e1e1e', brightBlack:   '#808080',
+    red:     '#f44747', brightRed:     '#f44747',
+    green:   '#608b4e', brightGreen:   '#608b4e',
+    yellow:  '#dcdcaa', brightYellow:  '#dcdcaa',
+    blue:    '#569cd6', brightBlue:    '#569cd6',
+    magenta: '#c586c0', brightMagenta: '#c586c0',
+    cyan:    '#4ec9b0', brightCyan:    '#4ec9b0',
+    white:   '#d4d4d4', brightWhite:   '#d4d4d4',
+  },
+  light: {
+    background: '#ffffff', foreground: '#333333', cursor: '#333333',
+    black:   '#000000', brightBlack:   '#767676',
+    red:     '#cd3131', brightRed:     '#cd3131',
+    green:   '#00bc00', brightGreen:   '#14ce14',
+    yellow:  '#949800', brightYellow:  '#b5ba00',
+    blue:    '#0451a5', brightBlue:    '#0451a5',
+    magenta: '#bc05bc', brightMagenta: '#bc05bc',
+    cyan:    '#0598bc', brightCyan:    '#0598bc',
+    white:   '#555555', brightWhite:   '#a5a5a5',
+  },
+  nord: {
+    background: '#2e3440', foreground: '#d8dee9', cursor: '#d8dee9',
+    black:   '#3b4252', brightBlack:   '#4c566a',
+    red:     '#bf616a', brightRed:     '#bf616a',
+    green:   '#a3be8c', brightGreen:   '#a3be8c',
+    yellow:  '#ebcb8b', brightYellow:  '#ebcb8b',
+    blue:    '#81a1c1', brightBlue:    '#81a1c1',
+    magenta: '#b48ead', brightMagenta: '#b48ead',
+    cyan:    '#88c0d0', brightCyan:    '#8fbcbb',
+    white:   '#e5e9f0', brightWhite:   '#eceff4',
+  },
 };
+
+const THEME_STORAGE_KEY = 'web-tmux-theme';
+const VALID_THEMES = ['dark', 'light', 'nord'];
+
+function currentThemeName() {
+  return document.documentElement.dataset.theme || 'dark';
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
+  applyTheme(VALID_THEMES.includes(saved) ? saved : 'dark', false);
+}
+
+function applyTheme(name, save = true) {
+  document.documentElement.dataset.theme = name;
+  if (save) localStorage.setItem(THEME_STORAGE_KEY, name);
+  const xt = XTERM_THEMES[name] || XTERM_THEMES.dark;
+  Object.values(panes).forEach(p => { p.term.options.theme = xt; });
+  document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themeName === name);
+  });
+}
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -753,7 +797,7 @@ function ensurePane(paneId, cols, rows) {
     cursorBlink: true,
     scrollOnUserInput: true,
     smoothScrollDuration: 80,
-    theme:       XTERM_THEME,
+    theme:       XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   });
 
   loadUnicode11Addon(term);
@@ -1648,6 +1692,27 @@ function applyViewportFix() {
   applyViewportFix();
 })();
 
+// ─── Theme ────────────────────────────────────────────────────────────────────
+
+document.getElementById('theme-toggle').addEventListener('click', (e) => {
+  const menu = document.getElementById('theme-menu');
+  menu.hidden = !menu.hidden;
+  e.stopPropagation();
+});
+
+document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    applyTheme(btn.dataset.themeName);
+    document.getElementById('theme-menu').hidden = true;
+  });
+});
+
+document.addEventListener('click', () => {
+  const menu = document.getElementById('theme-menu');
+  if (menu) menu.hidden = true;
+});
+
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
+initTheme();
 connect();
