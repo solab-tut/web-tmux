@@ -492,8 +492,14 @@ function onSnapshot(msg) {
     _pendingSnapshotPanes.delete(msg.pane);
     return;
   }
+  // Stale snapshot: tmux captured at old dims before resize propagated — re-request
+  if (msg.pane_cols && msg.pane_rows &&
+      (msg.pane_cols !== p.term.cols || msg.pane_rows !== p.term.rows)) {
+    _pendingSnapshotPanes.add(msg.pane);
+    scheduleSnapshotRefresh([msg.pane]);
+    return;
+  }
   const frame = buildSnapshotFrame(msg, p.term);
-  try { p.term.reset(); } catch (_) {}
   p.term.write(frame, () => drainBufferedOutput(msg.pane));
 }
 
@@ -1367,7 +1373,9 @@ function buildSnapshotFrame(msg, term) {
   const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
   const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
 
-  const parts = [asciiBytes('\x1b[?25l\x1b[H\x1b[2J'), snapshot];
+  // \x1b[?1049l — exit alternate screen (vim/htop etc.) and restore normal screen+scrollback
+  // \x1b[!p    — soft reset (clears modes/colors without clearing scrollback)
+  const parts = [asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p\x1b[H\x1b[2J'), snapshot];
   parts.push(asciiBytes(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
   return concatBytes(parts);
 }
