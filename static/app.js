@@ -536,13 +536,6 @@ function onSnapshot(msg) {
     _pendingSnapshotPanes.delete(msg.pane);
     return;
   }
-  // Stale snapshot: tmux captured at old dims before resize propagated — re-request
-  if (msg.pane_cols && msg.pane_rows &&
-      (msg.pane_cols !== p.term.cols || msg.pane_rows !== p.term.rows)) {
-    _pendingSnapshotPanes.add(msg.pane);
-    scheduleSnapshotRefresh([msg.pane]);
-    return;
-  }
   const frame = buildSnapshotFrame(msg, p.term);
   p.term.write(frame, () => drainBufferedOutput(msg.pane));
 }
