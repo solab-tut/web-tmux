@@ -499,6 +499,10 @@ function onWindowPaneChanged(msg) {
   if (msg.pane) setActivePaneVisual(msg.pane);
   focusActivePane({ defer: true, retries: 3 });
   scheduleStateRefresh();
+  if (msg.pane && panes[msg.pane]) {
+    markSnapshotPending([msg.pane]);
+    scheduleSnapshotRefresh([msg.pane]);
+  }
 }
 
 function onInit(msg) {
@@ -624,6 +628,10 @@ function scheduleStateRefresh() {
 function onFocus(msg) {
   setActivePaneVisual(msg.pane);
   focusActivePane({ defer: _layoutApplying, retries: 3 });
+  if (msg.pane && panes[msg.pane]) {
+    markSnapshotPending([msg.pane]);
+    scheduleSnapshotRefresh([msg.pane]);
+  }
 }
 
 function onWindowsChanged(msg) {
@@ -1295,8 +1303,7 @@ document.getElementById('btn-split-v').addEventListener('click', () => {
 
 let _resizeDebounce = null;
 
-window.addEventListener('resize', () => {
-  // Debounce: many resize events fire during a drag — collapse to one.
+function _onPaneAreaResize() {
   if (_resizeDebounce) clearTimeout(_resizeDebounce);
   _resizeDebounce = setTimeout(() => {
     _resizeDebounce = null;
@@ -1307,7 +1314,18 @@ window.addEventListener('resize', () => {
       scheduleLayout(_currentLayoutPanes, _currentLayoutStr);
     }
   }, 100);
-});
+}
+
+// ResizeObserver catches ALL size changes to the pane area (window resize,
+// sidebar open/close, etc.) — not just window-level resize events.
+(function setupPaneAreaResize() {
+  const area = document.getElementById('pane-area');
+  if (window.ResizeObserver) {
+    new ResizeObserver(_onPaneAreaResize).observe(area);
+  } else {
+    window.addEventListener('resize', _onPaneAreaResize);
+  }
+})();
 
 // ─── Layout string parser (client-side mirror of layout_parser.py) ────────────
 
