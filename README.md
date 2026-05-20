@@ -1,159 +1,162 @@
 # web-tmux
 
-ブラウザから `tmux` セッションを操作するための軽量な Web フロントエンドです。  
-Python で `tmux -CC` を制御し、WebSocket 経由で端末入出力を中継し、フロントエンドでは `xterm.js` を使ってペインを描画します。
+A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and control your tmux sessions from any browser — including mobile — over a local network or securely via Tailscale.
 
-## 主な機能
+```
+Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
+```
 
-- `tmux` のウィンドウ一覧、セッション一覧、ペイン一覧をサイドバーに表示
-- アクティブなウィンドウやペインの切り替え
-- セッション・ウィンドウのリネームとインライン削除（最終ウィンドウ削除ガード付き）
-- `panes` リストからペインを選ぶと対象ペインへ切り替えたうえで自動ズーム
-- `windows` リストからウィンドウを選ぶと、複数ペイン構成ならズームを解除して表示
-- 新規ウィンドウ・新規セッション作成
-- ペインの縦分割・横分割
-- ブラウザの表示サイズに合わせた `tmux` 側のリサイズ
-- **カラーテーマ切り替え（Dark / Light / Nord）** — トップバーのアイコンから選択、`localStorage` に保存
-- ページタイトルとトップバーへのホスト名表示
-- ウィンドウ・ペイン切り替え後のスナップショット再描画（scrollback バッファを保持）
-- モバイル表示時の 1 ペイン集中表示
-- モバイル向けの仮想キー（`Esc` / `Tab` / `Enter` / カーソルキー / `Ctrl` トグル）
-- モバイル向けトップバー操作（半ページスクロール・クリップボードシート）
-- モバイル表示時の日本語入力（IME）対応
+## Features
 
-## 動作概要
+- Sidebar showing sessions, windows, and panes with live updates
+- Switch, rename, and delete sessions and windows inline
+- Create new windows, sessions, and splits (horizontal / vertical)
+- Pane zoom: click a pane in the sidebar to zoom in; click again to return to split view
+- Terminal automatically resizes to match the browser viewport
+- Color themes: Dark (default), Light, Nord
+- Adjustable font size (11–18 px), persisted in `localStorage`
+- **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), clipboard sheet, scroll buttons, IME support
 
-構成は次の 3 層です。
+## Requirements
 
-1. `server.py`
-   - 静的ファイルを `127.0.0.1:8766` で配信します。
-   - WebSocket を `127.0.0.1:8765` で待ち受けます。
-2. `tmux_control.py`
-   - `tmux -CC attach-session` を PTY 上で起動し、制御モードの通知とコマンド応答を扱います。
-3. `static/`
-   - ブラウザ上で `xterm.js` により端末を表示します。
-   - レイアウト変更、入力送信、スナップショット復元を処理します。
+- Python 3.10 or later
+- tmux
+- [`websockets`](https://pypi.org/project/websockets/) Python package
+- A modern browser (Chrome, Safari, Firefox)
+- Internet access to load xterm.js from jsDelivr CDN
 
-## 前提条件
+## Installation
 
-- Python 3.10 以上
-- `tmux`
-- `pip` で `websockets` を導入できること
-- `start.sh` を使う場合は `bash` が使えること
-- ブラウザから `jsdelivr.net` にアクセスできること（`xterm.js` を CDN から読み込みます）
-
-## 対応環境
-
-- macOS / Linux
-- `tmux -CC` と PTY 制御に依存するため、Windows ネイティブ動作は想定していません
-- ブラウザはモダンブラウザ前提です
-
-## 設置方法
-
-### 1. リポジトリを配置
+### macOS
 
 ```bash
-git clone git@github.com:solab-tut/web-tmux.git
+# Install dependencies if needed
+brew install tmux
+
+# Clone the repository
+git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
-```
 
-### 2. Python 依存関係を導入
-
-```bash
+# Install the Python dependency
 python3 -m pip install websockets
-```
 
-### 3. サーバーを起動
-
-```bash
+# Start the server
 ./start.sh
 ```
 
-起動に成功すると次のアドレスが表示されます。
+### Linux (Debian / Ubuntu)
 
+```bash
+# Install dependencies
+sudo apt install tmux python3 python3-pip
+
+# Clone the repository
+git clone https://github.com/solab-tut/web-tmux.git
+cd web-tmux
+
+# Install the Python dependency
+python3 -m pip install websockets
+
+# Start the server
+./start.sh
 ```
-HTTP  http://127.0.0.1:8766/
-WS    ws://127.0.0.1:8765/
-```
 
-ブラウザで `http://127.0.0.1:8766/` を開いて利用します。
+Open **http://127.0.0.1:8766/** in your browser.
 
-操作対象のセッション名（デフォルト: `web`）を変更したい場合は環境変数で指定します。
+### Configuration
+
+**Custom tmux session name** (default: `web`):
 
 ```bash
 TMUX_SESSION=my-session ./start.sh
 ```
 
-## 利用方法
+`start.sh` stops any existing server process before starting, so re-running it is always safe.
 
-### 基本操作
+## Usage
 
-- サイドバーの `sessions` からセッションを切り替えます
-- `windows` からウィンドウを切り替えます
-- `panes` からアクティブペインを切り替えます（選択後に自動ズーム）
-- `+` ボタンで新規ウィンドウ、`+ new session` で新規セッションを作成します
-- `⇿` で横分割、`⇕` で縦分割します
-- セッション・ウィンドウ名はサイドバー項目の編集アイコンからリネームできます
-- 削除はサイドバー項目のゴミ箱アイコン → インライン確認ボタンで実行します
+### Sidebar
 
-### カラーテーマ
+| Section | What you can do |
+|---------|-----------------|
+| **Sessions** | Click to switch; ✏ to rename; 🗑 to delete |
+| **Windows** | Click to switch (zoomed windows unzoom automatically) |
+| **Panes** | Click active pane → toggle zoom on/off; click another pane → zoom to it |
+| **+** (windows row) | New window in current session |
+| **+** (sessions row) | New session |
+| **⇿ / ⇕** | Split active pane horizontally / vertically |
 
-トップバー右端の半円アイコンをクリックするとテーマメニューが開きます。
+### In-terminal shortcuts
 
-| テーマ | 概要 |
-|--------|------|
-| Dark   | VS Code Dark ベースのダークテーマ（デフォルト）|
-| Light  | 明るい背景のライトテーマ |
-| Nord   | Nordic カラーパレットのダークテーマ |
+web-tmux intercepts **Ctrl+A** as a client-side prefix (independent of tmux's own prefix key):
 
-選択したテーマはブラウザの `localStorage` に保存され、次回以降も維持されます。
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+A s` | Focus the session list |
+| `Ctrl+A w` | Focus the window list |
+| `Ctrl+A q` | Focus the pane list |
 
-### モバイル操作
+Arrow keys in a focused list navigate items; Enter activates the selected item; Escape returns focus to the terminal.
 
-- 画面幅が狭い場合はアクティブペインのみを全面表示します
-- ハンバーガーボタンからサイドバーを開閉できます
-- 上部ボタンでアクティブペインを半ページ単位でスクロールできます
-- クリップボードボタンからコピー / ペースト送信用シートを開けます
-- 下部の仮想キーから `Esc`、`Tab`、`Enter`、カーソル移動を送れます
-- `Ctrl` を有効にすると、次の 1 文字に対して Ctrl 修飾を適用します
+### Theme and font size
 
-## Tailscale を使った VPN 内利用
+Click the **◑** (theme) or **Aa** (font size) icons in the top-right corner to open a dropdown. Both settings are saved in `localStorage` and restored on the next visit.
 
-[Tailscale](https://tailscale.com/) の **Tailscale Serve** を使うと、ローカルで動く web-tmux を Tailnet 内の任意のデバイスから HTTPS で安全に利用できます。追加のパスワード設定は不要で、Tailscale のデバイス認証がそのまま認証層として機能します。
+| Theme | Description |
+|-------|-------------|
+| Dark  | VS Code Dark-inspired dark theme (default) |
+| Light | Light background theme |
+| Nord  | Nordic colour palette dark theme |
 
-### 仕組み
+Font size options: 11, 12, 13, 14, 16, 18 px.
 
-web-tmux は HTTP（ポート 8766）と WebSocket（ポート 8765）の 2 ポートを `127.0.0.1` でリッスンします。Tailscale Serve でそれぞれを Tailnet 上の HTTPS エンドポイントとして公開します。
+### Mobile
 
-フロントエンドはページのプロトコルが `https://` であることを検出すると、WebSocket 接続を自動的に `wss://` に切り替えます。
+On screens ≤ 768 px wide:
 
-### 設定手順
+- Only the active pane is shown fullscreen
+- Tap the **☰** button to open / close the sidebar
+- **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
+  - `Ctrl` toggle applies a Control modifier to the next keystroke
+- **Top-right buttons** — half-page scroll up/down, clipboard sheet (copy viewport text / paste text to terminal)
 
-Linux では `sudo` が必要です。macOS では不要な場合があります。
+## Remote access with Tailscale
+
+[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS with no extra authentication setup — Tailscale device authentication acts as the access layer.
+
+### How it works
+
+web-tmux listens on two local ports:
+
+| Port | Purpose |
+|------|---------|
+| 8766 | Static files (HTTP) |
+| 8765 | WebSocket terminal I/O |
+
+Both need to be exposed via `tailscale serve`. The browser automatically upgrades the WebSocket connection to `wss://` when the page is served over HTTPS.
+
+### Setup
 
 ```bash
-# HTTP フロントエンドを Tailnet 内に HTTPS（ポート 8766）で公開
-sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
-
-# WebSocket を同ホスト名・ポート 8765 で公開
-sudo tailscale serve --bg --https=8765 http://127.0.0.1:8765
+tailscale serve --bg --https=8766 http://127.0.0.1:8766
+tailscale serve --bg --https=8765 http://127.0.0.1:8765
 ```
 
-設定後、次の URL でアクセスできます（ホスト名は `tailscale status` または Tailscale 管理画面で確認）。
+> **Linux:** `tailscale serve` requires `sudo`. On macOS it typically does not.
+
+Access the app at:
 
 ```
 https://<machine-name>.<tailnet>.ts.net:8766/
 ```
 
-フロントエンドはアクセスが `https://` であることを検出し、WebSocket 接続を自動的に `wss://<machine-name>.<tailnet>.ts.net:8765/` へ切り替えます。
-
-### 確認
+### Verify
 
 ```bash
 tailscale serve status
 ```
 
-以下のような出力が得られれば正常です。
+Expected output:
 
 ```
 https://<machine-name>.<tailnet>.ts.net:8765/ (tailnet only)
@@ -163,42 +166,40 @@ https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 |-- / proxy http://127.0.0.1:8766
 ```
 
-### 停止
+### Stop
 
 ```bash
-sudo tailscale serve --https=8766 off
-sudo tailscale serve --https=8765 off
+tailscale serve --https=8766 off
+tailscale serve --https=8765 off
 ```
 
-### 注意
+> **Linux:** `sudo` is required here as well.
 
-- Tailscale Serve による公開範囲は Tailnet 内のデバイスのみです（インターネット公開ではありません）
-- インターネットへの公開が必要な場合は **Tailscale Funnel** を使いますが、その場合は web-tmux の前段に Basic 認証などを設けることを強く推奨します
+### Public access (Tailscale Funnel)
 
-## ファイル構成
+To access web-tmux from outside your Tailnet, use `tailscale funnel` instead of `serve`. Because web-tmux has **no built-in authentication**, place a reverse proxy with HTTP Basic Auth (or equivalent) in front of it before enabling Funnel.
+
+## Security notes
+
+- The server binds to `127.0.0.1` only and is not directly reachable from the network.
+- **There is no built-in authentication.** For any remote access, use Tailscale Serve (Tailnet-scoped) or a reverse proxy with authentication.
+- The WebSocket URL switches automatically between `ws://` (HTTP) and `wss://` (HTTPS).
+
+## File layout
 
 ```
 web-tmux/
-├── server.py          # HTTP / WebSocket サーバー
-├── tmux_control.py    # tmux -CC 制御ラッパー
-├── layout_parser.py   # tmux レイアウト文字列解析
-├── start.sh           # 起動スクリプト
+├── server.py          # HTTP + WebSocket server
+├── tmux_control.py    # tmux -CC control-mode wrapper
+├── layout_parser.py   # tmux layout string parser
+├── start.sh           # Startup / restart script
 └── static/
-    ├── index.html     # HTML 骨格
-    ├── style.css      # レイアウト・テーマ定義
-    └── app.js         # クライアント側ロジック
+    ├── index.html
+    ├── style.css
+    └── app.js
 ```
 
-## 注意点
-
-- `start.sh` は起動前に既存の `server.py` プロセスを停止し、ポート 8765・8766 を解放してから再起動します
-- サーバーは `127.0.0.1` にのみ bind します
-- **認証機構はありません。** 外部公開する場合は Tailscale Serve / Funnel、またはリバースプロキシによるアクセス制限を前段に置いてください
-- WebSocket URL はページのプロトコルに応じて `ws://` / `wss://` を自動選択します
-
-## ログ
-
-サーバーの起動・接続・スナップショット取得ログは `server.log` に出力されます。
+## Logs
 
 ```bash
 tail -f server.log
