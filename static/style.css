@@ -252,6 +252,10 @@ html, body {
 #topbar-host {
   color: var(--text-muted);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 
 #topbar-host::after {
@@ -263,14 +267,24 @@ html, body {
   color: var(--accent);
   font-weight: bold;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 
-#topbar-spacer { flex: 1; }
+#topbar-spacer { flex: 1 1 0; min-width: 0; }
 
 #topbar-actions {
   display: none;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+#font-size-picker,
+#theme-picker {
+  flex-shrink: 0;
 }
 
 .topbar-btn {
@@ -791,6 +805,7 @@ html, body {
   font-size: 12px;
   color: var(--status-idle);
   pointer-events: none;
+  flex-shrink: 0;
 }
 #status.connected    { color: var(--status-ok); }
 #status.disconnected { color: var(--status-err); }
