@@ -745,34 +745,32 @@ function positionPanes(layoutPanes, layoutStr) {
   });
 
   // After CSS is painted: fit every pane to its container using fitAddon.
-  // fitAddon computes the exact cols/rows that fill the pixel area without
-  // overflow — no manual ratio needed, no term.resize() override needed.
-  // We send maybeSendResize so tmux's layout converges to the browser's size.
+  // fitAddon computes the exact cols/rows that fill the pixel area.
   requestAnimationFrame(() => {
-    let charW = 0, charH = 0;
-
-    // Fit all panes; measure char dimensions from the largest one
+    // Fit all panes; capture term.cols/rows from the largest pane as reference.
     const refLp = layoutPanes.reduce((best, lp) =>
       lp.cols * lp.rows > best.cols * best.rows ? lp : best, layoutPanes[0]);
 
+    let refTermCols = 0, refTermRows = 0;
     layoutPanes.forEach(({ id }) => {
       const pid = '%' + id;
       const p = panes[pid];
       if (!p) return;
       try { p.fitAddon.fit(); } catch (_) {}
       if (pid === '%' + refLp.id && p.term.cols > 0) {
-        charW = p.el.clientWidth  / p.term.cols;
-        charH = p.el.clientHeight / p.term.rows;
+        refTermCols = p.term.cols;
+        refTermRows = p.term.rows;
       }
     });
 
-    // Tell tmux the total terminal dimensions derived from actual char size.
-    // Only send when the computed size differs from what tmux already reported
-    // via the layout string — this breaks the positionPanes→resize→layout-change
-    // feedback loop that causes the right-side pane to oscillate after resize.
-    if (charW > 0 && charH > 0) {
-      const sendCols = Math.floor(W / charW);
-      const sendRows = Math.floor(H / charH);
+    // Compute desired total cols/rows via the ratio of fitted vs layout cols.
+    // Using ratios avoids the sub-pixel rounding error from clientWidth/term.cols,
+    // which caused positionPanes→resize→layout-change oscillation after resize or
+    // font-size changes. When term.cols == refLp.cols the ratio is 1 and no
+    // resize is sent, breaking the feedback loop immediately.
+    if (refTermCols > 0 && refLp.cols > 0 && refTermRows > 0 && refLp.rows > 0) {
+      const sendCols = Math.round(totalCols * refTermCols / refLp.cols);
+      const sendRows = Math.round(totalRows * refTermRows / refLp.rows);
       if (sendCols !== totalCols || sendRows !== totalRows) {
         maybeSendResize(sendCols, sendRows);
       }
