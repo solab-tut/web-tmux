@@ -56,6 +56,10 @@ const XTERM_THEMES = {
 const THEME_STORAGE_KEY = 'web-tmux-theme';
 const VALID_THEMES = ['dark', 'light', 'nord'];
 
+const FONT_SIZE_STORAGE_KEY = 'web-tmux-font-size';
+const VALID_FONT_SIZES = [11, 12, 13, 14, 16, 18];
+const DEFAULT_FONT_SIZE = 13;
+
 function currentThemeName() {
   return document.documentElement.dataset.theme || 'dark';
 }
@@ -73,6 +77,28 @@ function applyTheme(name, save = true) {
   document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.themeName === name);
   });
+}
+
+function currentFontSize() {
+  const saved = parseInt(localStorage.getItem(FONT_SIZE_STORAGE_KEY), 10);
+  return VALID_FONT_SIZES.includes(saved) ? saved : DEFAULT_FONT_SIZE;
+}
+
+function initFontSize() {
+  applyFontSize(currentFontSize(), false);
+}
+
+function applyFontSize(size, save = true) {
+  if (!VALID_FONT_SIZES.includes(size)) return;
+  if (save) localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(size));
+  Object.values(panes).forEach(p => { p.term.options.fontSize = size; });
+  document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.fontSize, 10) === size);
+  });
+  if (Object.keys(panes).length > 0) {
+    resetResizeCache();
+    refitCurrentLayout();
+  }
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -656,7 +682,7 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
   _currentLayoutStr   = layoutStr || '';
   _currentLayoutPanes = lp || [];
 
-  // Create pane elements first (they're hidden via mobile CSS until .active is set)
+  // Create pane elements before positioning so fit() can measure them.
   if (!lp) {
     if (panesInfo && panesInfo.length > 0) {
       ensurePane(panesInfo[0].id, panesInfo[0].cols, panesInfo[0].rows);
@@ -670,9 +696,7 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
     (lp && lp.length > 0 ? '%' + lp[0].id : null) ||
     (panesInfo && panesInfo.length > 0 ? panesInfo[0].id : null);
 
-  // IMPORTANT: mark the active pane BEFORE positioning, so the `.active`
-  // class makes the element visible (mobile CSS hides non-active panes).
-  // Otherwise fit() would measure a `display: none` element as 0×0.
+  // Mark the active pane before positioning so focus and outlines are current.
   if (fallbackActivePane) {
     setActivePaneVisual(fallbackActivePane);
     activePaneId = fallbackActivePane;
@@ -793,7 +817,7 @@ function ensurePane(paneId, cols, rows) {
   const term = new Terminal({
     cols, rows,
     fontFamily:  FONT_FAMILY,
-    fontSize:    13,
+    fontSize:    currentFontSize(),
     scrollback:  10000,
     cursorBlink: true,
     scrollOnUserInput: true,
@@ -907,8 +931,10 @@ function setActivePaneVisual(paneId) {
   for (const [id, p] of Object.entries(panes)) {
     p.el.classList.toggle('active', id === paneId);
   }
-  // On mobile, the active pane fills the screen — refit it to the new size
-  if (isMobileWidth() && !_layoutApplying) {
+  // With a single visible pane (including tmux zoom), selecting it can change
+  // the usable viewport. In split layouts the active pane is only a fraction of
+  // the tmux window, so do not send its pane cols/rows as the total size.
+  if (isMobileWidth() && !_layoutApplying && _currentLayoutPanes.length <= 1) {
     const p = panes[paneId];
     if (p) {
       requestAnimationFrame(() => {
@@ -1721,9 +1747,25 @@ document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
 document.addEventListener('click', () => {
   const menu = document.getElementById('theme-menu');
   if (menu) menu.hidden = true;
+  const fsMenu = document.getElementById('font-size-menu');
+  if (fsMenu) fsMenu.hidden = true;
+});
+
+document.getElementById('font-size-toggle').addEventListener('click', (e) => {
+  const menu = document.getElementById('font-size-menu');
+  menu.hidden = !menu.hidden;
+  e.stopPropagation();
+});
+
+document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    applyFontSize(parseInt(btn.dataset.fontSize, 10));
+    document.getElementById('font-size-menu').hidden = true;
+  });
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 initTheme();
+initFontSize();
 connect();
