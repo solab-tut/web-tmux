@@ -179,6 +179,8 @@ tailscale serve --https=8765 off
 
 ### Public access (Tailscale Funnel)
 
+> **Note:** This section is untested.
+
 To access web-tmux from outside your Tailnet, use `tailscale funnel` instead of `serve`. Because web-tmux has **no built-in authentication**, place a reverse proxy with HTTP Basic Auth (or equivalent) in front of it before enabling Funnel.
 
 ## Security notes

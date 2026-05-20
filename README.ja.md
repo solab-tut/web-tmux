@@ -179,6 +179,8 @@ tailscale serve --https=8765 off
 
 ### Tailscale Funnel による外部公開
 
+> **注意：** この節の内容は未確認です。
+
 Tailnet 外からアクセスする場合は `tailscale serve` の代わりに `tailscale funnel` を使用します。web-tmux には**認証機構がない**ため、Funnel を有効にする前に HTTP Basic 認証などを備えたリバースプロキシを前段に置くことを強く推奨します。
 
 ## セキュリティ
