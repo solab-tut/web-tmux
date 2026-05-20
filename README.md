@@ -2,6 +2,8 @@
 
 A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and control your tmux sessions from any browser — including mobile — over a local network or securely via Tailscale.
 
+[日本語](README.ja.md)
+
 ```
 Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 ```
