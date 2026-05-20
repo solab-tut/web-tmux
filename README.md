@@ -88,18 +88,6 @@ TMUX_SESSION=my-session ./start.sh
 | **+** (sessions row) | New session |
 | **⇿ / ⇕** | Split active pane horizontally / vertically |
 
-### In-terminal shortcuts
-
-web-tmux intercepts **Ctrl+A** as a client-side prefix (independent of tmux's own prefix key):
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+A s` | Focus the session list |
-| `Ctrl+A w` | Focus the window list |
-| `Ctrl+A q` | Focus the pane list |
-
-Arrow keys in a focused list navigate items; Enter activates the selected item; Escape returns focus to the terminal.
-
 ### Theme and font size
 
 Click the **◑** (theme) or **Aa** (font size) icons in the top-right corner to open a dropdown. Both settings are saved in `localStorage` and restored on the next visit.
