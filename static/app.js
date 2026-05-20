@@ -767,9 +767,15 @@ function positionPanes(layoutPanes, layoutStr) {
     });
 
     // Tell tmux the total terminal dimensions derived from actual char size.
-    // The server's resize-master guard ensures only one tab does this.
+    // Only send when the computed size differs from what tmux already reported
+    // via the layout string — this breaks the positionPanes→resize→layout-change
+    // feedback loop that causes the right-side pane to oscillate after resize.
     if (charW > 0 && charH > 0) {
-      maybeSendResize(Math.floor(W / charW), Math.floor(H / charH));
+      const sendCols = Math.floor(W / charW);
+      const sendRows = Math.floor(H / charH);
+      if (sendCols !== totalCols || sendRows !== totalRows) {
+        maybeSendResize(sendCols, sendRows);
+      }
     }
     _layoutApplying = false;
     focusActivePane({ defer: true, retries: 2 });
