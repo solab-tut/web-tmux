@@ -1275,7 +1275,9 @@ function activateSidebarItem(item) {
   } else if (item.classList.contains('window-item')) {
     switchWindow(Number(item.dataset.windowIndex));
   } else if (item.classList.contains('pane-item')) {
-    selectPane(item.dataset.paneId || '', { forceZoom: true });
+    const paneId = item.dataset.paneId || '';
+    const isCurrentPane = paneId === activePaneId;
+    selectPane(paneId, isCurrentPane ? { toggleZoom: true } : { forceZoom: true });
   }
   if (isMobileWidth()) setSidebarOpen(false);
 }
