@@ -747,30 +747,40 @@ function positionPanes(layoutPanes, layoutStr) {
   // After CSS is painted: fit every pane to its container using fitAddon.
   // fitAddon computes the exact cols/rows that fill the pixel area.
   requestAnimationFrame(() => {
-    // Fit all panes; capture term.cols/rows from the largest pane as reference.
+    // Fit all panes; pick the largest as the source for character dimensions.
     const refLp = layoutPanes.reduce((best, lp) =>
       lp.cols * lp.rows > best.cols * best.rows ? lp : best, layoutPanes[0]);
 
-    let refTermCols = 0, refTermRows = 0;
+    let charW = 0, charH = 0;
     layoutPanes.forEach(({ id }) => {
       const pid = '%' + id;
       const p = panes[pid];
       if (!p) return;
       try { p.fitAddon.fit(); } catch (_) {}
       if (pid === '%' + refLp.id && p.term.cols > 0) {
-        refTermCols = p.term.cols;
-        refTermRows = p.term.rows;
+        // Prefer the renderer's exact CSS cell size (same value fitAddon uses
+        // internally) — avoids the clientWidth integer-rounding that made
+        // sendCols oscillate ±1 between positionPanes calls.
+        try {
+          const cell = p.term._core._renderService.dimensions.css.cell;
+          if (cell && cell.width > 0) { charW = cell.width; charH = cell.height; }
+        } catch (_) {}
+        // Fallback if the internal path is unavailable.
+        if (!charW && p.el.clientWidth > 0) {
+          charW = p.el.clientWidth  / p.term.cols;
+          charH = p.el.clientHeight / p.term.rows;
+        }
       }
     });
 
-    // Compute desired total cols/rows via the ratio of fitted vs layout cols.
-    // Using ratios avoids the sub-pixel rounding error from clientWidth/term.cols,
-    // which caused positionPanes→resize→layout-change oscillation after resize or
-    // font-size changes. When term.cols == refLp.cols the ratio is 1 and no
-    // resize is sent, breaking the feedback loop immediately.
-    if (refTermCols > 0 && refLp.cols > 0 && refTermRows > 0 && refLp.rows > 0) {
-      const sendCols = Math.round(totalCols * refTermCols / refLp.cols);
-      const sendRows = Math.round(totalRows * refTermRows / refLp.rows);
+    // sendCols is now derived from the renderer's true charW, so it is the
+    // same value every call for a given font size and window width.  The
+    // _lastResize guard in maybeSendResize will stop the feedback loop after
+    // the first send; the totalCols guard stops it immediately if tmux already
+    // reported the correct size.
+    if (charW > 0 && charH > 0) {
+      const sendCols = Math.floor(W / charW);
+      const sendRows = Math.floor(H / charH);
       if (sendCols !== totalCols || sendRows !== totalRows) {
         maybeSendResize(sendCols, sendRows);
       }
