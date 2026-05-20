@@ -773,11 +773,23 @@ function positionPanes(layoutPanes, layoutStr) {
       }
     });
 
-    // sendCols is now derived from the renderer's true charW, so it is the
-    // same value every call for a given font size and window width.  The
-    // _lastResize guard in maybeSendResize will stop the feedback loop after
-    // the first send; the totalCols guard stops it immediately if tmux already
-    // reported the correct size.
+    // Force each pane to exactly the col/row count tmux reports.
+    // fit() derives cols from pixel width which can be ±1 off due to sub-pixel
+    // rounding — if term.cols ≠ tmux's pane width, zsh output formatted for the
+    // tmux width wraps or leaves a gap, causing the reversed-% and line-shift
+    // artifacts visible in split view (zoom view is unaffected because a single
+    // pane always matches the maybeSendResize value exactly).
+    layoutPanes.forEach(({ id, cols: lCols, rows: lRows }) => {
+      const pid = '%' + id;
+      const p = panes[pid];
+      if (!p) return;
+      if (p.term.cols !== lCols || p.term.rows !== lRows) {
+        try { p.term.resize(lCols, lRows); } catch (_) {}
+      }
+    });
+
+    // sendCols is derived from the renderer's true charW so it is stable across
+    // positionPanes calls for the same font/window size.
     if (charW > 0 && charH > 0) {
       const sendCols = Math.floor(W / charW);
       const sendRows = Math.floor(H / charH);
