@@ -886,7 +886,8 @@ function selectPane(paneId, opts) {
   focusActivePane({ retries: 2 });
   if (ws && ws.readyState === WebSocket.OPEN) {
     const payload = { type: 'select_pane', pane: paneId };
-    if (options.forceZoom) payload.force_zoom = true;
+    if (options.forceZoom)  payload.force_zoom  = true;
+    if (options.toggleZoom) payload.toggle_zoom = true;
     ws.send(JSON.stringify(payload));
   }
 }
@@ -1079,7 +1080,8 @@ function renderPaneList(panesInfo, activePane) {
       `<span class="pane-id">${escHtml(p.id)}</span>` +
       `<span class="pane-cmd">${escHtml(p.command || '')}</span>`;
     div.addEventListener('click', () => {
-      selectPane(p.id, { forceZoom: true });
+      const isCurrentPane = p.id === activePaneId;
+      selectPane(p.id, isCurrentPane ? { toggleZoom: true } : { forceZoom: true });
       if (isMobileWidth()) setSidebarOpen(false);
       focusActivePane();
     });

@@ -329,7 +329,8 @@ async def _handle_msg(websocket, msg: dict) -> None:
     elif t == 'select_pane':
         _resize_master = websocket
         pane = _pane_id(msg.get('pane'))
-        force_zoom = _to_bool(msg.get('force_zoom'))
+        force_zoom  = _to_bool(msg.get('force_zoom'))
+        toggle_zoom = _to_bool(msg.get('toggle_zoom'))
         if pane:
             await tmux.send_command(f'select-pane -t {pane}')
             if force_zoom:
@@ -338,6 +339,8 @@ async def _handle_msg(websocket, msg: dict) -> None:
                 )).strip()
                 if zoomed != '1':
                     await tmux.send_command(f'resize-pane -Z -t {pane}')
+            elif toggle_zoom:
+                await tmux.send_command(f'resize-pane -Z -t {pane}')
 
     elif t == 'select_window':
         _resize_master = websocket
