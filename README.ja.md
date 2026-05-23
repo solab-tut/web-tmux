@@ -25,7 +25,9 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 - tmux
 - Python パッケージ [`websockets`](https://pypi.org/project/websockets/)
 - モダンブラウザ（Chrome / Safari / Firefox）
-- jsDelivr CDN からの xterm.js 読み込みのためインターネット接続
+
+ブラウザ端末のアセットは `static/vendor/` に同梱しているため、実行時に
+CDN 接続は不要です。
 
 ## インストール
 
@@ -177,6 +179,15 @@ Tailnet 外からアクセスする場合は `tailscale serve` の代わりに `
 - **認証機構はありません。** リモートアクセスには Tailscale Serve（Tailnet 限定）またはリバースプロキシを利用してください。
 - WebSocket URL はページのプロトコルに応じて `ws://`（HTTP）/ `wss://`（HTTPS）を自動選択します。
 
+## サードパーティのブラウザアセット
+
+- `xterm@5.3.0`
+- `xterm-addon-fit@0.8.0`
+- `xterm-addon-unicode11@0.4.0`
+
+これらのアセットは MIT ライセンスで配布されています。ライセンスファイルは
+`static/vendor/` 内の各 vendored ファイルの近くに同梱しています。
+
 ## ファイル構成
 
 ```
@@ -188,7 +199,8 @@ web-tmux/
 └── static/
     ├── index.html
     ├── style.css
-    └── app.js
+    ├── app.js
+    └── vendor/          # 同梱した xterm.js 実行時アセットとライセンス
 ```
 
 ## ログ

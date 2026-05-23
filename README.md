@@ -25,7 +25,9 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 - tmux
 - [`websockets`](https://pypi.org/project/websockets/) Python package
 - A modern browser (Chrome, Safari, Firefox)
-- Internet access to load xterm.js from jsDelivr CDN
+
+The browser terminal assets are vendored under `static/vendor/`, so the app does
+not need CDN access at runtime.
 
 ## Installation
 
@@ -177,6 +179,15 @@ To access web-tmux from outside your Tailnet, use `tailscale funnel` instead of 
 - **There is no built-in authentication.** For any remote access, use Tailscale Serve (Tailnet-scoped) or a reverse proxy with authentication.
 - The WebSocket URL switches automatically between `ws://` (HTTP) and `wss://` (HTTPS).
 
+## Third-party browser assets
+
+- `xterm@5.3.0`
+- `xterm-addon-fit@0.8.0`
+- `xterm-addon-unicode11@0.4.0`
+
+These assets are distributed under the MIT license. Their license files are
+included next to the vendored files in `static/vendor/`.
+
 ## File layout
 
 ```
@@ -188,7 +199,8 @@ web-tmux/
 └── static/
     ├── index.html
     ├── style.css
-    └── app.js
+    ├── app.js
+    └── vendor/          # vendored xterm.js runtime assets and licenses
 ```
 
 ## Logs

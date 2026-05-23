@@ -6,6 +6,8 @@ const FONT_FAMILY = '"SF Mono", Menlo, "Cascadia Code", "Fira Code", monospace';
 const MOBILE_BP   = 768;
 const CLIENT_PREFIX_KEY = '\x01'; // Ctrl+A, matching this app's tmux setup.
 const NON_ASCII_DUPLICATE_SUPPRESS_MS = 120;
+const ALT_SCREEN_EXIT_PARAMS = new Set(['47', '1047', '1049']);
+const OUTPUT_SCAN_TAIL_BYTES = 32;
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -148,7 +150,9 @@ let _editingWindowIndex = null;
 let _confirmDeleteSession = '';
 let _confirmDeleteWindow = null;
 const _pendingSnapshotPanes = new Set();
+const _scheduledSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
+const _paneOutputScanTail = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
 const TMUX_COL_SAFETY_MARGIN = 0;
 
@@ -373,10 +377,15 @@ function shouldSuppressDuplicateTextInput(deduper, data) {
 }
 
 function scheduleSnapshotRefresh(paneIds) {
-  const ids = paneIds && paneIds.length ? [...paneIds] : Object.keys(panes);
+  const ids = paneIds && paneIds.length ? paneIds : Object.keys(panes);
+  ids.forEach((paneId) => {
+    if (paneId) _scheduledSnapshotPanes.add(paneId);
+  });
   if (_snapshotRefreshTimer) clearTimeout(_snapshotRefreshTimer);
   _snapshotRefreshTimer = setTimeout(() => {
     _snapshotRefreshTimer = null;
+    const ids = [..._scheduledSnapshotPanes];
+    _scheduledSnapshotPanes.clear();
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ids.forEach((paneId) => {
       if (!panes[paneId]) return;
@@ -390,6 +399,52 @@ function markSnapshotPending(paneIds) {
   (paneIds || []).forEach((paneId) => {
     if (paneId) _pendingSnapshotPanes.add(paneId);
   });
+}
+
+function mergedScanBytes(paneId, data) {
+  const tail = _paneOutputScanTail.get(paneId);
+  if (!tail || tail.length === 0) return data;
+  return concatBytes([tail, data]);
+}
+
+function rememberScanTail(paneId, data) {
+  if (!paneId) return;
+  const len = Math.min(data.length, OUTPUT_SCAN_TAIL_BYTES);
+  if (len === 0) {
+    _paneOutputScanTail.delete(paneId);
+    return;
+  }
+  _paneOutputScanTail.set(paneId, data.slice(data.length - len));
+}
+
+function containsAltScreenExit(bytes) {
+  for (let i = 0; i < bytes.length - 4; i++) {
+    if (bytes[i] !== 0x1b || bytes[i + 1] !== 0x5b || bytes[i + 2] !== 0x3f) continue; // ESC [ ?
+    let j = i + 3;
+    while (j < bytes.length) {
+      const ch = bytes[j];
+      if (ch === 0x6c) { // l: DEC private mode reset
+        const params = String.fromCharCode(...bytes.slice(i + 3, j)).split(';');
+        if (params.some((param) => ALT_SCREEN_EXIT_PARAMS.has(param))) return true;
+        break;
+      }
+      if ((ch >= 0x30 && ch <= 0x39) || ch === 0x3b) {
+        j++;
+        continue;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
+function maybeRefreshAfterAltScreenExit(paneId, data) {
+  if (!paneId || !data || data.length === 0) return;
+  const scanBytes = mergedScanBytes(paneId, data);
+  if (containsAltScreenExit(scanBytes)) {
+    scheduleSnapshotRefresh([paneId]);
+  }
+  rememberScanTail(paneId, scanBytes);
 }
 
 function scheduleCurrentViewRefresh() {
@@ -577,7 +632,10 @@ function onOutput(msg) {
     queuePaneOutput(msg.pane, data);
     return;
   }
-  if (p) p.term.write(data);
+  if (p) {
+    p.term.write(data);
+    maybeRefreshAfterAltScreenExit(msg.pane, data);
+  }
 }
 
 function onLayoutChange(msg) {
@@ -897,6 +955,8 @@ function destroyPane(paneId) {
   delete panes[paneId];
   _bufferedPaneOutput.delete(paneId);
   _pendingSnapshotPanes.delete(paneId);
+  _scheduledSnapshotPanes.delete(paneId);
+  _paneOutputScanTail.delete(paneId);
   if (activePaneId === paneId) activePaneId = null;
 }
 
