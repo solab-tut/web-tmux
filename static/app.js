@@ -364,6 +364,10 @@ function isMouseReportingSequence(data) {
   return c === 0x4d || c === 0x3c; // X10 mouse 'M' or SGR mouse '<'
 }
 
+function isCursorPositionReport(data) {
+  return /^\x1b\[\d+;\d+R$/.test(data || '');
+}
+
 function createInputDeduper() {
   return { data: '', at: 0 };
 }
@@ -946,6 +950,12 @@ function ensurePane(paneId, cols, rows) {
   term.onData((data) => {
     if (shouldSuppressDuplicateTextInput(inputDeduper, data)) return;
     const sendData = applyCtrlModifier(data);
+    // xterm generates CPR replies (ESC[row;colR) on behalf of the pane that
+    // requested them. Route those back to that pane instead of the UI-active pane.
+    if (isCursorPositionReport(sendData)) {
+      handleTerminalInput(sendData, paneId);
+      return;
+    }
     if (isMouseReportingSequence(sendData) && activePaneId && paneId !== activePaneId) return;
     handleTerminalInput(sendData, activePaneId || paneId);
   });

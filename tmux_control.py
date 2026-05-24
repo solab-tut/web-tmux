@@ -27,6 +27,11 @@ _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
 )
 
+# CPR sequences (ESC [ row ; col R) are terminal-to-application responses.
+# Some TUI CLIs (e.g. Hermes agent) accidentally emit them to stdout,
+# which causes them to appear as literal text in the pane buffer.
+_CPR_RE = re.compile(br'\x1b\[\d+;\d+R')
+
 _TMUX_ESCAPED_KEYS: tuple[tuple[bytes, str], ...] = (
     (b'\x1b[A', 'Up'),
     (b'\x1b[B', 'Down'),
@@ -155,6 +160,12 @@ def _strip_zsh_eol_marks(data: bytes) -> bytes:
     # Remove the visible mark but keep cursor rewind (\r ?\r), otherwise
     # line-editor redraw on wrapped input can break.
     return _ZSH_EOL_MARK_RE.sub(b'\\1', data)
+
+
+def _strip_cpr_sequences(data: bytes) -> bytes:
+    if b'\x1b' not in data:
+        return data
+    return _CPR_RE.sub(b'', data)
 
 
 def _tmux_quote(value: str) -> str:
@@ -425,7 +436,7 @@ class TmuxControl:
     async def capture_pane(self, pane_id: str) -> bytes:
         raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
         # Response content uses the same vis(3) encoding as %output data.
-        return _strip_zsh_eol_marks(_decode_output(raw))
+        return _strip_cpr_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
 
     async def get_pane_cursor(self, pane_id: str) -> dict:
         raw = await self.send_command(
@@ -535,6 +546,7 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
+                data = _strip_cpr_sequences(data)
                 if not data:
                     return True
                 self._broadcast({
@@ -555,6 +567,7 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
+                data = _strip_cpr_sequences(data)
                 if not data:
                     return True
                 self._broadcast({
