@@ -357,6 +357,13 @@ function hasNonAsciiText(data) {
   return /[^\x00-\x7f]/.test(data);
 }
 
+function isMouseReportingSequence(data) {
+  if (!data || data.length < 3) return false;
+  if (data.charCodeAt(0) !== 0x1b || data.charCodeAt(1) !== 0x5b) return false;
+  const c = data.charCodeAt(2);
+  return c === 0x4d || c === 0x3c; // X10 mouse 'M' or SGR mouse '<'
+}
+
 function createInputDeduper() {
   return { data: '', at: 0 };
 }
@@ -939,6 +946,7 @@ function ensurePane(paneId, cols, rows) {
   term.onData((data) => {
     if (shouldSuppressDuplicateTextInput(inputDeduper, data)) return;
     const sendData = applyCtrlModifier(data);
+    if (isMouseReportingSequence(sendData) && activePaneId && paneId !== activePaneId) return;
     handleTerminalInput(sendData, activePaneId || paneId);
   });
 

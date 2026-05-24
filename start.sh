@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-SERVER_SOCKET="webtmux-ctl"
-SERVER_SESSION="server"
 HTTP_PORT="8766"
 WS_PORT="8765"
+PID_FILE="server.pid"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -63,19 +62,20 @@ need_cmd python3
 kill_by_pattern "[Pp]ython.*server.py"
 kill_by_port "$WS_PORT"
 kill_by_port "$HTTP_PORT"
-tmux -L "$SERVER_SOCKET" kill-server 2>/dev/null || true
 sleep 0.5
 
-# サーバー起動。server.py 側で操作対象の web セッションを作成/初期化する。
-tmux -L "$SERVER_SOCKET" new-session -d -s "$SERVER_SESSION" \
-  "cd '$PWD' && sleep 1 && exec env -u TMUX -u TMUX_PANE python3 server.py > server.log 2>&1"
+# server.py をバックグラウンドプロセスとして直接起動
+# env -u TMUX -u TMUX_PANE: tmux内から起動した場合でもデフォルトsocketを使うよう保証
+nohup env -u TMUX -u TMUX_PANE python3 server.py > server.log 2>&1 &
+echo $! > "$PID_FILE"
+
 sleep 1.5
-if ! tmux -L "$SERVER_SOCKET" has-session -t "$SERVER_SESSION" 2>/dev/null; then
+if ! kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
   echo "server exited unexpectedly" >&2
   tail -n 40 server.log >&2 || true
   exit 1
 fi
 
-echo "server started: tmux socket=$SERVER_SOCKET session=$SERVER_SESSION"
+echo "server started: pid=$(cat "$PID_FILE")"
 echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
 echo "WS    ws://127.0.0.1:${WS_PORT}/"
