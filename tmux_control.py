@@ -32,6 +32,12 @@ _ZSH_EOL_MARK_RE = re.compile(
 # which causes them to appear as literal text in the pane buffer.
 _CPR_RE = re.compile(br'\x1b\[\d+;\d+R')
 
+# OSC response sequences (ESC ] N ; value ST) are terminal-to-application
+# replies (e.g. OSC 10/11/12 color reports). The PTY hosting tmux's control
+# client can emit these into the data stream where they show up as literal
+# text like ^[]11;rgb:2e2e/3434/4040^[\.
+_OSC_RESPONSE_RE = re.compile(br'\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07)')
+
 _TMUX_ESCAPED_KEYS: tuple[tuple[bytes, str], ...] = (
     (b'\x1b[A', 'Up'),
     (b'\x1b[B', 'Down'),
@@ -166,6 +172,12 @@ def _strip_cpr_sequences(data: bytes) -> bytes:
     if b'\x1b' not in data:
         return data
     return _CPR_RE.sub(b'', data)
+
+
+def _strip_osc_responses(data: bytes) -> bytes:
+    if b'\x1b]' not in data:
+        return data
+    return _OSC_RESPONSE_RE.sub(b'', data)
 
 
 def _tmux_quote(value: str) -> str:
@@ -436,7 +448,7 @@ class TmuxControl:
     async def capture_pane(self, pane_id: str) -> bytes:
         raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
         # Response content uses the same vis(3) encoding as %output data.
-        return _strip_cpr_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
+        return _strip_osc_responses(_strip_cpr_sequences(_strip_zsh_eol_marks(_decode_output(raw))))
 
     async def get_pane_cursor(self, pane_id: str) -> dict:
         raw = await self.send_command(
@@ -546,7 +558,7 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
-                data = _strip_cpr_sequences(data)
+                data = _strip_osc_responses(_strip_cpr_sequences(data))
                 if not data:
                     return True
                 self._broadcast({
@@ -567,7 +579,7 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
-                data = _strip_cpr_sequences(data)
+                data = _strip_osc_responses(_strip_cpr_sequences(data))
                 if not data:
                     return True
                 self._broadcast({
