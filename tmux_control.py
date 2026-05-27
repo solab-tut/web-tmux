@@ -37,6 +37,7 @@ _CPR_RE = re.compile(br'\x1b\[\d+;\d+R')
 # client can emit these into the data stream where they show up as literal
 # text like ^[]11;rgb:2e2e/3434/4040^[\.
 _OSC_RESPONSE_RE = re.compile(br'\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07)')
+_TERMINAL_RESPONSE_CSI_RE = re.compile(br'\x1b\[[0-9;?]*[Rcn]')
 
 _TMUX_ESCAPED_KEYS: tuple[tuple[bytes, str], ...] = (
     (b'\x1b[A', 'Up'),
@@ -180,6 +181,82 @@ def _strip_osc_responses(data: bytes) -> bytes:
     return _OSC_RESPONSE_RE.sub(b'', data)
 
 
+def _strip_terminal_response_sequences_stream(data: bytes, remainder: bytes = b'') -> tuple[bytes, bytes]:
+    """Remove terminal-to-application replies, preserving split escape tails.
+
+    tmux `%output` chunks may split inside OSC/CSI replies. Regex replacement on
+    each chunk misses those tails, leaving visible `^[...]` text in panes.
+    """
+    src = remainder + data
+    out = bytearray()
+    i = 0
+    n = len(src)
+
+    while i < n:
+        esc = src.find(b'\x1b', i)
+        if esc < 0:
+            out.extend(src[i:])
+            break
+
+        out.extend(src[i:esc])
+        if esc + 1 >= n:
+            return bytes(out), src[esc:]
+
+        kind = src[esc + 1]
+
+        if kind == ord('['):
+            j = esc + 2
+            while j < n and 0x30 <= src[j] <= 0x3f:
+                j += 1
+            if j >= n:
+                return bytes(out), src[esc:]
+
+            final = src[j]
+            if 0x40 <= final <= 0x7e:
+                seq = src[esc:j + 1]
+                if _TERMINAL_RESPONSE_CSI_RE.fullmatch(seq):
+                    i = j + 1
+                    continue
+                out.extend(seq)
+                i = j + 1
+                continue
+
+            out.append(src[esc])
+            i = esc + 1
+            continue
+
+        if kind == ord(']'):
+            bel = src.find(b'\x07', esc + 2)
+            st = src.find(b'\x1b\\', esc + 2)
+            if bel < 0 and st < 0:
+                return bytes(out), src[esc:]
+
+            if bel < 0:
+                end = st + 2
+            elif st < 0:
+                end = bel + 1
+            else:
+                end = min(bel + 1, st + 2)
+
+            seq = src[esc:end]
+            if _OSC_RESPONSE_RE.fullmatch(seq):
+                i = end
+                continue
+            out.extend(seq)
+            i = end
+            continue
+
+        out.append(src[esc])
+        i = esc + 1
+
+    return bytes(out), b''
+
+
+def _strip_terminal_response_sequences(data: bytes) -> bytes:
+    filtered, _ = _strip_terminal_response_sequences_stream(data)
+    return filtered
+
+
 def _tmux_quote(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
@@ -220,6 +297,7 @@ class TmuxControl:
         self._restart_lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
         self._decode_remainder: dict[str, str] = {}
+        self._response_remainder: dict[str, bytes] = {}
         self._prefix_key_names: set[str] | None = None
         self._prefix_pending: bool = False
 
@@ -448,7 +526,7 @@ class TmuxControl:
     async def capture_pane(self, pane_id: str) -> bytes:
         raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
         # Response content uses the same vis(3) encoding as %output data.
-        return _strip_osc_responses(_strip_cpr_sequences(_strip_zsh_eol_marks(_decode_output(raw))))
+        return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
 
     async def get_pane_cursor(self, pane_id: str) -> dict:
         raw = await self.send_command(
@@ -558,7 +636,14 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
-                data = _strip_osc_responses(_strip_cpr_sequences(data))
+                data, response_rem = _strip_terminal_response_sequences_stream(
+                    data,
+                    self._response_remainder.get(pane_id, b''),
+                )
+                if response_rem:
+                    self._response_remainder[pane_id] = response_rem
+                elif pane_id in self._response_remainder:
+                    del self._response_remainder[pane_id]
                 if not data:
                     return True
                 self._broadcast({
@@ -579,7 +664,14 @@ class TmuxControl:
                     self._decode_remainder[pane_id] = rem
                 elif pane_id in self._decode_remainder:
                     del self._decode_remainder[pane_id]
-                data = _strip_osc_responses(_strip_cpr_sequences(data))
+                data, response_rem = _strip_terminal_response_sequences_stream(
+                    data,
+                    self._response_remainder.get(pane_id, b''),
+                )
+                if response_rem:
+                    self._response_remainder[pane_id] = response_rem
+                elif pane_id in self._response_remainder:
+                    del self._response_remainder[pane_id]
                 if not data:
                     return True
                 self._broadcast({

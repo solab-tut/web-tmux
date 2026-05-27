@@ -364,8 +364,8 @@ function isMouseReportingSequence(data) {
   return c === 0x4d || c === 0x3c; // X10 mouse 'M' or SGR mouse '<'
 }
 
-function isCursorPositionReport(data) {
-  return /^\x1b\[\d+;\d+R$/.test(data || '');
+function isTerminalResponseSequence(data) {
+  return /^(?:\x1b\[[0-9;?]*(?:R|c|n)|\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07))+$/.test(data || '');
 }
 
 function createInputDeduper() {
@@ -949,10 +949,15 @@ function ensurePane(paneId, cols, rows) {
   // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
   term.onData((data) => {
     if (shouldSuppressDuplicateTextInput(inputDeduper, data)) return;
+    // xterm generates terminal replies on behalf of the pane that requested
+    // them. Do not route these through activePane/client-prefix handling, or
+    // OSC/DA/CPR replies can appear as literal garbage in another input line.
+    if (isTerminalResponseSequence(data)) {
+      sendPaneInput(data, paneId);
+      return;
+    }
     const sendData = applyCtrlModifier(data);
-    // xterm generates CPR replies (ESC[row;colR) on behalf of the pane that
-    // requested them. Route those back to that pane instead of the UI-active pane.
-    if (isCursorPositionReport(sendData)) {
+    if (isTerminalResponseSequence(sendData)) {
       handleTerminalInput(sendData, paneId);
       return;
     }
