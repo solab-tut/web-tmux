@@ -23,8 +23,9 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 
 - Python 3.10 以上
 - tmux
-- Python パッケージ [`websockets`](https://pypi.org/project/websockets/)
 - モダンブラウザ（Chrome / Safari / Firefox）
+
+Python 環境は `setup.sh` が自動で構築します。[uv](https://github.com/astral-sh/uv)（推奨）のインストールを提案するか、`python3-venv` + `pip` にフォールバックします。
 
 ブラウザ端末のアセットは `static/vendor/` に同梱しているため、実行時に
 CDN 接続は不要です。
@@ -34,48 +35,56 @@ CDN 接続は不要です。
 ### macOS
 
 ```bash
-# 必要であれば依存関係をインストール
 brew install tmux
-
-# リポジトリを取得
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
-
-# Python パッケージをインストール
-python3 -m pip install websockets
-
-# サーバーを起動
-./start.sh
+./setup.sh    # .venv を作成して依存パッケージをインストール
+./server.sh   # サーバーを起動
 ```
 
-### Linux（Debian / Ubuntu）
+### Linux（Ubuntu 22.04 / 24.04）
 
 ```bash
-# 依存関係をインストール
-sudo apt install tmux python3 python3-pip
-
-# リポジトリを取得
+sudo apt install tmux
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
+./setup.sh    # .venv を作成して依存パッケージをインストール
+./server.sh   # サーバーを起動
+```
 
-# Python パッケージをインストール
-python3 -m pip install websockets
+### Linux（Ubuntu 20.04）
 
-# サーバーを起動
-./start.sh
+Ubuntu 20.04 のデフォルト Python は 3.8 です。`setup.sh` 実行時に uv のインストールを承認すると、Python 3.10+ を自動でダウンロードします。手動でインストールする場合:
+
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install tmux python3.10 python3.10-venv
+git clone https://github.com/solab-tut/web-tmux.git
+cd web-tmux
+./setup.sh
+./server.sh
 ```
 
 ブラウザで **http://127.0.0.1:8766/** を開きます。
 
-### 起動オプション
+### 起動・停止オプション
 
 **tmux セッション名を変更する**（デフォルト: `web`）:
 
 ```bash
-TMUX_SESSION=my-session ./start.sh
+TMUX_SESSION=my-session ./server.sh
 ```
 
-`start.sh` は起動前に既存のサーバープロセスを停止するため、再実行は常に安全です。
+**起動・停止:**
+
+```bash
+./server.sh        # 起動（起動中なら再起動）
+./server.sh start  # 同上
+./server.sh stop   # 停止のみ（再起動しない）
+```
+
+`server.sh` は起動前に既存のサーバープロセスを停止するため、再実行は常に安全です。
 
 ## 使い方
 
@@ -195,7 +204,8 @@ web-tmux/
 ├── server.py          # HTTP + WebSocket サーバー
 ├── tmux_control.py    # tmux -CC 制御モードラッパー
 ├── layout_parser.py   # tmux レイアウト文字列パーサー
-├── start.sh           # 起動・再起動スクリプト
+├── setup.sh           # 初回環境構築スクリプト（.venv を作成）
+├── server.sh          # サーバーの起動・停止
 └── static/
     ├── index.html
     ├── style.css

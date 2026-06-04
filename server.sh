@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 HTTP_PORT="8766"
 WS_PORT="8765"
 PID_FILE="server.pid"
+PYTHON=".venv/bin/python"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -55,27 +56,49 @@ kill_by_port() {
   fi
 }
 
-need_cmd tmux
-need_cmd python3
+do_stop() {
+  kill_by_pattern "[Pp]ython.*server.py"
+  kill_by_port "$WS_PORT"
+  kill_by_port "$HTTP_PORT"
+  rm -f "$PID_FILE"
+  echo "server stopped"
+}
 
-# 既存プロセスを停止
-kill_by_pattern "[Pp]ython.*server.py"
-kill_by_port "$WS_PORT"
-kill_by_port "$HTTP_PORT"
-sleep 0.5
+do_start() {
+  need_cmd tmux
 
-# server.py をバックグラウンドプロセスとして直接起動
-# env -u TMUX -u TMUX_PANE: tmux内から起動した場合でもデフォルトsocketを使うよう保証
-nohup env -u TMUX -u TMUX_PANE python3 server.py > server.log 2>&1 &
-echo $! > "$PID_FILE"
+  if [ ! -x "$PYTHON" ]; then
+    echo "ERROR: .venv が見つかりません。先に ./setup.sh を実行してください。" >&2
+    exit 1
+  fi
 
-sleep 1.5
-if ! kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
-  echo "server exited unexpectedly" >&2
-  tail -n 40 server.log >&2 || true
-  exit 1
-fi
+  # 既存プロセスを停止してから起動
+  kill_by_pattern "[Pp]ython.*server.py"
+  kill_by_port "$WS_PORT"
+  kill_by_port "$HTTP_PORT"
+  sleep 0.5
 
-echo "server started: pid=$(cat "$PID_FILE")"
-echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
-echo "WS    ws://127.0.0.1:${WS_PORT}/"
+  # env -u TMUX -u TMUX_PANE: tmux内から起動した場合でもデフォルトsocketを使うよう保証
+  nohup env -u TMUX -u TMUX_PANE "$PYTHON" server.py > server.log 2>&1 &
+  echo $! > "$PID_FILE"
+
+  sleep 1.5
+  if ! kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    echo "server exited unexpectedly" >&2
+    tail -n 40 server.log >&2 || true
+    exit 1
+  fi
+
+  echo "server started: pid=$(cat "$PID_FILE")"
+  echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
+  echo "WS    ws://127.0.0.1:${WS_PORT}/"
+}
+
+case "${1:-}" in
+  stop)    do_stop ;;
+  start|"") do_start ;;
+  *)
+    echo "usage: $0 [start|stop]" >&2
+    exit 1
+    ;;
+esac

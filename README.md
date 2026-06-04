@@ -23,8 +23,9 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 
 - Python 3.10 or later
 - tmux
-- [`websockets`](https://pypi.org/project/websockets/) Python package
 - A modern browser (Chrome, Safari, Firefox)
+
+`setup.sh` handles the Python environment automatically. It will offer to install [uv](https://github.com/astral-sh/uv) (recommended) or fall back to `python3-venv` + `pip`.
 
 The browser terminal assets are vendored under `static/vendor/`, so the app does
 not need CDN access at runtime.
@@ -34,35 +35,35 @@ not need CDN access at runtime.
 ### macOS
 
 ```bash
-# Install dependencies if needed
 brew install tmux
-
-# Clone the repository
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
-
-# Install the Python dependency
-python3 -m pip install websockets
-
-# Start the server
-./start.sh
+./setup.sh    # creates .venv and installs dependencies
+./server.sh   # start the server
 ```
 
-### Linux (Debian / Ubuntu)
+### Linux (Ubuntu 22.04 / 24.04)
 
 ```bash
-# Install dependencies
-sudo apt install tmux python3 python3-pip
-
-# Clone the repository
+sudo apt install tmux
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
+./setup.sh    # creates .venv and installs dependencies
+./server.sh   # start the server
+```
 
-# Install the Python dependency
-python3 -m pip install websockets
+### Linux (Ubuntu 20.04)
 
-# Start the server
-./start.sh
+Ubuntu 20.04 ships Python 3.8 by default. `setup.sh` will automatically download Python 3.10+ via `uv` if you accept the installation prompt. Alternatively, install Python 3.10 first:
+
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install tmux python3.10 python3.10-venv
+git clone https://github.com/solab-tut/web-tmux.git
+cd web-tmux
+./setup.sh
+./server.sh
 ```
 
 Open **http://127.0.0.1:8766/** in your browser.
@@ -72,10 +73,18 @@ Open **http://127.0.0.1:8766/** in your browser.
 **Custom tmux session name** (default: `web`):
 
 ```bash
-TMUX_SESSION=my-session ./start.sh
+TMUX_SESSION=my-session ./server.sh
 ```
 
-`start.sh` stops any existing server process before starting, so re-running it is always safe.
+**Start / stop:**
+
+```bash
+./server.sh        # start (or restart if already running)
+./server.sh start  # same as above
+./server.sh stop   # stop without restarting
+```
+
+`server.sh` stops any existing server process before starting, so re-running it is always safe.
 
 ## Usage
 
@@ -195,7 +204,8 @@ web-tmux/
 ├── server.py          # HTTP + WebSocket server
 ├── tmux_control.py    # tmux -CC control-mode wrapper
 ├── layout_parser.py   # tmux layout string parser
-├── start.sh           # Startup / restart script
+├── setup.sh           # One-time environment setup (creates .venv)
+├── server.sh          # Start / stop the server
 └── static/
     ├── index.html
     ├── style.css

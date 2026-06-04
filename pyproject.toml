@@ -1,0 +1,9 @@
+[project]
+name = "web-tmux"
+version = "0.1.0"
+description = "Lightweight web frontend for tmux"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=10.0",
+]
+

@@ -3,3 +3,4 @@
 *.log
 server.pid
 .DS_Store
+.venv/
