@@ -438,13 +438,13 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-left: 2px solid transparent;
+  border-left: 3px solid transparent;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .session-item:hover  { background: var(--bg-hover); }
-.session-item.active { border-left-color: var(--accent); color: var(--text-bright); }
+.session-item.active { border-left-color: var(--accent); background: var(--accent-a4); color: var(--text-bright); }
 .session-item.editing { cursor: default; }
 .session-item:focus {
   outline: 1px solid var(--accent);
@@ -458,14 +458,14 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-left: 2px solid transparent;
+  border-left: 3px solid transparent;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
 }
 .pane-item:hover  { background: var(--bg-hover); }
-.pane-item.active { border-left-color: var(--accent); color: var(--text-bright); }
+.pane-item.active { border-left-color: var(--accent); background: var(--accent-a4); color: var(--text-bright); }
 .pane-item:focus {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
@@ -480,13 +480,13 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-left: 2px solid transparent;
+  border-left: 3px solid transparent;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .window-item:hover  { background: var(--bg-hover); }
-.window-item.active { border-left-color: var(--accent); color: var(--text-bright); }
+.window-item.active { border-left-color: var(--accent); background: var(--accent-a4); color: var(--text-bright); }
 .window-item.editing { cursor: default; }
 .window-item:focus {
   outline: 1px solid var(--accent);

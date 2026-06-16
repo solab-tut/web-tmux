@@ -8,6 +8,7 @@ const CLIENT_PREFIX_KEY = '\x01'; // Ctrl+A, matching this app's tmux setup.
 const NON_ASCII_DUPLICATE_SUPPRESS_MS = 120;
 const ALT_SCREEN_EXIT_PARAMS = new Set(['47', '1047', '1049']);
 const OUTPUT_SCAN_TAIL_BYTES = 32;
+const MOUSE_DISABLE_SEQS = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l';
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -106,7 +107,7 @@ function applyFontSize(size, save = true) {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let ws             = null;
-let panes          = {};     // pane_id → { term, fitAddon, el }
+let panes          = {};     // pane_id → { term, fitAddon, el, cached }
 let activePaneId   = null;
 let currentSession = '';     // tmux session currently displayed
 let currentWinIdx  = 0;      // tmux window index currently displayed
@@ -451,6 +452,7 @@ function containsAltScreenExit(bytes) {
 
 function maybeRefreshAfterAltScreenExit(paneId, data) {
   if (!paneId || !data || data.length === 0) return;
+  if (panes[paneId] && panes[paneId].cached) return;
   const scanBytes = mergedScanBytes(paneId, data);
   if (containsAltScreenExit(scanBytes)) {
     scheduleSnapshotRefresh([paneId]);
@@ -598,6 +600,7 @@ function onWindowPaneChanged(msg) {
 }
 
 function onInit(msg) {
+  destroyAllPanes();
   resetResizeCache();
   currentSession = msg.session || '';
   document.getElementById('session-name').textContent = msg.session;
@@ -619,7 +622,7 @@ function onWindowSwitched(msg) {
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
   updateCurrentWindow(msg.windows);
-  destroyAllPanes();
+  hideAllPanes();
   markSnapshotPending((msg.panes || []).map(p => p.id));
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
   scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
@@ -673,9 +676,10 @@ function onLayoutChange(msg) {
   // Pane IDs now in layout
   const layoutIds = new Set(lp.map(p => '%' + p.id));
 
-  // Destroy panes that disappeared
+  // Destroy panes that disappeared from the current window's layout.
+  // Skip cached (hidden) panes — they belong to other windows and must survive.
   Object.keys(panes).forEach(id => {
-    if (!layoutIds.has(id)) destroyPane(id);
+    if (!layoutIds.has(id) && !panes[id].cached) destroyPane(id);
   });
 
   // Create panes that are new
@@ -896,7 +900,13 @@ function positionSinglePane(paneId) {
 // ─── Pane management ──────────────────────────────────────────────────────────
 
 function ensurePane(paneId, cols, rows) {
-  if (panes[paneId]) return;
+  if (panes[paneId]) {
+    if (panes[paneId].cached) {
+      panes[paneId].el.style.display = '';
+      panes[paneId].cached = false;
+    }
+    return;
+  }
 
   const area = document.getElementById('pane-area');
   const el = document.createElement('div');
@@ -913,7 +923,7 @@ function ensurePane(paneId, cols, rows) {
     cols, rows,
     fontFamily:  FONT_FAMILY,
     fontSize:    currentFontSize(),
-    scrollback:  10000,
+    scrollback:  50000,
     cursorBlink: true,
     scrollOnUserInput: true,
     smoothScrollDuration: 80,
@@ -967,7 +977,7 @@ function ensurePane(paneId, cols, rows) {
 
   // Click to focus this pane
   el.addEventListener('mousedown', () => selectPane(paneId));
-  panes[paneId] = { term, fitAddon, el };
+  panes[paneId] = { term, fitAddon, el, cached: false };
 }
 
 function destroyPane(paneId) {
@@ -985,6 +995,15 @@ function destroyPane(paneId) {
 
 function destroyAllPanes() {
   Object.keys(panes).forEach(destroyPane);
+}
+
+function hideAllPanes() {
+  Object.keys(panes).forEach(id => {
+    const p = panes[id];
+    if (!p) return;
+    p.el.style.display = 'none';
+    p.cached = true;
+  });
 }
 
 function selectPane(paneId, opts) {
@@ -1569,9 +1588,11 @@ function buildSnapshotFrame(msg, term) {
 
   // \x1b[?1049l — exit alternate screen (vim/htop etc.) and restore normal screen+scrollback
   // \x1b[!p    — soft reset (clears modes/colors without clearing scrollback)
-  const parts = [asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p\x1b[H\x1b[2J'), snapshot];
-  parts.push(asciiBytes(`\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
-  return concatBytes(parts);
+  // MOUSE_DISABLE_SEQS before: disable mouse tracking before clearing (ESC[!p alone is unreliable)
+  // MOUSE_DISABLE_SEQS after: neutralize any mouse-enable sequences inside the captured content
+  const header = asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS + '\x1b[H\x1b[2J');
+  const footer = asciiBytes(MOUSE_DISABLE_SEQS + `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`);
+  return concatBytes([header, snapshot, footer]);
 }
 
 function escHtml(s) {

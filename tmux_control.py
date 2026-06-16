@@ -311,6 +311,7 @@ class TmuxControl:
             await self._cleanup_client()
             await self._ensure_session_exists()
             await self._set_window_size_mode('latest')
+            await self._set_history_limit(50000)
             await self._attach_control_client()
 
     async def _ensure_session_exists(self) -> None:
@@ -339,6 +340,14 @@ class TmuxControl:
             stderr=asyncio.subprocess.DEVNULL,
         )
         await ws.wait()
+
+    async def _set_history_limit(self, limit: int) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            'tmux', 'set-option', '-g', 'history-limit', str(limit),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
 
     async def _attach_control_client(self) -> None:
         # PTY pair: slave is tmux's controlling terminal
