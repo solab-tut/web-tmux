@@ -9,6 +9,12 @@ const NON_ASCII_DUPLICATE_SUPPRESS_MS = 120;
 const ALT_SCREEN_EXIT_PARAMS = new Set(['47', '1047', '1049']);
 const OUTPUT_SCAN_TAIL_BYTES = 32;
 const MOUSE_DISABLE_SEQS = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l';
+const DESKTOP_SCROLLBACK = 50000;
+const MOBILE_SCROLLBACK = 10000;
+const DESKTOP_SMOOTH_SCROLL_DURATION = 80;
+const MOBILE_SMOOTH_SCROLL_DURATION = 0;
+const MOBILE_VIEWPORT_REFIT_DELAY_MS = 180;
+const MOBILE_TOUCH_SCROLL_IDLE_MS = 240;
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -87,6 +93,23 @@ function currentFontSize() {
   return VALID_FONT_SIZES.includes(saved) ? saved : DEFAULT_FONT_SIZE;
 }
 
+function terminalScrollback() {
+  return isMobileWidth() ? MOBILE_SCROLLBACK : DESKTOP_SCROLLBACK;
+}
+
+function terminalSmoothScrollDuration() {
+  return isMobileWidth() ? MOBILE_SMOOTH_SCROLL_DURATION : DESKTOP_SMOOTH_SCROLL_DURATION;
+}
+
+function applyTerminalScrollOptions() {
+  const scrollback = terminalScrollback();
+  const smoothScrollDuration = terminalSmoothScrollDuration();
+  Object.values(panes).forEach((p) => {
+    p.term.options.scrollback = scrollback;
+    p.term.options.smoothScrollDuration = smoothScrollDuration;
+  });
+}
+
 function initFontSize() {
   applyFontSize(currentFontSize(), false);
 }
@@ -142,6 +165,7 @@ let _resizeSendTimer = null;
 let _pendingResize = null;
 let _snapshotRefreshTimer = null;
 let _currentViewRefreshTimer = null;
+let _viewportRefitTimer = null;
 let _layoutApplying = false;
 let _heldClientPrefix = false;
 let _heldClientPrefixPaneId = null;
@@ -155,6 +179,7 @@ const _scheduledSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 const _paneOutputScanTail = new Map();
 let _lastViewportSize = { width: 0, height: 0 };
+let _lastTouchScrollAt = 0;
 const TMUX_COL_SAFETY_MARGIN = 0;
 
 function markClientActive() {
@@ -923,10 +948,10 @@ function ensurePane(paneId, cols, rows) {
     cols, rows,
     fontFamily:  FONT_FAMILY,
     fontSize:    currentFontSize(),
-    scrollback:  50000,
+    scrollback:  terminalScrollback(),
     cursorBlink: true,
     scrollOnUserInput: true,
-    smoothScrollDuration: 80,
+    smoothScrollDuration: terminalSmoothScrollDuration(),
     theme:       XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   });
 
@@ -1027,6 +1052,7 @@ function focusActivePane(opts) {
 
   const focusOnce = (remaining) => {
     if (document.visibilityState === 'hidden') return;
+    if (isMobileWidth() && Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) return;
 
     let paneId = activePaneId;
     if (!paneId || !panes[paneId]) {
@@ -1654,6 +1680,7 @@ window.addEventListener('resize', () => {
     setSidebarOpen(!nowMobile);
     _prevMobile = nowMobile;
     resetResizeCache();   // CSS mode swap — old _lastResize is stale
+    applyTerminalScrollOptions();
 
     // Re-apply layout: refresh inline styles for all panes and refit.
     if (_currentLayoutPanes.length === 1) {
@@ -1824,7 +1851,39 @@ document.getElementById('clipboard-copy-all').addEventListener('click', () => {
 // On iOS, `height: 100vh` returns the LARGEST possible viewport (URL bar hidden),
 // which is bigger than the actually visible area when the URL bar is showing.
 // We pin #app's height to visualViewport.height so the layout always fits the
-// real visible area — and re-fit the active terminal whenever that changes.
+// real visible area. Re-fitting xterm is intentionally debounced on mobile:
+// visualViewport can fire repeatedly while the browser UI or keyboard animates,
+// and synchronous fit()/resize work makes native terminal scrolling stutter.
+
+function markTouchScroll() {
+  _lastTouchScrollAt = Date.now();
+}
+
+function runViewportRefit() {
+  _viewportRefitTimer = null;
+  if (!isMobileWidth()) return;
+  if (_layoutApplying || Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) {
+    _viewportRefitTimer = setTimeout(runViewportRefit, MOBILE_VIEWPORT_REFIT_DELAY_MS);
+    return;
+  }
+
+  const p = activePaneId && panes[activePaneId];
+  if (!p) return;
+
+  const wasFocused = p.term.textarea && document.activeElement === p.term.textarea;
+  try { p.fitAddon.fit(); } catch (_) {}
+  maybeSendResize(p.term.cols, p.term.rows);
+  if (wasFocused && Date.now() - _lastTouchScrollAt >= MOBILE_TOUCH_SCROLL_IDLE_MS) {
+    requestAnimationFrame(() => {
+      try { p.term.focus(); } catch (_) {}
+    });
+  }
+}
+
+function scheduleViewportRefit() {
+  if (_viewportRefitTimer) clearTimeout(_viewportRefitTimer);
+  _viewportRefitTimer = setTimeout(runViewportRefit, MOBILE_VIEWPORT_REFIT_DELAY_MS);
+}
 
 function applyViewportFix() {
   const vv  = window.visualViewport;
@@ -1837,21 +1896,15 @@ function applyViewportFix() {
   _lastViewportSize = { width, height };
   if (isMobileWidth()) {
     app.style.height = `${vv.height}px`;
-    // Re-fit the active pane so xterm.js can resize to the new viewport,
-    // and inform tmux of the new dimensions so output formatting matches.
-    const p = activePaneId && panes[activePaneId];
-    if (p && !_layoutApplying && (widthChanged || heightChanged)) {
-      const wasFocused = p.term.textarea && document.activeElement === p.term.textarea;
-      try { p.fitAddon.fit(); } catch (_) {}
-      maybeSendResize(p.term.cols, p.term.rows);
-      if (wasFocused) {
-        requestAnimationFrame(() => {
-          try { p.term.focus(); } catch (_) {}
-        });
-      }
+    if (widthChanged || heightChanged) {
+      scheduleViewportRefit();
     }
   } else {
     app.style.height = '';
+    if (_viewportRefitTimer) {
+      clearTimeout(_viewportRefitTimer);
+      _viewportRefitTimer = null;
+    }
   }
 }
 
@@ -1860,6 +1913,7 @@ function applyViewportFix() {
   if (!vv) return;
   vv.addEventListener('resize', applyViewportFix);
   window.addEventListener('resize', applyViewportFix);
+  document.addEventListener('touchmove', markTouchScroll, { passive: true });
   applyViewportFix();
 })();
 

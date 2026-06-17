@@ -900,6 +900,12 @@ html, body {
     overflow-x: hidden !important;
     -webkit-overflow-scrolling: touch;
     touch-action: pan-y;
+    overscroll-behavior: contain;
+  }
+
+  .pane-wrap.active .xterm,
+  .pane-wrap.active .xterm-screen {
+    touch-action: pan-y;
   }
 
   .pane-wrap.active {
