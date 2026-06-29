@@ -379,6 +379,25 @@ function loadUnicode11Addon(term) {
   }
 }
 
+// WebGL rendering moves per-frame drawing to the GPU, which is what the mobile
+// touch-scroll debounce in scheduleViewportRefit()/runViewportRefit() is mainly
+// compensating for (the comment there blames synchronous canvas fit()/resize
+// work for the stutter). Must be loaded after term.open(); falls back silently
+// to xterm's built-in canvas renderer when WebGL2 is unavailable or the
+// context is later lost (low-memory devices, GPU driver resets, etc).
+function loadWebglAddon(term) {
+  const addonCtor = window.WebglAddon && window.WebglAddon.WebglAddon;
+  if (!addonCtor) return;
+
+  try {
+    const addon = new addonCtor();
+    addon.onContextLoss(() => addon.dispose());
+    term.loadAddon(addon);
+  } catch (e) {
+    console.warn('webgl addon failed to load, falling back to canvas renderer', e);
+  }
+}
+
 function hasNonAsciiText(data) {
   return /[^\x00-\x7f]/.test(data);
 }
@@ -946,6 +965,7 @@ function ensurePane(paneId, cols, rows) {
 
   const term = new Terminal({
     cols, rows,
+    allowProposedApi: true, // required by Unicode11Addon's `term.unicode.activeVersion` setter
     fontFamily:  FONT_FAMILY,
     fontSize:    currentFontSize(),
     scrollback:  terminalScrollback(),
@@ -960,6 +980,7 @@ function ensurePane(paneId, cols, rows) {
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(el);
+  loadWebglAddon(term);
   const inputDeduper = createInputDeduper();
   if (term.textarea) {
     term.textarea.setAttribute('autocapitalize', 'none');
@@ -1616,7 +1637,11 @@ function buildSnapshotFrame(msg, term) {
   // \x1b[!p    — soft reset (clears modes/colors without clearing scrollback)
   // MOUSE_DISABLE_SEQS before: disable mouse tracking before clearing (ESC[!p alone is unreliable)
   // MOUSE_DISABLE_SEQS after: neutralize any mouse-enable sequences inside the captured content
-  const header = asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS + '\x1b[H\x1b[2J');
+  // \x1b[3J    — also erase xterm.js's own scrollback. The snapshot now carries tmux history
+  //              (capture-pane -S), and get_snapshot is re-sent on every focus/layout/alt-screen
+  //              refresh, not just the first load — without this, the same history would pile up
+  //              again on each refresh instead of replacing what's already there.
+  const header = asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS + '\x1b[H\x1b[2J\x1b[3J');
   const footer = asciiBytes(MOUSE_DISABLE_SEQS + `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`);
   return concatBytes([header, snapshot, footer]);
 }

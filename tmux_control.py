@@ -23,6 +23,14 @@ import termios
 
 log = logging.getLogger(__name__)
 
+# How far back into tmux's history a snapshot (get_snapshot / reattach) pulls.
+# Bounded well below the 50000-line history-limit because get_snapshot fires
+# often (pane focus, layout changes, alt-screen exit) — the client clears its
+# own scrollback before replaying each snapshot (see buildSnapshotFrame in
+# app.js), so a larger value here means more bytes/render work on every one
+# of those routine refreshes, not just the first load.
+SNAPSHOT_SCROLLBACK_LINES = 2000
+
 _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
 )
@@ -533,7 +541,9 @@ class TmuxControl:
         await self._send_literal_input(pane_id, data[literal_start:])
 
     async def capture_pane(self, pane_id: str) -> bytes:
-        raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N')
+        raw = await self.send_command(
+            f'capture-pane -t {pane_id} -p -e -N -S -{SNAPSHOT_SCROLLBACK_LINES}'
+        )
         # Response content uses the same vis(3) encoding as %output data.
         return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
 
