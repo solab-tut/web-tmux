@@ -23,13 +23,11 @@ import termios
 
 log = logging.getLogger(__name__)
 
-# How far back into tmux's history a snapshot (get_snapshot / reattach) pulls.
-# Bounded well below the 50000-line history-limit because get_snapshot fires
-# often (pane focus, layout changes, alt-screen exit) — the client clears its
-# own scrollback before replaying each snapshot (see buildSnapshotFrame in
-# app.js), so a larger value here means more bytes/render work on every one
-# of those routine refreshes, not just the first load.
-SNAPSHOT_SCROLLBACK_LINES = 2000
+# Upper bound on the history a client may pull in one get_history request.
+# This is paid once per pane at attach (snapshots carry the visible screen
+# only), so it can sit much closer to the 50000-line history-limit than the
+# old per-snapshot budget could.
+SNAPSHOT_SCROLLBACK_LINES = 10000
 
 _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
@@ -541,10 +539,27 @@ class TmuxControl:
         await self._send_literal_input(pane_id, data[literal_start:])
 
     async def capture_pane(self, pane_id: str) -> bytes:
-        raw = await self.send_command(
-            f'capture-pane -t {pane_id} -p -e -N -S -{SNAPSHOT_SCROLLBACK_LINES}'
-        )
+        """Visible screen only — no history.
+
+        get_snapshot fires on pane focus, layout changes, alt-screen exit and
+        resize, and the client redraws these rows in place without touching its
+        scrollback (buildSnapshotFrame in app.js). History arrives separately,
+        once per pane, via capture_history().
+        """
+        raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N -S 0')
         # Response content uses the same vis(3) encoding as %output data.
+        return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
+
+    async def capture_history(self, pane_id: str, lines: int) -> bytes:
+        """The scrollback *above* the visible screen (-E -1 stops before it).
+
+        Sent once per pane to seed the client's scrollback; the client's buffer
+        then grows from live output, so this cost is paid at attach only.
+        """
+        lines = max(1, min(int(lines), SNAPSHOT_SCROLLBACK_LINES))
+        raw = await self.send_command(
+            f'capture-pane -t {pane_id} -p -e -N -S -{lines} -E -1'
+        )
         return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
 
     async def get_pane_cursor(self, pane_id: str) -> dict:

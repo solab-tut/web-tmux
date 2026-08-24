@@ -645,7 +645,77 @@ html, body {
 .pane-wrap.active { outline: 1px solid var(--accent-a4); }
 
 .xterm           { height: 100%; }
+/* The live terminal never scrolls itself — the scrollback is the overlay's job
+   (see history.js), so xterm is left as a pure painter of the current screen. */
 .xterm-viewport  { overflow: hidden !important; overscroll-behavior: contain; }
+
+/* ── Scrollback overlay ──────────────────────────── */
+/* Lives inside the active .pane-wrap, so it inherits the pane's geometry.
+   "armed" (no .engaged) = a transparent, empty scroll surface sitting over the
+   live terminal so a touch is caught by a real scroll container from pixel one.
+   "engaged" = opaque, showing rendered buffer rows. */
+#hist {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+}
+
+#hist-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  scrollbar-width: thin;
+}
+
+#hist-rows {
+  visibility: hidden;
+  font-family: var(--hist-font-family);
+  font-size: var(--hist-font-size);
+  line-height: var(--hist-row-h);
+  color: var(--hist-fg);
+  white-space: pre;
+  font-variant-ligatures: none;
+}
+
+.hist-row {
+  height: var(--hist-row-h);
+  /* Keeps tens of thousands of rows cheap: the browser skips layout and paint
+     for rows outside the viewport, and the intrinsic size keeps the scrollbar
+     honest while they are skipped. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--hist-row-h);
+}
+
+#hist.engaged                    { background: var(--hist-bg); }
+#hist.engaged #hist-rows         { visibility: visible; }
+
+#hist:not(.engaged)              { background: transparent; }
+#hist:not(.engaged) #hist-scroll { scrollbar-width: none; }
+#hist:not(.engaged) #hist-scroll::-webkit-scrollbar { display: none; }
+
+#hist-exit {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 40px;
+  height: 40px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-near);
+  background: var(--btn-bar-bg);
+  border: 1px solid var(--btn-bar-border);
+  border-radius: 20px;
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+#hist.engaged #hist-exit { display: inline-flex; }
+#hist-exit svg { width: 20px; height: 20px; display: block; }
 
 /* ── Bottom Bar (virtual keys, mobile only) ──────── */
 #bottombar {
@@ -893,19 +963,6 @@ html, body {
     height: 20px;
     padding: 0 5px;
     font-size: 9px;
-  }
-
-  .pane-wrap.active .xterm-viewport {
-    overflow-y: auto !important;
-    overflow-x: hidden !important;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-y;
-    overscroll-behavior: contain;
-  }
-
-  .pane-wrap.active .xterm,
-  .pane-wrap.active .xterm-screen {
-    touch-action: pan-y;
   }
 
   .pane-wrap.active {

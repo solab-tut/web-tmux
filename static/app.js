@@ -11,8 +11,10 @@ const OUTPUT_SCAN_TAIL_BYTES = 32;
 const MOUSE_DISABLE_SEQS = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l';
 const DESKTOP_SCROLLBACK = 50000;
 const MOBILE_SCROLLBACK = 10000;
-const DESKTOP_SMOOTH_SCROLL_DURATION = 80;
-const MOBILE_SMOOTH_SCROLL_DURATION = 0;
+// Lines of tmux history pulled once per pane at attach to seed xterm's
+// scrollback. After that the buffer grows from live output alone — snapshots
+// no longer carry history (see buildSnapshotFrame).
+const INITIAL_HISTORY_LINES = 10000;
 const MOBILE_VIEWPORT_REFIT_DELAY_MS = 180;
 const MOBILE_TOUCH_SCROLL_IDLE_MS = 240;
 
@@ -83,6 +85,8 @@ function applyTheme(name, save = true) {
   if (save) localStorage.setItem(THEME_STORAGE_KEY, name);
   const xt = XTERM_THEMES[name] || XTERM_THEMES.dark;
   Object.values(panes).forEach(p => { p.term.options.theme = xt; });
+  // Overlay rows are coloured from the theme at build time, so drop them.
+  if (window.HistoryOverlay) HistoryOverlay.close();
   document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.themeName === name);
   });
@@ -97,16 +101,10 @@ function terminalScrollback() {
   return isMobileWidth() ? MOBILE_SCROLLBACK : DESKTOP_SCROLLBACK;
 }
 
-function terminalSmoothScrollDuration() {
-  return isMobileWidth() ? MOBILE_SMOOTH_SCROLL_DURATION : DESKTOP_SMOOTH_SCROLL_DURATION;
-}
-
 function applyTerminalScrollOptions() {
   const scrollback = terminalScrollback();
-  const smoothScrollDuration = terminalSmoothScrollDuration();
   Object.values(panes).forEach((p) => {
     p.term.options.scrollback = scrollback;
-    p.term.options.smoothScrollDuration = smoothScrollDuration;
   });
 }
 
@@ -118,6 +116,8 @@ function applyFontSize(size, save = true) {
   if (!VALID_FONT_SIZES.includes(size)) return;
   if (save) localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(size));
   Object.values(panes).forEach(p => { p.term.options.fontSize = size; });
+  // Row height changes, so the overlay's metrics and rows are both stale.
+  if (window.HistoryOverlay) HistoryOverlay.close();
   document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
     btn.classList.toggle('active', parseInt(btn.dataset.fontSize, 10) === size);
   });
@@ -178,6 +178,7 @@ const _pendingSnapshotPanes = new Set();
 const _scheduledSnapshotPanes = new Set();
 const _bufferedPaneOutput = new Map();
 const _paneOutputScanTail = new Map();
+const _historyRequested = new Set();
 let _lastViewportSize = { width: 0, height: 0 };
 let _lastTouchScrollAt = 0;
 const TMUX_COL_SAFETY_MARGIN = 0;
@@ -313,6 +314,10 @@ function handleClientPrefixShortcut(key, paneId) {
 
 function handleTerminalInput(data, paneId) {
   if (!data) return;
+  // Typing means "back to live" — but xterm's own DA/CPR replies come through
+  // here too, and a snapshot's queries would otherwise yank the user out of the
+  // scrollback they are reading.
+  if (!isTerminalResponseSequence(data)) HistoryOverlay.close();
 
   if (_heldClientPrefix) {
     if (_heldClientPrefixTimer) {
@@ -379,12 +384,12 @@ function loadUnicode11Addon(term) {
   }
 }
 
-// WebGL rendering moves per-frame drawing to the GPU, which is what the mobile
-// touch-scroll debounce in scheduleViewportRefit()/runViewportRefit() is mainly
-// compensating for (the comment there blames synchronous canvas fit()/resize
-// work for the stutter). Must be loaded after term.open(); falls back silently
-// to xterm's built-in canvas renderer when WebGL2 is unavailable or the
-// context is later lost (low-memory devices, GPU driver resets, etc).
+// WebGL rendering moves per-frame drawing to the GPU. Must be loaded after
+// term.open(); falls back silently to xterm 5.3's built-in DOM renderer when
+// WebGL2 is unavailable or the context is later lost (low-memory devices, GPU
+// driver resets, etc). Scrolling no longer depends on this either way — the
+// scrollback is plain DOM in the overlay (history.js) and the live terminal
+// only ever repaints on real output.
 function loadWebglAddon(term) {
   const addonCtor = window.WebglAddon && window.WebglAddon.WebglAddon;
   if (!addonCtor) return;
@@ -394,7 +399,7 @@ function loadWebglAddon(term) {
     addon.onContextLoss(() => addon.dispose());
     term.loadAddon(addon);
   } catch (e) {
-    console.warn('webgl addon failed to load, falling back to canvas renderer', e);
+    console.warn('webgl addon failed to load, falling back to the DOM renderer', e);
   }
 }
 
@@ -552,6 +557,7 @@ function updateCurrentWindow(windows) {
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
 function connect() {
+  _historyRequested.clear();   // a fresh socket re-seeds every pane's scrollback
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
@@ -581,6 +587,7 @@ function handleMsg(msg) {
     case 'init':            onInit(msg);           break;
     case 'window_switched': onWindowSwitched(msg); break;
     case 'snapshot':        onSnapshot(msg);        break;
+    case 'history':         onHistory(msg);         break;
     case 'output':          onOutput(msg);          break;
     case 'layout_change':   onLayoutChange(msg);   break;
     case 'focus':           onFocus(msg);           break;
@@ -683,6 +690,19 @@ function onSnapshot(msg) {
   p.term.write(frame, () => drainBufferedOutput(msg.pane));
 }
 
+// One-time scrollback seed for a pane (see requestInitialHistory).
+function onHistory(msg) {
+  const p = panes[msg.pane];
+  if (!p) return;
+  const data = lfToCrlf(b64ToUint8(msg.data || ''));
+  if (data.length === 0) return;
+  // Move the whole capture into the scrollback: term.rows newlines at the
+  // bottom of the screen scroll every displayed history row out of the screen
+  // area, leaving it blank for the snapshot that follows to draw into.
+  const flush = asciiBytes('\r\n'.repeat(p.term.rows));
+  p.term.write(concatBytes([data, flush]));
+}
+
 function onOutput(msg) {
   const p = panes[msg.pane];
   const data = b64ToUint8(msg.data);
@@ -693,6 +713,7 @@ function onOutput(msg) {
   if (p) {
     p.term.write(data);
     maybeRefreshAfterAltScreenExit(msg.pane, data);
+    if (msg.pane === activePaneId) HistoryOverlay.noteOutput();
   }
 }
 
@@ -915,6 +936,7 @@ function positionPanes(layoutPanes, layoutStr) {
       }
     }
     _layoutApplying = false;
+    HistoryOverlay.sync();
     focusActivePane({ defer: true, retries: 2 });
   });
 }
@@ -937,6 +959,7 @@ function positionSinglePane(paneId) {
     try { p.fitAddon.fit(); } catch (e) { console.error('fit error:', e); }
     maybeSendResize(p.term.cols, p.term.rows);
     _layoutApplying = false;
+    HistoryOverlay.sync();
     focusActivePane({ defer: true, retries: 2 });
   }));
 }
@@ -971,7 +994,6 @@ function ensurePane(paneId, cols, rows) {
     scrollback:  terminalScrollback(),
     cursorBlink: true,
     scrollOnUserInput: true,
-    smoothScrollDuration: terminalSmoothScrollDuration(),
     theme:       XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   });
 
@@ -981,6 +1003,10 @@ function ensurePane(paneId, cols, rows) {
   term.loadAddon(fitAddon);
   term.open(el);
   loadWebglAddon(term);
+  // The viewport is overflow:hidden, so Viewport's `offsetWidth - scrollArea
+  // .offsetWidth || 15` fallback reports a 15px scrollbar that isn't there, and
+  // FitAddon.proposeDimensions() subtracts it from every pane's usable width.
+  try { term._core.viewport.scrollBarWidth = 0; } catch (_) {}
   const inputDeduper = createInputDeduper();
   if (term.textarea) {
     term.textarea.setAttribute('autocapitalize', 'none');
@@ -1024,11 +1050,25 @@ function ensurePane(paneId, cols, rows) {
   // Click to focus this pane
   el.addEventListener('mousedown', () => selectPane(paneId));
   panes[paneId] = { term, fitAddon, el, cached: false };
+  requestInitialHistory(paneId);
+}
+
+// Seed xterm's scrollback from tmux history, once per pane. Snapshots only
+// carry the visible screen, so this is the only path that brings in history.
+function requestInitialHistory(paneId) {
+  if (_historyRequested.has(paneId)) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  _historyRequested.add(paneId);
+  // Sent before the pane's first get_snapshot, and the server handles a
+  // connection's messages strictly in order, so the history reply always
+  // arrives first and the snapshot lands on top of it.
+  ws.send(JSON.stringify({ type: 'get_history', pane: paneId, lines: INITIAL_HISTORY_LINES }));
 }
 
 function destroyPane(paneId) {
   const p = panes[paneId];
   if (!p) return;
+  HistoryOverlay.detach();   // unmount the overlay before its host element goes
   p.term.dispose();
   p.el.remove();
   delete panes[paneId];
@@ -1036,7 +1076,9 @@ function destroyPane(paneId) {
   _pendingSnapshotPanes.delete(paneId);
   _scheduledSnapshotPanes.delete(paneId);
   _paneOutputScanTail.delete(paneId);
+  _historyRequested.delete(paneId);
   if (activePaneId === paneId) activePaneId = null;
+  HistoryOverlay.sync();
 }
 
 function destroyAllPanes() {
@@ -1107,6 +1149,7 @@ function setActivePaneVisual(paneId) {
   for (const [id, p] of Object.entries(panes)) {
     p.el.classList.toggle('active', id === paneId);
   }
+  HistoryOverlay.sync();   // the overlay lives inside the active pane's wrapper
   // With a single visible pane (including tmux zoom), selecting it can change
   // the usable viewport. In split layouts the active pane is only a fraction of
   // the tmux window, so do not send its pane cols/rows as the total size.
@@ -1626,24 +1669,49 @@ function lfToCrlf(bytes) {
   return out;
 }
 
+// Redraw the visible screen in place, leaving the scrollback untouched.
+//
+// The old frame cleared everything (\x1b[2J\x1b[3J) and replayed 2000 lines of
+// tmux history on every refresh — and get_snapshot fires on pane focus, layout
+// changes, alt-screen exit and resize, so that was a multi-hundred-millisecond
+// reparse at unpredictable moments. The snapshot now carries only the pane's
+// visible rows: each row is drawn at a known position and terminated with
+// \x1b[K, which erases the rest of that line without scrolling anything.
 function buildSnapshotFrame(msg, term) {
-  const snapshot = lfToCrlf(b64ToUint8(msg.data || ''));
   const paneRows = Math.max(1, msg.pane_rows || term.rows || 1);
   const paneCols = Math.max(1, msg.pane_cols || term.cols || 1);
   const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
   const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
 
-  // \x1b[?1049l — exit alternate screen (vim/htop etc.) and restore normal screen+scrollback
+  // \x1b[?1049l — exit alternate screen (vim/htop etc.) and restore the normal screen
   // \x1b[!p    — soft reset (clears modes/colors without clearing scrollback)
-  // MOUSE_DISABLE_SEQS before: disable mouse tracking before clearing (ESC[!p alone is unreliable)
+  // MOUSE_DISABLE_SEQS before: disable mouse tracking before redrawing (ESC[!p alone is unreliable)
   // MOUSE_DISABLE_SEQS after: neutralize any mouse-enable sequences inside the captured content
-  // \x1b[3J    — also erase xterm.js's own scrollback. The snapshot now carries tmux history
-  //              (capture-pane -S), and get_snapshot is re-sent on every focus/layout/alt-screen
-  //              refresh, not just the first load — without this, the same history would pile up
-  //              again on each refresh instead of replacing what's already there.
-  const header = asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS + '\x1b[H\x1b[2J\x1b[3J');
-  const footer = asciiBytes(MOUSE_DISABLE_SEQS + `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`);
-  return concatBytes([header, snapshot, footer]);
+  const parts = [asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS)];
+
+  const rows = splitCaptureRows(b64ToUint8(msg.data || ''));
+  for (let i = 0; i < paneRows; i++) {
+    parts.push(asciiBytes(`\x1b[${i + 1};1H`));
+    if (i < rows.length) parts.push(rows[i]);
+    parts.push(asciiBytes('\x1b[K'));   // clear to end of line, no scroll
+  }
+
+  parts.push(asciiBytes(MOUSE_DISABLE_SEQS + `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
+  return concatBytes(parts);
+}
+
+// capture-pane separates rows with a bare LF and does not pad short rows.
+function splitCaptureRows(bytes) {
+  const rows = [];
+  let start = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0x0A) {
+      rows.push(bytes.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < bytes.length) rows.push(bytes.subarray(start));
+  return rows;
 }
 
 function escHtml(s) {
@@ -1744,10 +1812,7 @@ function sendVirtualKey(name) {
 }
 
 function scrollActivePaneHalfPage(direction) {
-  const pane = getActivePane();
-  if (!pane) return;
-  const delta = Math.max(1, Math.floor(pane.term.rows / 2)) * direction;
-  pane.term.scrollLines(delta);
+  HistoryOverlay.scrollByPages(direction);
 }
 
 function hideSoftwareKeyboard() {
@@ -1762,6 +1827,10 @@ function hideSoftwareKeyboard() {
 }
 
 function getActivePaneViewportText() {
+  // While scrolled back, "what's on screen" is the overlay, not the terminal.
+  const histText = HistoryOverlay.visibleText();
+  if (histText !== null) return histText;
+
   const pane = getActivePane();
   if (!pane) return '';
   const buffer = pane.term.buffer.active;
@@ -1877,8 +1946,9 @@ document.getElementById('clipboard-copy-all').addEventListener('click', () => {
 // which is bigger than the actually visible area when the URL bar is showing.
 // We pin #app's height to visualViewport.height so the layout always fits the
 // real visible area. Re-fitting xterm is intentionally debounced on mobile:
-// visualViewport can fire repeatedly while the browser UI or keyboard animates,
-// and synchronous fit()/resize work makes native terminal scrolling stutter.
+// visualViewport fires repeatedly while the browser UI or keyboard animates,
+// and a fit()/resize mid-gesture would resize the tmux pane (and so the overlay
+// it is aligned to) underneath the user's finger.
 
 function markTouchScroll() {
   _lastTouchScrollAt = Date.now();
@@ -1978,6 +2048,13 @@ document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
+
+HistoryOverlay.init({
+  getActivePane: () => (activePaneId ? panes[activePaneId] || null : null),
+  isMobile:      isMobileWidth,
+  getTheme:      () => XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
+  focusPane:     () => focusActivePane({ retries: 2 }),
+});
 
 initTheme();
 initFontSize();

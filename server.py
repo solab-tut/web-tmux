@@ -311,6 +311,18 @@ async def _handle_msg(websocket, msg: dict) -> None:
                 'pane_rows': cursor['pane_rows'],
             }))
 
+    elif t == 'get_history':
+        pane = _pane_id(msg.get('pane'))
+        if pane:
+            lines = int(msg.get('lines', 2000))
+            content = await tmux.capture_history(pane, lines)
+            log.info('history pane=%s lines=%d bytes=%d', pane, lines, len(content))
+            await websocket.send(json.dumps({
+                'type': 'history',
+                'pane': pane,
+                'data': base64.b64encode(content).decode('ascii'),
+            }))
+
     elif t == 'get_state':
         # Used by the client to refresh sidebar lists after pane/window changes.
         state = await tmux.get_initial_state()
