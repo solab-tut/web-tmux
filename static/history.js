@@ -322,8 +322,11 @@
     scroller.scrollTop = maxScrollTop();
   }
 
-  function detach() {
+  // With a pane argument this is a no-op unless the overlay is that pane's:
+  // closing a background pane must not tear down the scrollback being read.
+  function detach(pane) {
     if (!attachedPane) return;
+    if (pane && pane !== attachedPane) return;
     setEngaged(false);
     root.hidden = true;
     if (root.parentElement) root.parentElement.removeChild(root);

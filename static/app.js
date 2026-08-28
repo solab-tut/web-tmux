@@ -17,6 +17,15 @@ const MOBILE_SCROLLBACK = 10000;
 const INITIAL_HISTORY_LINES = 10000;
 const MOBILE_VIEWPORT_REFIT_DELAY_MS = 180;
 const MOBILE_TOUCH_SCROLL_IDLE_MS = 240;
+// Snapshot requests are coalesced, but never postponed past MAX_DELAY: every
+// call to scheduleSnapshotRefresh restarts the debounce, and the callers that
+// fire in bursts (layout changes, alt-screen exits, mobile viewport refits)
+// could otherwise keep pushing the request out while output sits buffered.
+const SNAPSHOT_DEBOUNCE_MS = 260;
+const SNAPSHOT_MAX_DELAY_MS = 600;
+// How long output may be held for a snapshot that has not come back. Anything
+// still queued after this is written as-is: stale-but-live beats a frozen pane.
+const SNAPSHOT_HOLD_TIMEOUT_MS = 2500;
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -176,6 +185,8 @@ let _confirmDeleteSession = '';
 let _confirmDeleteWindow = null;
 const _pendingSnapshotPanes = new Set();
 const _scheduledSnapshotPanes = new Set();
+const _snapshotWatchdogs = new Map();   // pane → timer holding output hostage
+let _snapshotRefreshDeadline = 0;
 const _bufferedPaneOutput = new Map();
 const _paneOutputScanTail = new Map();
 const _historyRequested = new Set();
@@ -246,6 +257,21 @@ function maybeSendResize(cols, rows) {
   }, 80);
 }
 function resetResizeCache() { _lastResize = { cols: 0, rows: 0 }; }
+
+// The live terminal is only ever a painter of the current screen: the
+// scrollback is the overlay's (history.js), and .xterm-viewport is
+// overflow:hidden. Its viewport can still drift off the base row — xterm's
+// Buffer.resize keeps the view anchored to its old line when the row count
+// changes, and its own wheel handler runs whenever the overlay declines a
+// gesture — and a terminal parked above the base row stops showing new output
+// altogether: the pane looks frozen until the page is reloaded.
+function pinToBottom(p) {
+  if (!p) return;
+  try {
+    const buffer = p.term.buffer.active;
+    if (buffer.viewportY !== buffer.baseY) p.term.scrollToBottom();
+  } catch (_) {}
+}
 
 function getActivePane() {
   if (activePaneId && panes[activePaneId]) return panes[activePaneId];
@@ -392,15 +418,35 @@ function loadUnicode11Addon(term) {
 // only ever repaints on real output.
 function loadWebglAddon(term) {
   const addonCtor = window.WebglAddon && window.WebglAddon.WebglAddon;
-  if (!addonCtor) return;
+  if (!addonCtor) return null;
 
+  let addon = null;
   try {
-    const addon = new addonCtor();
-    addon.onContextLoss(() => addon.dispose());
+    addon = new addonCtor();
+    addon.onContextLoss(() => { try { addon.dispose(); } catch (_) {} });
     term.loadAddon(addon);
+    return addon;
   } catch (e) {
     console.warn('webgl addon failed to load, falling back to the DOM renderer', e);
+    // An addon that threw half-way through activate() stays registered on the
+    // terminal, so unregister it here rather than leaving term.dispose() to
+    // trip over it later (see disposePaneTerminal).
+    try { if (addon) addon.dispose(); } catch (_) {}
+    return null;
   }
+}
+
+// xterm 5.3 tears its core down before the addon manager runs, so by the time
+// WebglAddon.dispose() asks the terminal for a DOM renderer to fall back to,
+// `_core._createRenderer()` returns undefined and RenderService.setRenderer
+// throws. The exception escapes destroyPane into whatever WebSocket message
+// handler is running (onLayoutChange, onInit, ...), which then never creates
+// the new panes, never repositions the layout and never asks for a snapshot —
+// the screen sits stale until the page is reloaded. Disposing the addon while
+// the terminal is still alive takes the same fallback path successfully.
+function disposePaneTerminal(p) {
+  try { if (p.webglAddon) p.webglAddon.dispose(); } catch (e) { console.warn('webgl dispose failed', e); }
+  try { p.term.dispose(); } catch (e) { console.warn('terminal dispose failed', e); }
 }
 
 function hasNonAsciiText(data) {
@@ -442,24 +488,70 @@ function scheduleSnapshotRefresh(paneIds) {
   ids.forEach((paneId) => {
     if (paneId) _scheduledSnapshotPanes.add(paneId);
   });
+  const now = Date.now();
+  if (!_snapshotRefreshDeadline) _snapshotRefreshDeadline = now + SNAPSHOT_MAX_DELAY_MS;
+  const delay = Math.max(0, Math.min(SNAPSHOT_DEBOUNCE_MS, _snapshotRefreshDeadline - now));
   if (_snapshotRefreshTimer) clearTimeout(_snapshotRefreshTimer);
   _snapshotRefreshTimer = setTimeout(() => {
     _snapshotRefreshTimer = null;
+    _snapshotRefreshDeadline = 0;
     const ids = [..._scheduledSnapshotPanes];
     _scheduledSnapshotPanes.clear();
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const connected = ws && ws.readyState === WebSocket.OPEN;
     ids.forEach((paneId) => {
-      if (!panes[paneId]) return;
+      // Nothing will answer for a pane that is gone or while the socket is
+      // down, so release its buffered output instead of holding it forever.
+      if (!connected || !panes[paneId]) {
+        flushBufferedOutput(paneId);
+        return;
+      }
       _pendingSnapshotPanes.add(paneId);
+      armSnapshotWatchdog(paneId);
       ws.send(JSON.stringify({ type: 'get_snapshot', pane: paneId }));
     });
-  }, 260);
+  }, delay);
 }
 
 function markSnapshotPending(paneIds) {
   (paneIds || []).forEach((paneId) => {
-    if (paneId) _pendingSnapshotPanes.add(paneId);
+    if (!paneId) return;
+    _pendingSnapshotPanes.add(paneId);
+    armSnapshotWatchdog(paneId);
   });
+}
+
+// Output for a pane awaiting a snapshot is buffered (see onOutput) so the
+// redraw cannot land on top of newer bytes. Every hold gets a deadline: a
+// snapshot that is never requested or never answered must not freeze the pane.
+function armSnapshotWatchdog(paneId) {
+  clearSnapshotWatchdog(paneId);
+  _snapshotWatchdogs.set(paneId, setTimeout(() => {
+    _snapshotWatchdogs.delete(paneId);
+    console.warn('snapshot timed out, releasing buffered output', paneId);
+    flushBufferedOutput(paneId);
+  }, SNAPSHOT_HOLD_TIMEOUT_MS));
+}
+
+function clearSnapshotWatchdog(paneId) {
+  const timer = _snapshotWatchdogs.get(paneId);
+  if (timer) clearTimeout(timer);
+  _snapshotWatchdogs.delete(paneId);
+}
+
+// Stop holding output for paneId and write whatever piled up.
+function flushBufferedOutput(paneId) {
+  clearSnapshotWatchdog(paneId);
+  _pendingSnapshotPanes.delete(paneId);
+  const queued = _bufferedPaneOutput.get(paneId);
+  _bufferedPaneOutput.delete(paneId);
+  const p = panes[paneId];
+  if (!p || !queued || queued.length === 0) return;
+  p.term.write(queued.length === 1 ? queued[0] : concatBytes(queued));
+}
+
+function flushAllBufferedOutput() {
+  new Set([..._pendingSnapshotPanes, ..._bufferedPaneOutput.keys()])
+    .forEach(flushBufferedOutput);
 }
 
 function mergedScanBytes(paneId, data) {
@@ -534,12 +626,14 @@ function drainBufferedOutput(paneId) {
   if (!p) {
     _bufferedPaneOutput.delete(paneId);
     _pendingSnapshotPanes.delete(paneId);
+    clearSnapshotWatchdog(paneId);
     return;
   }
   const queued = _bufferedPaneOutput.get(paneId);
   if (!queued || queued.length === 0) {
     _bufferedPaneOutput.delete(paneId);
     _pendingSnapshotPanes.delete(paneId);
+    clearSnapshotWatchdog(paneId);
     return;
   }
   _bufferedPaneOutput.delete(paneId);
@@ -575,9 +669,24 @@ function connect() {
   ws.onerror = () => setStatus('disconnected');
 
   ws.onmessage = (ev) => {
-    try { handleMsg(JSON.parse(ev.data)); }
-    catch (e) { console.error('parse error', e); }
+    let msg;
+    try { msg = JSON.parse(ev.data); }
+    catch (e) { console.error('parse error', e); return; }
+    try { handleMsg(msg); }
+    catch (e) { onHandlerFailure(msg, e); }
   };
+}
+
+// A handler that dies half-way leaves the client inconsistent — panes not
+// created, the layout not repositioned, output still held for a snapshot that
+// was never requested — and nothing would ever ask again, so the screen stays
+// stale until the page is reloaded. Release the held output and pull the
+// current view again so the next frame is authoritative.
+function onHandlerFailure(msg, err) {
+  console.error('message handler failed:', msg && msg.type, err);
+  flushAllBufferedOutput();
+  scheduleCurrentViewRefresh();
+  scheduleStateRefresh();
 }
 
 // ─── Message handlers ─────────────────────────────────────────────────────────
@@ -680,6 +789,7 @@ function onWindowSwitched(msg) {
 }
 
 function onSnapshot(msg) {
+  clearSnapshotWatchdog(msg.pane);
   const p = panes[msg.pane];
   if (!p) {
     _bufferedPaneOutput.delete(msg.pane);
@@ -687,7 +797,7 @@ function onSnapshot(msg) {
     return;
   }
   const frame = buildSnapshotFrame(msg, p.term);
-  p.term.write(frame, () => drainBufferedOutput(msg.pane));
+  p.term.write(frame, () => { pinToBottom(p); drainBufferedOutput(msg.pane); });
 }
 
 // One-time scrollback seed for a pane (see requestInitialHistory).
@@ -711,7 +821,7 @@ function onOutput(msg) {
     return;
   }
   if (p) {
-    p.term.write(data);
+    p.term.write(data, () => pinToBottom(p));
     maybeRefreshAfterAltScreenExit(msg.pane, data);
     if (msg.pane === activePaneId) HistoryOverlay.noteOutput();
   }
@@ -895,6 +1005,7 @@ function positionPanes(layoutPanes, layoutStr) {
       const p = panes[pid];
       if (!p) return;
       try { p.fitAddon.fit(); } catch (_) {}
+      pinToBottom(p);
       if (pid === '%' + refLp.id && p.term.cols > 0) {
         // Prefer the renderer's exact CSS cell size (same value fitAddon uses
         // internally) — avoids the clientWidth integer-rounding that made
@@ -957,6 +1068,7 @@ function positionSinglePane(paneId) {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     applyViewportFix();   // re-pin after layout, in case URL bar moved
     try { p.fitAddon.fit(); } catch (e) { console.error('fit error:', e); }
+    pinToBottom(p);
     maybeSendResize(p.term.cols, p.term.rows);
     _layoutApplying = false;
     HistoryOverlay.sync();
@@ -1002,7 +1114,7 @@ function ensurePane(paneId, cols, rows) {
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(el);
-  loadWebglAddon(term);
+  const webglAddon = loadWebglAddon(term);
   // The viewport is overflow:hidden, so Viewport's `offsetWidth - scrollArea
   // .offsetWidth || 15` fallback reports a 15px scrollbar that isn't there, and
   // FitAddon.proposeDimensions() subtracts it from every pane's usable width.
@@ -1049,7 +1161,7 @@ function ensurePane(paneId, cols, rows) {
 
   // Click to focus this pane
   el.addEventListener('mousedown', () => selectPane(paneId));
-  panes[paneId] = { term, fitAddon, el, cached: false };
+  panes[paneId] = { term, fitAddon, el, webglAddon, cached: false };
   requestInitialHistory(paneId);
 }
 
@@ -1068,10 +1180,11 @@ function requestInitialHistory(paneId) {
 function destroyPane(paneId) {
   const p = panes[paneId];
   if (!p) return;
-  HistoryOverlay.detach();   // unmount the overlay before its host element goes
-  p.term.dispose();
+  HistoryOverlay.detach(p);  // unmount the overlay before its host element goes
+  disposePaneTerminal(p);
   p.el.remove();
   delete panes[paneId];
+  clearSnapshotWatchdog(paneId);
   _bufferedPaneOutput.delete(paneId);
   _pendingSnapshotPanes.delete(paneId);
   _scheduledSnapshotPanes.delete(paneId);
@@ -1158,6 +1271,7 @@ function setActivePaneVisual(paneId) {
     if (p) {
       requestAnimationFrame(() => {
         try { p.fitAddon.fit(); } catch (_) {}
+        pinToBottom(p);
         maybeSendResize(p.term.cols, p.term.rows);
       });
     }
@@ -1967,6 +2081,7 @@ function runViewportRefit() {
 
   const wasFocused = p.term.textarea && document.activeElement === p.term.textarea;
   try { p.fitAddon.fit(); } catch (_) {}
+  pinToBottom(p);
   maybeSendResize(p.term.cols, p.term.rows);
   if (wasFocused && Date.now() - _lastTouchScrollAt >= MOBILE_TOUCH_SCROLL_IDLE_MS) {
     requestAnimationFrame(() => {
