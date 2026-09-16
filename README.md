@@ -138,20 +138,22 @@ Both need to be exposed via `tailscale serve`. The browser automatically upgrade
 
 ### Setup
 
-Create the one-time local allowlist before starting the server. Values are comma-separated exact-match lists; don't add a trailing `/` to origins:
+Create the local config before starting the server. `WEB_TMUX_ACCESS_TOKEN` is always required, even for local-only use, because binding to `127.0.0.1` keeps out other hosts but not other Unix users on the same machine:
 
 ```bash
 cp .web-tmux.env.example .web-tmux.env
 chmod 600 .web-tmux.env
-# Edit the HTTPS origin and Tailscale login in .web-tmux.env
+# Edit .web-tmux.env: set WEB_TMUX_ACCESS_TOKEN, and for Tailnet
+# access also the HTTPS origin and Tailscale login
 ```
 
-The file is ignored by git. `server.sh` refuses to load it unless its mode is exactly 600. Non-local origins are rejected unless their Tailscale login is explicitly listed. Local-only use doesn't require this file: `http://127.0.0.1:8766` and `http://localhost:8766` are allowed by default.
+The file is ignored by git. `server.sh` refuses to load it unless its mode is exactly 600. The server refuses to start without a `WEB_TMUX_ACCESS_TOKEN` of at least 32 characters. Non-local origins are also rejected unless their Tailscale login is explicitly listed; `http://127.0.0.1:8766` and `http://localhost:8766` are allowed by default without listing `WEB_TMUX_ALLOWED_ORIGINS`.
 
 | Variable | Meaning |
 |----------|---------|
 | `WEB_TMUX_ALLOWED_ORIGINS` | Comma-separated exact-match list of allowed HTTP origins |
 | `WEB_TMUX_TAILSCALE_USERS` | Comma-separated exact-match list of allowed `Tailscale-User-Login` values |
+| `WEB_TMUX_ACCESS_TOKEN` | Shared secret (min 32 characters, e.g. `openssl rand -hex 32`) required to obtain a session cookie via `POST /auth/session` |
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
@@ -197,13 +199,13 @@ tailscale serve --https=8765 off
 
 ## Security notes
 
-- The server binds to `127.0.0.1` only; remote access must go through Tailscale Serve.
+- The server binds to `127.0.0.1` only; remote access must go through Tailscale Serve. Loopback binding is a host boundary, not a user boundary — any local Unix user can open a TCP connection to it, so `POST /auth/session` also requires the shared secret below before issuing a session.
 - HTTP and WebSocket requests require an allowed Host/origin. Tailnet requests also require an allowed `Tailscale-User-Login`.
-- `GET /auth/session` issues an HttpOnly, SameSite=Strict, HMAC-signed cookie. It expires after eight hours or a server restart and is refreshed automatically by the frontend. Tailnet HTTPS cookies also carry the Secure attribute.
-- Missing origins, mismatched hosts, invalid cookies, and unauthorized users are rejected during the WebSocket handshake before tmux state is generated. Tagged Tailscale devices without an identity header cannot connect.
+- `POST /auth/session` issues an HttpOnly, SameSite=Strict, HMAC-signed cookie, but only when the JSON body's `token` field matches `WEB_TMUX_ACCESS_TOKEN` from `.web-tmux.env` (a random secret of at least 32 characters, e.g. `openssl rand -hex 32`; the server refuses to start without one). `GET /auth/session` always returns 405. The cookie expires after eight hours or a server restart. Tailnet HTTPS cookies also carry the Secure attribute. Failed attempts are rate-limited.
+- Missing origins, mismatched hosts, invalid cookies, wrong access tokens, and unauthorized users are rejected before tmux state is generated. Tagged Tailscale devices without an identity header cannot connect, and a local Unix user without the access token cannot obtain a session even from `127.0.0.1`.
 - WebSocket traffic is limited to eight connections, 64 KiB per message, and 8 KiB per input message, with compression disabled. Control rate, input rate, and outbound queues are also bounded.
 - HTTP responses include CSP, frame-embedding protection, MIME-sniffing protection, Referrer Policy, and a restricted Permissions Policy.
-- Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values.
+- Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input, cookie values, or access tokens.
 - Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
 
 ## Third-party browser assets
@@ -224,6 +226,7 @@ web-tmux/
 ├── tmux_control.py       # tmux -CC control-mode wrapper
 ├── layout_parser.py      # tmux layout string parser
 ├── test_security.py      # Authentication, validation, and limit tests
+├── test_server.py        # POST /auth/session HTTP handler tests
 ├── pyproject.toml        # Python project and pinned dependency
 ├── uv.lock               # Lock file for uv
 ├── requirements.txt      # Pinned dependency for venv + pip
@@ -239,10 +242,10 @@ web-tmux/
 
 ## Tests
 
-After running `setup.sh`, run the test suite with the project virtual environment:
+After running `setup.sh`, run the test suite with the project virtual environment. Importing `server` requires `WEB_TMUX_ACCESS_TOKEN` to be set (the module-level `AccessController` fails closed without it), so provide a throwaway value:
 
 ```bash
-.venv/bin/python -m unittest -v
+WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32) .venv/bin/python -m unittest -v
 ```
 
 ## Logs

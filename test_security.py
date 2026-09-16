@@ -9,12 +9,14 @@ from web_security import AccessController
 class AccessControllerTest(unittest.TestCase):
     def setUp(self):
         self.now = [1_000_000]
+        self.access_token = 'a' * 32
         self.controller = AccessController(
             (
                 'http://127.0.0.1:8766',
                 'https://host.example.ts.net:8766',
             ),
             ('owner@example.com',),
+            access_token=self.access_token,
             secret=b'x' * 32,
             now=lambda: self.now[0],
         )
@@ -79,7 +81,22 @@ class AccessControllerTest(unittest.TestCase):
 
     def test_invalid_remote_configuration_fails_closed(self):
         with self.assertRaises(ValueError):
-            AccessController(('https://host.example.ts.net:8766',), ())
+            AccessController(
+                ('https://host.example.ts.net:8766',), (), access_token=self.access_token
+            )
+
+    def test_missing_or_short_access_token_fails_closed(self):
+        for token in ('', 'short', 'a' * 31):
+            with self.subTest(token=token):
+                with self.assertRaises(ValueError):
+                    AccessController(access_token=token)
+
+    def test_verify_access_token(self):
+        self.assertTrue(self.controller.verify_access_token(self.access_token))
+        self.assertFalse(self.controller.verify_access_token('b' * 32))
+        self.assertFalse(self.controller.verify_access_token(''))
+        self.assertFalse(self.controller.verify_access_token(None))
+        self.assertFalse(self.controller.verify_access_token(12345))
 
 
 class MessageValidationTest(unittest.TestCase):

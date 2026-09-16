@@ -167,6 +167,23 @@
       </div>
     </div>
 
+    <div id="token-gate" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="token-gate-title">
+        <div class="sheet-head">
+          <div id="token-gate-title">Access token required</div>
+        </div>
+        <form id="token-gate-form">
+          <label class="sheet-label" for="token-gate-input">Access token</label>
+          <input id="token-gate-input" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+          <div id="token-gate-error" class="token-gate-error"></div>
+          <div class="sheet-actions">
+            <button id="token-gate-submit" type="submit">Unlock</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
   </div>
 
   <!-- Scrollback view. Re-parented into whichever .pane-wrap is active, so its

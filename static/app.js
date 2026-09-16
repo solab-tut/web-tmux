@@ -672,60 +672,113 @@ function updateCurrentWindow(windows) {
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
-let _connecting = false;
 let _reconnectTimer = null;
+let _everConnected = false;
+let _tokenGateOpen = false;
 
 function scheduleReconnect() {
-  if (_reconnectTimer) return;
+  if (_reconnectTimer || _tokenGateOpen) return;
   _reconnectTimer = setTimeout(() => {
     _reconnectTimer = null;
     connect();
   }, 2000);
 }
 
-async function connect() {
-  if (_connecting || (ws && (
-    ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING
-  ))) return;
-  _connecting = true;
+function connect() {
+  if (_tokenGateOpen) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   _historyRequested.clear();
+
+  const socket = new WebSocket(WS_URL);
+  ws = socket;
+  let opened = false;
+  socket.onopen = () => {
+    opened = true;
+    _everConnected = true;
+    setStatus('connected');
+    if (document.visibilityState !== 'hidden') markClientActive();
+  };
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    ws = null;
+    setStatus('disconnected');
+    if (!opened && !_everConnected) {
+      openTokenGate();
+    } else {
+      scheduleReconnect();
+    }
+  };
+  socket.onerror = () => setStatus('disconnected');
+  socket.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); }
+    catch (e) { console.error('parse error', e); return; }
+    try { handleMsg(msg); }
+    catch (e) { onHandlerFailure(msg, e); }
+  };
+}
+
+// ─── Access token gate ─────────────────────────────────────────────────────
+
+function openTokenGate(message) {
+  _tokenGateOpen = true;
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+  const gate = document.getElementById('token-gate');
+  const input = document.getElementById('token-gate-input');
+  const error = document.getElementById('token-gate-error');
+  error.textContent = message || '';
+  input.value = '';
+  gate.classList.remove('hidden');
+  gate.setAttribute('aria-hidden', 'false');
+  input.focus();
+}
+
+function closeTokenGate() {
+  _tokenGateOpen = false;
+  const gate = document.getElementById('token-gate');
+  document.getElementById('token-gate-input').value = '';
+  gate.classList.add('hidden');
+  gate.setAttribute('aria-hidden', 'true');
+}
+
+async function submitTokenGate() {
+  const input = document.getElementById('token-gate-input');
+  const error = document.getElementById('token-gate-error');
+  const submitBtn = document.getElementById('token-gate-submit');
+  const token = input.value;
+  if (!token) return;
+  submitBtn.disabled = true;
   try {
-    const auth = await fetch('/auth/session', {
-      method: 'GET',
+    const res = await fetch('/auth/session', {
+      method: 'POST',
       credentials: 'same-origin',
       cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
     });
-    if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
-
-    const socket = new WebSocket(WS_URL);
-    ws = socket;
-    socket.onopen = () => {
-      setStatus('connected');
-      if (document.visibilityState !== 'hidden') markClientActive();
-    };
-    socket.onclose = () => {
-      if (ws === socket) {
-        ws = null;
-        setStatus('disconnected');
-        scheduleReconnect();
-      }
-    };
-    socket.onerror = () => setStatus('disconnected');
-    socket.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); }
-      catch (e) { console.error('parse error', e); return; }
-      try { handleMsg(msg); }
-      catch (e) { onHandlerFailure(msg, e); }
-    };
-  } catch (error) {
-    console.error('connection failed', error);
-    setStatus('disconnected');
-    scheduleReconnect();
+    if (res.status === 204) {
+      closeTokenGate();
+      connect();
+    } else if (res.status === 429) {
+      error.textContent = 'Too many attempts. Wait a moment and try again.';
+    } else {
+      error.textContent = 'Invalid access token.';
+    }
+  } catch (e) {
+    error.textContent = 'Request failed. Check your connection.';
   } finally {
-    _connecting = false;
+    input.value = '';
+    submitBtn.disabled = false;
   }
 }
+
+document.getElementById('token-gate-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  submitTokenGate();
+});
 
 // A handler that dies half-way leaves the client inconsistent — panes not
 // created, the layout not repositioned, output still held for a snapshot that

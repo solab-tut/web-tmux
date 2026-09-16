@@ -19,6 +19,7 @@ DEFAULT_ORIGINS = (
     'http://localhost:8766',
 )
 LOCAL_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
+MIN_ACCESS_TOKEN_LENGTH = 32
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -84,6 +85,7 @@ class AccessController:
         origins: tuple[str, ...] = DEFAULT_ORIGINS,
         tailscale_users: tuple[str, ...] = (),
         *,
+        access_token: str = '',
         secret: bytes | None = None,
         session_ttl: int = 8 * 60 * 60,
         now=time.time,
@@ -123,9 +125,15 @@ class AccessController:
         if any(origin.remote for origin in parsed_origins) and not users:
             raise ValueError('WEB_TMUX_TAILSCALE_USERS is required for non-local origins')
 
+        if len(access_token) < MIN_ACCESS_TOKEN_LENGTH:
+            raise ValueError(
+                f'WEB_TMUX_ACCESS_TOKEN must be at least {MIN_ACCESS_TOKEN_LENGTH} characters'
+            )
+
         self.origins = tuple(parsed_origins)
         self.allowed_origin_values = tuple(origin.value for origin in self.origins)
         self.tailscale_users = users
+        self.access_token = access_token.encode('utf-8')
         self.secret = secret or secrets.token_bytes(32)
         self.session_ttl = session_ttl
         self._now = now
@@ -134,7 +142,8 @@ class AccessController:
     def from_env(cls) -> 'AccessController':
         origins = _split_csv(os.environ.get('WEB_TMUX_ALLOWED_ORIGINS', '')) or DEFAULT_ORIGINS
         users = _split_csv(os.environ.get('WEB_TMUX_TAILSCALE_USERS', ''))
-        return cls(origins, users)
+        access_token = os.environ.get('WEB_TMUX_ACCESS_TOKEN', '')
+        return cls(origins, users, access_token=access_token)
 
     @property
     def csp_connect_sources(self) -> tuple[str, ...]:
@@ -161,6 +170,11 @@ class AccessController:
         if login not in self.tailscale_users:
             return None
         return AuthContext(origin.hostname, login, True)
+
+    def verify_access_token(self, token: str | None) -> bool:
+        if not isinstance(token, str) or not token:
+            return False
+        return hmac.compare_digest(token.encode('utf-8'), self.access_token)
 
     def _session_token(self, context: AuthContext) -> str:
         payload = {
