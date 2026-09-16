@@ -39,6 +39,8 @@ brew install tmux
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh    # creates .venv and installs dependencies
+cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
+echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
 ./server.sh   # start the server
 ```
 
@@ -49,6 +51,8 @@ sudo apt install tmux
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh    # creates .venv and installs dependencies
+cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
+echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
 ./server.sh   # start the server
 ```
 
@@ -63,10 +67,12 @@ sudo apt install tmux python3.10 python3.10-venv
 git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh
+cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
+echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
 ./server.sh
 ```
 
-Open **http://127.0.0.1:8766/** in your browser.
+Open **http://127.0.0.1:8766/** in your browser. The first visit shows an access-token prompt — see [Access token](#access-token) below.
 
 ### Configuration
 
@@ -85,6 +91,22 @@ TMUX_SESSION=my-session ./server.sh
 ```
 
 `server.sh` only stops its own process after the PID file, working directory, and command line have been verified. If the PID belongs to another process or ports 8765/8766 are occupied, startup aborts without killing anything.
+
+### Access token
+
+`WEB_TMUX_ACCESS_TOKEN` is required to start the server, even for local-only use — binding to `127.0.0.1` keeps out other hosts, but not other Unix users on the same machine. The quickstart above generates one automatically; to create or replace it manually:
+
+```bash
+cp .web-tmux.env.example .web-tmux.env   # skip if the file already exists
+chmod 600 .web-tmux.env
+echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
+./server.sh stop && ./server.sh start    # restart to pick up the new token
+```
+
+- The token must be at least 32 characters; the server refuses to start otherwise.
+- On first visit — or after any restart, which invalidates existing cookies — the browser shows an access-token prompt. Enter the value from `.web-tmux.env`; the browser then holds an HttpOnly session cookie for eight hours and never stores the token itself.
+- Running web-tmux on more than one machine? Generate a **separate token per machine** rather than reusing one. A shared token means a leak on any single machine compromises all of them; a unique token per machine limits a leak to that machine and lets you rotate just that one.
+- To revoke access immediately (e.g. a suspected leak), replace the token and restart the server. The restart also invalidates every existing session cookie, since the HMAC signing key is regenerated each time the process starts.
 
 ## Usage
 
@@ -138,22 +160,28 @@ Both need to be exposed via `tailscale serve`. The browser automatically upgrade
 
 ### Setup
 
-Create the local config before starting the server. `WEB_TMUX_ACCESS_TOKEN` is always required, even for local-only use, because binding to `127.0.0.1` keeps out other hosts but not other Unix users on the same machine:
+If `.web-tmux.env` doesn't exist yet, create it first (see [Access token](#access-token) — its 600 permissions and `WEB_TMUX_ACCESS_TOKEN` are required regardless of Tailscale use). Then edit it to add your Tailnet HTTPS origin and Tailscale login:
 
-```bash
-cp .web-tmux.env.example .web-tmux.env
-chmod 600 .web-tmux.env
-# Edit .web-tmux.env: set WEB_TMUX_ACCESS_TOKEN, and for Tailnet
-# access also the HTTPS origin and Tailscale login
+```dotenv
+WEB_TMUX_ALLOWED_ORIGINS=http://127.0.0.1:8766,http://localhost:8766,https://<machine>.<tailnet>.ts.net:8766
+WEB_TMUX_TAILSCALE_USERS=you@example.com
 ```
 
-The file is ignored by git. `server.sh` refuses to load it unless its mode is exactly 600. The server refuses to start without a `WEB_TMUX_ACCESS_TOKEN` of at least 32 characters. Non-local origins are also rejected unless their Tailscale login is explicitly listed; `http://127.0.0.1:8766` and `http://localhost:8766` are allowed by default without listing `WEB_TMUX_ALLOWED_ORIGINS`.
+`server.sh` refuses to load `.web-tmux.env` unless its mode is exactly 600. Non-local origins are rejected unless their Tailscale login is explicitly listed; `http://127.0.0.1:8766` and `http://localhost:8766` are allowed by default without listing `WEB_TMUX_ALLOWED_ORIGINS`.
 
 | Variable | Meaning |
 |----------|---------|
 | `WEB_TMUX_ALLOWED_ORIGINS` | Comma-separated exact-match list of allowed HTTP origins |
 | `WEB_TMUX_TAILSCALE_USERS` | Comma-separated exact-match list of allowed `Tailscale-User-Login` values |
-| `WEB_TMUX_ACCESS_TOKEN` | Shared secret (min 32 characters, e.g. `openssl rand -hex 32`) required to obtain a session cookie via `POST /auth/session` |
+| `WEB_TMUX_ACCESS_TOKEN` | Shared secret (min 32 characters) required to obtain a session cookie via `POST /auth/session` — see [Access token](#access-token) |
+
+Restart the server after editing `.web-tmux.env`:
+
+```bash
+./server.sh stop && ./server.sh start
+```
+
+Then expose both ports via `tailscale serve`:
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
