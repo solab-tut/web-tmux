@@ -802,14 +802,10 @@ class TmuxControl:
         if not self.subscribers:
             return
         data = json.dumps(msg)
-        dead = []
-        for ws in self.subscribers:
-            try:
-                asyncio.create_task(_safe_send(ws, data))
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.subscribers.remove(ws)
+        dead = [subscriber for subscriber in self.subscribers if not subscriber.enqueue(data)]
+        for subscriber in dead:
+            if subscriber in self.subscribers:
+                self.subscribers.remove(subscriber)
 
 
 # ──────────────────────────────────────────── helpers
@@ -817,11 +813,3 @@ class TmuxControl:
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
     winsize = struct.pack('HHHH', rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-
-
-
-async def _safe_send(ws, data: str) -> None:
-    try:
-        await ws.send(data)
-    except Exception:
-        pass

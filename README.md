@@ -1,6 +1,6 @@
 # web-tmux
 
-A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and control your tmux sessions from any browser — including mobile — over a local network or securely via Tailscale.
+A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and control your tmux sessions from a browser — including mobile — on the same machine or through Tailscale Serve.
 
 [日本語](README.ja.md)
 
@@ -25,7 +25,7 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 - tmux
 - A modern browser (Chrome, Safari, Firefox)
 
-`setup.sh` handles the Python environment automatically. It will offer to install [uv](https://github.com/astral-sh/uv) (recommended) or fall back to `python3-venv` + `pip`.
+`setup.sh` handles the Python environment automatically. If [uv](https://github.com/astral-sh/uv) is already installed, it runs `uv sync --frozen` from `uv.lock`. Otherwise, it uses an existing Python 3.10+ installation with `venv` + `pip`. The script never downloads uv itself or executes `curl | sh`.
 
 The browser terminal assets are vendored under `static/vendor/`, so the app does
 not need CDN access at runtime.
@@ -54,7 +54,7 @@ cd web-tmux
 
 ### Linux (Ubuntu 20.04)
 
-Ubuntu 20.04 ships Python 3.8 by default. `setup.sh` will automatically download Python 3.10+ via `uv` if you accept the installation prompt. Alternatively, install Python 3.10 first:
+Ubuntu 20.04 ships Python 3.8 by default. Install Python 3.10+ first, or install uv separately using its [official instructions](https://docs.astral.sh/uv/getting-started/installation/). To install Python manually:
 
 ```bash
 sudo add-apt-repository ppa:deadsnakes/ppa
@@ -84,7 +84,7 @@ TMUX_SESSION=my-session ./server.sh
 ./server.sh stop   # stop without restarting
 ```
 
-`server.sh` stops any existing server process before starting, so re-running it is always safe.
+`server.sh` only stops its own process after the PID file, working directory, and command line have been verified. If the PID belongs to another process or ports 8765/8766 are occupied, startup aborts without killing anything.
 
 ## Usage
 
@@ -123,7 +123,7 @@ On screens ≤ 768 px wide:
 
 ## Remote access with Tailscale
 
-[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS with no extra authentication setup — Tailscale device authentication acts as the access layer.
+[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS. web-tmux validates the exact browser origin and the `Tailscale-User-Login` identity header before issuing a short-lived session cookie.
 
 ### How it works
 
@@ -137,6 +137,21 @@ web-tmux listens on two local ports:
 Both need to be exposed via `tailscale serve`. The browser automatically upgrades the WebSocket connection to `wss://` when the page is served over HTTPS.
 
 ### Setup
+
+Create the one-time local allowlist before starting the server. Values are comma-separated exact-match lists; don't add a trailing `/` to origins:
+
+```bash
+cp .web-tmux.env.example .web-tmux.env
+chmod 600 .web-tmux.env
+# Edit the HTTPS origin and Tailscale login in .web-tmux.env
+```
+
+The file is ignored by git. `server.sh` refuses to load it unless its mode is exactly 600. Non-local origins are rejected unless their Tailscale login is explicitly listed. Local-only use doesn't require this file: `http://127.0.0.1:8766` and `http://localhost:8766` are allowed by default.
+
+| Variable | Meaning |
+|----------|---------|
+| `WEB_TMUX_ALLOWED_ORIGINS` | Comma-separated exact-match list of allowed HTTP origins |
+| `WEB_TMUX_TAILSCALE_USERS` | Comma-separated exact-match list of allowed `Tailscale-User-Login` values |
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
@@ -178,15 +193,18 @@ tailscale serve --https=8765 off
 
 ### Public access (Tailscale Funnel)
 
-> **Note:** This section is untested.
-
-To access web-tmux from outside your Tailnet, use `tailscale funnel` instead of `serve`. Because web-tmux has **no built-in authentication**, place a reverse proxy with HTTP Basic Auth (or equivalent) in front of it before enabling Funnel.
+**Do not enable Funnel for web-tmux.** The application is designed for a private, owner-only Tailnet. Internet exposure and multi-user authorization are outside its security model.
 
 ## Security notes
 
-- The server binds to `127.0.0.1` only and is not directly reachable from the network.
-- **There is no built-in authentication.** For any remote access, use Tailscale Serve (Tailnet-scoped) or a reverse proxy with authentication.
-- The WebSocket URL switches automatically between `ws://` (HTTP) and `wss://` (HTTPS).
+- The server binds to `127.0.0.1` only; remote access must go through Tailscale Serve.
+- HTTP and WebSocket requests require an allowed Host/origin. Tailnet requests also require an allowed `Tailscale-User-Login`.
+- `GET /auth/session` issues an HttpOnly, SameSite=Strict, HMAC-signed cookie. It expires after eight hours or a server restart and is refreshed automatically by the frontend. Tailnet HTTPS cookies also carry the Secure attribute.
+- Missing origins, mismatched hosts, invalid cookies, and unauthorized users are rejected during the WebSocket handshake before tmux state is generated. Tagged Tailscale devices without an identity header cannot connect.
+- WebSocket traffic is limited to eight connections, 64 KiB per message, and 8 KiB per input message, with compression disabled. Control rate, input rate, and outbound queues are also bounded.
+- HTTP responses include CSP, frame-embedding protection, MIME-sniffing protection, Referrer Policy, and a restricted Permissions Policy.
+- Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values.
+- Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
 
 ## Third-party browser assets
 
@@ -201,11 +219,17 @@ included next to the vendored files in `static/vendor/`.
 
 ```
 web-tmux/
-├── server.py          # HTTP + WebSocket server
-├── tmux_control.py    # tmux -CC control-mode wrapper
-├── layout_parser.py   # tmux layout string parser
-├── setup.sh           # One-time environment setup (creates .venv)
-├── server.sh          # Start / stop the server
+├── server.py             # HTTP + WebSocket server
+├── web_security.py       # Origin, Host, identity, and signed-cookie checks
+├── tmux_control.py       # tmux -CC control-mode wrapper
+├── layout_parser.py      # tmux layout string parser
+├── test_security.py      # Authentication, validation, and limit tests
+├── pyproject.toml        # Python project and pinned dependency
+├── uv.lock               # Lock file for uv
+├── requirements.txt      # Pinned dependency for venv + pip
+├── .web-tmux.env.example # Tailnet configuration example
+├── setup.sh              # One-time environment setup (creates .venv)
+├── server.sh             # Start / stop the server
 └── static/
     ├── index.html
     ├── style.css
@@ -213,8 +237,18 @@ web-tmux/
     └── vendor/          # vendored xterm.js runtime assets and licenses
 ```
 
+## Tests
+
+After running `setup.sh`, run the test suite with the project virtual environment:
+
+```bash
+.venv/bin/python -m unittest -v
+```
+
 ## Logs
 
 ```bash
 tail -f server.log
 ```
+
+`server.log` is recreated at startup with mode 600. Rejection reasons are logged, but terminal contents, input data, and cookie values are not.

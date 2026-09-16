@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+umask 077
+
 HTTP_PORT="8766"
 WS_PORT="8765"
 PID_FILE="server.pid"
 PYTHON=".venv/bin/python"
+CONFIG_FILE=".web-tmux.env"
+
+if [ -f "$CONFIG_FILE" ]; then
+  if stat -c '%a' "$CONFIG_FILE" >/dev/null 2>&1; then
+    CONFIG_MODE="$(stat -c '%a' "$CONFIG_FILE")"
+  else
+    CONFIG_MODE="$(stat -f '%Lp' "$CONFIG_FILE")"
+  fi
+  if [ "$CONFIG_MODE" != "600" ]; then
+    echo "ERROR: $CONFIG_FILE must have mode 600 (current: $CONFIG_MODE)." >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck source=/dev/null
+  . "./$CONFIG_FILE"
+  set +a
+fi
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -13,83 +32,76 @@ need_cmd() {
   fi
 }
 
-kill_by_pattern() {
-  local pattern="$1"
-  if command -v pgrep >/dev/null 2>&1; then
-    local pids
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
-    if [[ -n "$pids" ]]; then
-      # shellcheck disable=SC2086
-      kill $pids 2>/dev/null || true
-    fi
-    return
+is_web_tmux_pid() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -e "/proc/$pid/cwd" ]; then
+    [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" = "$(pwd -P)" ] || return 1
   fi
-
-  if command -v ps >/dev/null 2>&1; then
-    local pids
-    pids="$(
-      ps -ax -o pid= -o command= 2>/dev/null \
-        | awk -v pat="$pattern" '$0 ~ pat {print $1}'
-    )"
-    if [[ -n "$pids" ]]; then
-      # shellcheck disable=SC2086
-      kill $pids 2>/dev/null || true
-    fi
-  fi
+  local command
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command" == *".venv/bin/python server.py"* ]]
 }
 
-kill_by_port() {
-  local port="$1"
-
-  if command -v lsof >/dev/null 2>&1; then
-    local pids
-    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-    if [[ -n "$pids" ]]; then
-      # shellcheck disable=SC2086
-      kill $pids 2>/dev/null || true
+stop_recorded_server() {
+  if [ ! -f "$PID_FILE" ]; then return 0; fi
+  local pid
+  pid="$(sed -n '1p' "$PID_FILE" 2>/dev/null || true)"
+  if is_web_tmux_pid "$pid"; then
+    kill "$pid"
+    for _ in {1..30}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "ERROR: server pid $pid did not stop; refusing to kill it forcibly." >&2
+      return 1
     fi
-    return
+  elif [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "WARNING: stale PID file points to unrelated pid $pid; it was not killed." >&2
   fi
+  rm -f "$PID_FILE"
+}
 
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
-  fi
+port_is_free() {
+  "$PYTHON" -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.close()' "$1"
 }
 
 do_stop() {
-  kill_by_pattern "[Pp]ython.*server.py"
-  kill_by_port "$WS_PORT"
-  kill_by_port "$HTTP_PORT"
-  rm -f "$PID_FILE"
+  if [ ! -f "$PID_FILE" ]; then
+    echo "server is not running (no PID file)"
+    return
+  fi
+  stop_recorded_server
   echo "server stopped"
 }
 
 do_start() {
   need_cmd tmux
-
   if [ ! -x "$PYTHON" ]; then
-    echo "ERROR: .venv が見つかりません。先に ./setup.sh を実行してください。" >&2
+    echo "ERROR: .venv is missing; run ./setup.sh first." >&2
     exit 1
   fi
-
-  # 既存プロセスを停止してから起動
-  kill_by_pattern "[Pp]ython.*server.py"
-  kill_by_port "$WS_PORT"
-  kill_by_port "$HTTP_PORT"
-  sleep 0.5
-
-  # env -u TMUX -u TMUX_PANE: tmux内から起動した場合でもデフォルトsocketを使うよう保証
-  nohup env -u TMUX -u TMUX_PANE "$PYTHON" server.py > server.log 2>&1 &
+  stop_recorded_server
+  for port in "$WS_PORT" "$HTTP_PORT"; do
+    if ! port_is_free "$port"; then
+      echo "ERROR: port $port is already in use; no process was killed." >&2
+      exit 1
+    fi
+  done
+  : > server.log
+  chmod 600 server.log
+  nohup env -u TMUX -u TMUX_PANE "$PYTHON" server.py >> server.log 2>&1 &
   echo $! > "$PID_FILE"
-
+  chmod 600 "$PID_FILE"
   sleep 1.5
-  if ! kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  if ! is_web_tmux_pid "$(sed -n '1p' "$PID_FILE")"; then
     echo "server exited unexpectedly" >&2
     tail -n 40 server.log >&2 || true
     exit 1
   fi
-
-  echo "server started: pid=$(cat "$PID_FILE")"
+  echo "server started: pid=$(sed -n '1p' "$PID_FILE")"
   echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
   echo "WS    ws://127.0.0.1:${WS_PORT}/"
 }

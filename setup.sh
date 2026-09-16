@@ -47,27 +47,8 @@ find_uv() {
 UV="$(find_uv 2>/dev/null || true)"
 
 if [ -z "$UV" ]; then
-  echo ""
-  echo "uv is not installed."
-  echo "uv manages Python versions automatically and is the recommended option."
-  echo "See: https://astral.sh/uv/install.sh"
-  echo ""
-  printf "Install uv now? [Y/n]: "
-  read -r REPLY
-  REPLY="${REPLY:-Y}"
-  if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-    echo "Installing uv..."
-    curl -fsSL https://astral.sh/uv/install.sh | sh
-    UV="$(find_uv 2>/dev/null || true)"
-    if [ -z "$UV" ]; then
-      echo "WARNING: uv installation completed but binary not found in PATH."
-      echo "Falling back to venv+pip."
-    else
-      echo "uv installed: $UV"
-    fi
-  else
-    echo "Skipping uv. Will use venv+pip."
-  fi
+  echo "uv is not installed; using the local Python venv fallback."
+  echo "To install uv separately, follow: https://docs.astral.sh/uv/getting-started/installation/"
 fi
 
 # ── Python 3.10+ detection (venv fallback) ────────────────────────────────────
@@ -120,8 +101,8 @@ setup_with_uv() {
     "$uv_bin" venv "$VENV_DIR" --python 3.10
   fi
 
-  echo "Installing dependencies..."
-  "$uv_bin" pip install --python "$VENV_DIR/bin/python" -r "$REQUIREMENTS"
+  echo "Installing locked dependencies..."
+  "$uv_bin" sync --frozen --python "$VENV_DIR/bin/python"
 }
 
 # ── venv+pip fallback ─────────────────────────────────────────────────────────
@@ -140,8 +121,7 @@ setup_with_venv() {
     "$python_bin" -m venv "$VENV_DIR"
   fi
 
-  echo "Installing dependencies..."
-  "$VENV_DIR/bin/pip" install --upgrade pip --quiet
+  echo "Installing pinned dependencies..."
   "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS"
 }
 

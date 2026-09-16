@@ -15,6 +15,7 @@ const MOBILE_SCROLLBACK = 10000;
 // scrollback. After that the buffer grows from live output alone — snapshots
 // no longer carry history (see buildSnapshotFrame).
 const INITIAL_HISTORY_LINES = 10000;
+const MAX_INPUT_CHUNK_BYTES = 8 * 1024;
 const MOBILE_VIEWPORT_REFIT_DELAY_MS = 180;
 const MOBILE_TOUCH_SCROLL_IDLE_MS = 240;
 // Snapshot requests are coalesced, but never postponed past MAX_DELAY: every
@@ -279,12 +280,33 @@ function getActivePane() {
   return firstPaneId ? panes[firstPaneId] : null;
 }
 
+function splitUtf8Chunks(data, maxBytes = MAX_INPUT_CHUNK_BYTES) {
+  const encoder = new TextEncoder();
+  const chunks = [];
+  let chunk = '';
+  let chunkBytes = 0;
+  for (const char of data) {
+    const charBytes = encoder.encode(char).byteLength;
+    if (chunk && chunkBytes + charBytes > maxBytes) {
+      chunks.push(chunk);
+      chunk = '';
+      chunkBytes = 0;
+    }
+    chunk += char;
+    chunkBytes += charBytes;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
+}
+
 function sendPaneInput(data, paneId) {
   if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
   const targetPaneId = paneId || activePaneId || Object.keys(panes)[0];
   if (!targetPaneId) return;
   markClientActive();
-  ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data }));
+  splitUtf8Chunks(data).forEach((chunk) => {
+    ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data: chunk }));
+  });
 }
 
 function flushHeldClientPrefix() {
@@ -650,31 +672,59 @@ function updateCurrentWindow(windows) {
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
-function connect() {
-  _historyRequested.clear();   // a fresh socket re-seeds every pane's scrollback
-  ws = new WebSocket(WS_URL);
+let _connecting = false;
+let _reconnectTimer = null;
 
-  ws.onopen = () => {
-    setStatus('connected');
-    if (document.visibilityState !== 'hidden') {
-      markClientActive();
-    }
-  };
+function scheduleReconnect() {
+  if (_reconnectTimer) return;
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    connect();
+  }, 2000);
+}
 
-  ws.onclose = () => {
+async function connect() {
+  if (_connecting || (ws && (
+    ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING
+  ))) return;
+  _connecting = true;
+  _historyRequested.clear();
+  try {
+    const auth = await fetch('/auth/session', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
+
+    const socket = new WebSocket(WS_URL);
+    ws = socket;
+    socket.onopen = () => {
+      setStatus('connected');
+      if (document.visibilityState !== 'hidden') markClientActive();
+    };
+    socket.onclose = () => {
+      if (ws === socket) {
+        ws = null;
+        setStatus('disconnected');
+        scheduleReconnect();
+      }
+    };
+    socket.onerror = () => setStatus('disconnected');
+    socket.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); }
+      catch (e) { console.error('parse error', e); return; }
+      try { handleMsg(msg); }
+      catch (e) { onHandlerFailure(msg, e); }
+    };
+  } catch (error) {
+    console.error('connection failed', error);
     setStatus('disconnected');
-    setTimeout(connect, 2000);
-  };
-
-  ws.onerror = () => setStatus('disconnected');
-
-  ws.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); }
-    catch (e) { console.error('parse error', e); return; }
-    try { handleMsg(msg); }
-    catch (e) { onHandlerFailure(msg, e); }
-  };
+    scheduleReconnect();
+  } finally {
+    _connecting = false;
+  }
 }
 
 // A handler that dies half-way leaves the client inconsistent — panes not
@@ -2170,6 +2220,10 @@ HistoryOverlay.init({
   getTheme:      () => XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   focusPane:     () => focusActivePane({ retries: 2 }),
 });
+
+const _host = location.hostname.split('.')[0];
+document.title = _host + ' - web-tmux';
+document.getElementById('topbar-host').textContent = _host;
 
 initTheme();
 initFontSize();
