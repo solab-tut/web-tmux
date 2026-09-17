@@ -145,6 +145,7 @@ TMUX_SESSION=my-session ./server.sh
 - **☰** ボタンでサイドバーを開閉できます
 - **下部ツールバー** — 仮想キー：`Esc`、`Ctrl`、`Tab`、`Enter`、矢印キー
   - `Ctrl` トグルを有効にすると次の 1 文字に Ctrl 修飾を適用します
+  - **Paste** は貼り付けシートを開きます。入力欄を長押しして貼り付け、**Send to terminal** で送信します
 
 ## Tailscale を使ったリモートアクセス
 

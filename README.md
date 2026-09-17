@@ -147,6 +147,7 @@ On screens ≤ 768 px wide:
 - Tap the **☰** button to open / close the sidebar
 - **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
   - `Ctrl` toggle applies a Control modifier to the next keystroke
+  - **Paste** opens a paste sheet. Long-press its text area, paste, then tap **Send to terminal**
 
 ## Remote access with Tailscale
 

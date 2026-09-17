@@ -2194,6 +2194,32 @@ function sendVirtualKey(name) {
   sendPaneInput(data);
 }
 
+function setPasteSheetOpen(open) {
+  const sheet = document.getElementById('paste-sheet');
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function openPasteSheet() {
+  HistoryOverlay.close();
+  const box = document.getElementById('paste-text');
+  box.value = '';
+  setPasteSheetOpen(true);
+  box.focus();
+}
+
+function closePasteSheet() {
+  setPasteSheetOpen(false);
+  focusActivePane();
+}
+
+function sendPasteSheetText() {
+  const box = document.getElementById('paste-text');
+  if (!box.value) return;
+  sendPaneInput(box.value);
+  closePasteSheet();
+}
+
 function preserveKeyboardState(ev) {
   // Keep virtual-key buttons from stealing focus away from xterm's textarea on iPhone.
   ev.preventDefault();
@@ -2216,6 +2242,12 @@ document.getElementById('ctrl-toggle').addEventListener('click', () => {
   // Ctrl should reopen the software keyboard if it was closed.
   focusActivePane();
 });
+
+document.getElementById('paste-toggle').addEventListener('click', openPasteSheet);
+document.getElementById('paste-close').addEventListener('click', closePasteSheet);
+document.getElementById('paste-cancel').addEventListener('click', closePasteSheet);
+document.getElementById('paste-send').addEventListener('click', sendPasteSheetText);
+document.querySelector('#paste-sheet .sheet-backdrop').addEventListener('click', closePasteSheet);
 
 // ─── Soft keyboard / viewport handling (mobile) ───────────────────────────────
 // On iOS, `height: 100vh` returns the LARGEST possible viewport (URL bar hidden),
