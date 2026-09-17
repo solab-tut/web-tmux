@@ -14,12 +14,7 @@ from urllib.parse import urlsplit
 
 
 COOKIE_NAME = 'web_tmux_session'
-DEFAULT_ORIGINS = (
-    'http://127.0.0.1:8766',
-    'http://localhost:8766',
-)
 LOCAL_HOSTS = frozenset({'127.0.0.1', 'localhost', '::1'})
-MIN_ACCESS_TOKEN_LENGTH = 32
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
@@ -82,10 +77,9 @@ class AllowedOrigin:
 class AccessController:
     def __init__(
         self,
-        origins: tuple[str, ...] = DEFAULT_ORIGINS,
+        origins: tuple[str, ...] = (),
         tailscale_users: tuple[str, ...] = (),
         *,
-        access_token: str = '',
         secret: bytes | None = None,
         session_ttl: int = 8 * 60 * 60,
         now=time.time,
@@ -125,25 +119,18 @@ class AccessController:
         if any(origin.remote for origin in parsed_origins) and not users:
             raise ValueError('WEB_TMUX_TAILSCALE_USERS is required for non-local origins')
 
-        if len(access_token) < MIN_ACCESS_TOKEN_LENGTH:
-            raise ValueError(
-                f'WEB_TMUX_ACCESS_TOKEN must be at least {MIN_ACCESS_TOKEN_LENGTH} characters'
-            )
-
         self.origins = tuple(parsed_origins)
         self.allowed_origin_values = tuple(origin.value for origin in self.origins)
         self.tailscale_users = users
-        self.access_token = access_token.encode('utf-8')
         self.secret = secret or secrets.token_bytes(32)
         self.session_ttl = session_ttl
         self._now = now
 
     @classmethod
     def from_env(cls) -> 'AccessController':
-        origins = _split_csv(os.environ.get('WEB_TMUX_ALLOWED_ORIGINS', '')) or DEFAULT_ORIGINS
+        origins = _split_csv(os.environ.get('WEB_TMUX_ALLOWED_ORIGINS', ''))
         users = _split_csv(os.environ.get('WEB_TMUX_TAILSCALE_USERS', ''))
-        access_token = os.environ.get('WEB_TMUX_ACCESS_TOKEN', '')
-        return cls(origins, users, access_token=access_token)
+        return cls(origins, users)
 
     @property
     def csp_connect_sources(self) -> tuple[str, ...]:
@@ -170,11 +157,6 @@ class AccessController:
         if login not in self.tailscale_users:
             return None
         return AuthContext(origin.hostname, login, True)
-
-    def verify_access_token(self, token: str | None) -> bool:
-        if not isinstance(token, str) or not token:
-            return False
-        return hmac.compare_digest(token.encode('utf-8'), self.access_token)
 
     def _session_token(self, context: AuthContext) -> str:
         payload = {

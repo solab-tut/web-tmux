@@ -46,9 +46,6 @@ WS_MAX_MESSAGE_BYTES = 64 * 1024
 CONTROL_RATE = 30.0
 INPUT_RATE_BYTES = 128 * 1024.0
 INPUT_BURST_BYTES = 256 * 1024.0
-MAX_AUTH_BODY_BYTES = 1024
-AUTH_RATE = 1 / 5.0
-AUTH_BURST = 5.0
 
 ACCESS = AccessController.from_env()
 tmux = None  # TmuxControl
@@ -78,15 +75,6 @@ class TokenBucket:
             return False
         self.tokens -= amount
         return True
-
-
-_AUTH_BUCKET = TokenBucket(AUTH_RATE, AUTH_BURST)
-_AUTH_BUCKET_LOCK = threading.Lock()
-
-
-def _consume_auth_budget() -> bool:
-    with _AUTH_BUCKET_LOCK:
-        return _AUTH_BUCKET.consume()
 
 
 def _security_headers() -> tuple[tuple[str, str], ...]:
@@ -148,73 +136,25 @@ class SecureStaticHandler(SimpleHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
-    def _method_not_allowed(self) -> None:
-        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-        self.send_header('Allow', 'POST')
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def _bad_request(self) -> None:
-        self.send_response(HTTPStatus.BAD_REQUEST)
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
     def do_GET(self) -> None:
-        if urlsplit(self.path).path == '/auth/session':
-            self._method_not_allowed()
-            return
         context = self._authorize()
         if context is None:
             self._forbidden()
+            return
+        if urlsplit(self.path).path == '/auth/session':
+            self._auth_session(context)
             return
         super().do_GET()
 
     def do_HEAD(self) -> None:
-        if urlsplit(self.path).path == '/auth/session':
-            self._method_not_allowed()
-            return
         context = self._authorize()
         if context is None:
             self._forbidden()
+            return
+        if urlsplit(self.path).path == '/auth/session':
+            self._auth_session(context)
             return
         super().do_HEAD()
-
-    def do_POST(self) -> None:
-        if urlsplit(self.path).path != '/auth/session':
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-
-        length = _single_header(self.headers, 'Content-Length')
-        if not length or not length.isdigit() or int(length) > MAX_AUTH_BODY_BYTES:
-            self._bad_request()
-            return
-        if self.headers.get_content_type() != 'application/json':
-            self._bad_request()
-            return
-        body = self.rfile.read(int(length))
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            self._bad_request()
-            return
-        if not isinstance(payload, dict) or set(payload) != {'token'} or not isinstance(payload['token'], str):
-            self._bad_request()
-            return
-
-        context = self._authorize()
-        if context is None:
-            self._forbidden()
-            return
-        if not _consume_auth_budget():
-            log.warning('auth session rejected: rate limited')
-            self.send_response(HTTPStatus.TOO_MANY_REQUESTS)
-            self.send_header('Content-Length', '0')
-            self.end_headers()
-            return
-        if not ACCESS.verify_access_token(payload['token']):
-            self._forbidden()
-            return
-        self._auth_session(context)
 
     def list_directory(self, path):
         self.send_error(HTTPStatus.NOT_FOUND)

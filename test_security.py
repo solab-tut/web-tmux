@@ -1,6 +1,12 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
+
+os.environ.setdefault(
+    'WEB_TMUX_ALLOWED_ORIGINS', 'https://host.example.ts.net:8766'
+)
+os.environ.setdefault('WEB_TMUX_TAILSCALE_USERS', 'owner@example.com')
 
 import server
 from web_security import AccessController
@@ -9,40 +15,12 @@ from web_security import AccessController
 class AccessControllerTest(unittest.TestCase):
     def setUp(self):
         self.now = [1_000_000]
-        self.access_token = 'a' * 32
         self.controller = AccessController(
-            (
-                'http://127.0.0.1:8766',
-                'https://host.example.ts.net:8766',
-            ),
+            ('https://host.example.ts.net:8766',),
             ('owner@example.com',),
-            access_token=self.access_token,
             secret=b'x' * 32,
             now=lambda: self.now[0],
         )
-
-    def test_local_session_requires_exact_origin_host_and_cookie(self):
-        context = self.controller.authorize_http('127.0.0.1:8766', None)
-        self.assertIsNotNone(context)
-        cookie = self.controller.session_cookie(context).split(';', 1)[0]
-
-        accepted, reason = self.controller.authorize_websocket(
-            origin_value='http://127.0.0.1:8766',
-            host='127.0.0.1:8765',
-            tailscale_login=None,
-            cookie_header=cookie,
-        )
-        self.assertEqual(reason, '')
-        self.assertEqual(accepted.identity, 'local')
-
-        for origin in (None, 'https://evil.example'):
-            accepted, _ = self.controller.authorize_websocket(
-                origin_value=origin,
-                host='127.0.0.1:8765',
-                tailscale_login=None,
-                cookie_header=cookie,
-            )
-            self.assertIsNone(accepted)
 
     def test_remote_session_requires_allowed_tailscale_identity(self):
         context = self.controller.authorize_http(
@@ -71,7 +49,9 @@ class AccessControllerTest(unittest.TestCase):
         self.assertEqual(accepted.identity, 'owner@example.com')
 
     def test_cookie_tampering_expiry_and_host_binding(self):
-        context = self.controller.authorize_http('127.0.0.1:8766', None)
+        context = self.controller.authorize_http(
+            'host.example.ts.net:8766', 'owner@example.com'
+        )
         cookie = self.controller.session_cookie(context).split(';', 1)[0]
         self.assertTrue(self.controller.validate_session(cookie, context))
         self.assertFalse(self.controller.validate_session(cookie + 'x', context))
@@ -81,22 +61,11 @@ class AccessControllerTest(unittest.TestCase):
 
     def test_invalid_remote_configuration_fails_closed(self):
         with self.assertRaises(ValueError):
-            AccessController(
-                ('https://host.example.ts.net:8766',), (), access_token=self.access_token
-            )
+            AccessController(('https://host.example.ts.net:8766',), ())
 
-    def test_missing_or_short_access_token_fails_closed(self):
-        for token in ('', 'short', 'a' * 31):
-            with self.subTest(token=token):
-                with self.assertRaises(ValueError):
-                    AccessController(access_token=token)
-
-    def test_verify_access_token(self):
-        self.assertTrue(self.controller.verify_access_token(self.access_token))
-        self.assertFalse(self.controller.verify_access_token('b' * 32))
-        self.assertFalse(self.controller.verify_access_token(''))
-        self.assertFalse(self.controller.verify_access_token(None))
-        self.assertFalse(self.controller.verify_access_token(12345))
+    def test_missing_allowed_origins_fails_closed(self):
+        with self.assertRaises(ValueError):
+            AccessController()
 
 
 class MessageValidationTest(unittest.TestCase):

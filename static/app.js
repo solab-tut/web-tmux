@@ -193,7 +193,7 @@ const _paneOutputScanTail = new Map();
 const _historyRequested = new Set();
 let _lastViewportSize = { width: 0, height: 0 };
 let _lastTouchScrollAt = 0;
-const TMUX_COL_SAFETY_MARGIN = 0;
+const MOBILE_TMUX_COL_SAFETY_MARGIN = 1;
 
 function markClientActive() {
   _clientActive = true;
@@ -223,7 +223,11 @@ function validResize(cols, rows) {
 // Only send resize when the size actually changed (avoids feedback loops)
 let _lastResize = { cols: 0, rows: 0 };
 function maybeSendResize(cols, rows) {
-  cols = Math.floor(cols) - TMUX_COL_SAFETY_MARGIN;
+  // Mobile browsers can round xterm's sub-pixel cell width down just enough
+  // for the final column to be painted outside the visible pane. TUIs that
+  // position their cursor at the right edge then appear shifted or truncated.
+  // Keep one spare xterm column on mobile; desktop keeps the exact fit.
+  cols = Math.floor(cols) - (isMobileWidth() ? MOBILE_TMUX_COL_SAFETY_MARGIN : 0);
   rows = Math.floor(rows);
   if (cols < 10) cols = 10;
   if (!_clientActive || document.visibilityState === 'hidden') return;
@@ -672,113 +676,60 @@ function updateCurrentWindow(windows) {
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
+let _connecting = false;
 let _reconnectTimer = null;
-let _everConnected = false;
-let _tokenGateOpen = false;
 
 function scheduleReconnect() {
-  if (_reconnectTimer || _tokenGateOpen) return;
+  if (_reconnectTimer) return;
   _reconnectTimer = setTimeout(() => {
     _reconnectTimer = null;
     connect();
   }, 2000);
 }
 
-function connect() {
-  if (_tokenGateOpen) return;
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+async function connect() {
+  if (_connecting || (ws && (
+    ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING
+  ))) return;
+  _connecting = true;
   _historyRequested.clear();
-
-  const socket = new WebSocket(WS_URL);
-  ws = socket;
-  let opened = false;
-  socket.onopen = () => {
-    opened = true;
-    _everConnected = true;
-    setStatus('connected');
-    if (document.visibilityState !== 'hidden') markClientActive();
-  };
-  socket.onclose = () => {
-    if (ws !== socket) return;
-    ws = null;
-    setStatus('disconnected');
-    if (!opened && !_everConnected) {
-      openTokenGate();
-    } else {
-      scheduleReconnect();
-    }
-  };
-  socket.onerror = () => setStatus('disconnected');
-  socket.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); }
-    catch (e) { console.error('parse error', e); return; }
-    try { handleMsg(msg); }
-    catch (e) { onHandlerFailure(msg, e); }
-  };
-}
-
-// ─── Access token gate ─────────────────────────────────────────────────────
-
-function openTokenGate(message) {
-  _tokenGateOpen = true;
-  if (_reconnectTimer) {
-    clearTimeout(_reconnectTimer);
-    _reconnectTimer = null;
-  }
-  const gate = document.getElementById('token-gate');
-  const input = document.getElementById('token-gate-input');
-  const error = document.getElementById('token-gate-error');
-  error.textContent = message || '';
-  input.value = '';
-  gate.classList.remove('hidden');
-  gate.setAttribute('aria-hidden', 'false');
-  input.focus();
-}
-
-function closeTokenGate() {
-  _tokenGateOpen = false;
-  const gate = document.getElementById('token-gate');
-  document.getElementById('token-gate-input').value = '';
-  gate.classList.add('hidden');
-  gate.setAttribute('aria-hidden', 'true');
-}
-
-async function submitTokenGate() {
-  const input = document.getElementById('token-gate-input');
-  const error = document.getElementById('token-gate-error');
-  const submitBtn = document.getElementById('token-gate-submit');
-  const token = input.value;
-  if (!token) return;
-  submitBtn.disabled = true;
   try {
-    const res = await fetch('/auth/session', {
-      method: 'POST',
+    const auth = await fetch('/auth/session', {
+      method: 'GET',
       credentials: 'same-origin',
       cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
     });
-    if (res.status === 204) {
-      closeTokenGate();
-      connect();
-    } else if (res.status === 429) {
-      error.textContent = 'Too many attempts. Wait a moment and try again.';
-    } else {
-      error.textContent = 'Invalid access token.';
-    }
-  } catch (e) {
-    error.textContent = 'Request failed. Check your connection.';
+    if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
+
+    const socket = new WebSocket(WS_URL);
+    ws = socket;
+    socket.onopen = () => {
+      setStatus('connected');
+      if (document.visibilityState !== 'hidden') markClientActive();
+    };
+    socket.onclose = () => {
+      if (ws === socket) {
+        ws = null;
+        setStatus('disconnected');
+        scheduleReconnect();
+      }
+    };
+    socket.onerror = () => setStatus('disconnected');
+    socket.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); }
+      catch (e) { console.error('parse error', e); return; }
+      try { handleMsg(msg); }
+      catch (e) { onHandlerFailure(msg, e); }
+    };
+  } catch (error) {
+    console.error('connection failed', error);
+    setStatus('disconnected');
+    scheduleReconnect();
   } finally {
-    input.value = '';
-    submitBtn.disabled = false;
+    _connecting = false;
   }
 }
-
-document.getElementById('token-gate-form').addEventListener('submit', (ev) => {
-  ev.preventDefault();
-  submitTokenGate();
-});
 
 // A handler that dies half-way leaves the client inconsistent — panes not
 // created, the layout not repositioned, output still held for a snapshot that

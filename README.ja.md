@@ -1,6 +1,6 @@
 # web-tmux
 
-[tmux](https://github.com/tmux/tmux) の軽量 Web フロントエンドです。ブラウザから tmux セッションを操作できます。モバイルにも対応しており、同じマシン上、または Tailscale Serve 経由で利用できます。
+[tmux](https://github.com/tmux/tmux) の軽量 Web フロントエンドです。Tailscale Serve 経由のブラウザから tmux セッションを操作でき、モバイルにも対応しています。
 
 ```
 Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
@@ -40,7 +40,7 @@ git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh    # .venv を作成して依存パッケージをインストール
 cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
+# .web-tmux.env のTailnet HTTPS OriginとTailscaleログイン名を編集
 ./server.sh   # サーバーを起動
 ```
 
@@ -52,7 +52,7 @@ git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh    # .venv を作成して依存パッケージをインストール
 cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
+# .web-tmux.env のTailnet HTTPS OriginとTailscaleログイン名を編集
 ./server.sh   # サーバーを起動
 ```
 
@@ -68,11 +68,11 @@ git clone https://github.com/solab-tut/web-tmux.git
 cd web-tmux
 ./setup.sh
 cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
+# .web-tmux.env のTailnet HTTPS OriginとTailscaleログイン名を編集
 ./server.sh
 ```
 
-ブラウザで **http://127.0.0.1:8766/** を開きます。初回アクセス時はアクセストークンの入力画面が表示されます。詳しくは下記の[アクセストークン](#アクセストークン)を参照してください。
+[Tailscaleの設定](#tailscale-を使ったリモートアクセス)を完了してから、ブラウザでTailnetのHTTPS URLを開きます。localhost経由の直接アクセスは意図的に無効化しています。
 
 ### 起動・停止オプション
 
@@ -91,22 +91,6 @@ TMUX_SESSION=my-session ./server.sh
 ```
 
 `server.sh` は、PIDファイル、作業ディレクトリ、コマンドラインが一致する自身のプロセスだけを停止します。無関係なPIDや8765/8766のポート競合を検出した場合は、プロセスをkillせず起動を中止します。
-
-### アクセストークン
-
-`WEB_TMUX_ACCESS_TOKEN` はローカル専用の利用であってもサーバー起動に必須です。`127.0.0.1` へのバインドは他ホストからの接続を防ぎますが、同じマシン上の別Unixユーザーからの接続は防げないためです。上のクイックスタートでは自動的に生成されますが、手動で作成・再生成する場合は次のようにします:
-
-```bash
-cp .web-tmux.env.example .web-tmux.env   # 既にファイルがあれば省略
-chmod 600 .web-tmux.env
-echo "WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32)" >> .web-tmux.env
-./server.sh stop && ./server.sh start    # 新しいトークンを反映するため再起動
-```
-
-- トークンは32文字以上が必須で、満たさない場合サーバーは起動を拒否します。
-- 初回アクセス時、またはサーバー再起動後(既存Cookieは無効になります)は、ブラウザにアクセストークンの入力画面が表示されます。`.web-tmux.env` の値を入力すると、以降8時間はHttpOnlyのセッションCookieで操作できます。トークン自体はブラウザに保存されません。
-- 複数のマシンでweb-tmuxを使う場合は、**マシンごとに別々のトークン**を生成してください。同じトークンを使い回すと、どれか1台からの漏えいが全マシンに波及します。マシンごとに固有のトークンにしておけば、漏えい時の被害をそのマシンだけに限定でき、そのマシンだけローテーションすれば済みます。
-- 漏えいが疑われる場合など即座にアクセスを無効化したいときは、トークンを差し替えてサーバーを再起動してください。再起動のたびにHMAC署名鍵も再生成されるため、既存のセッションCookieはすべて同時に失効します。
 
 ## 使い方
 
@@ -160,20 +144,19 @@ web-tmux は 2 つのローカルポートを使用します:
 
 ### 設定
 
-まだ `.web-tmux.env` が無ければ先に作成してください（[アクセストークン](#アクセストークン)を参照。Tailscaleを使うかどうかに関わらず、権限600と `WEB_TMUX_ACCESS_TOKEN` は必須です）。その上で、TailnetのHTTPS OriginとTailscaleログイン名を編集します:
+`.web-tmux.env` を作成して権限を600に保ち、TailnetのHTTPS OriginとTailscaleログイン名だけを設定します:
 
 ```dotenv
-WEB_TMUX_ALLOWED_ORIGINS=http://127.0.0.1:8766,http://localhost:8766,https://<machine>.<tailnet>.ts.net:8766
+WEB_TMUX_ALLOWED_ORIGINS=https://<machine>.<tailnet>.ts.net:8766
 WEB_TMUX_TAILSCALE_USERS=you@example.com
 ```
 
-`server.sh` は権限が正確に600でない場合、`.web-tmux.env` を読み込まず起動を中止します。非ローカルOriginは、対応するTailscaleログイン名が明示的に許可されていない限り拒否されます。ローカル利用だけなら、既定で `http://127.0.0.1:8766` と `http://localhost:8766` が許可されるため `WEB_TMUX_ALLOWED_ORIGINS` の指定は不要です。
+`server.sh` は権限が正確に600でない場合、`.web-tmux.env` を読み込まず起動を中止します。Originが空の場合や、リモートOriginに対するTailscaleログイン名がない場合も起動を拒否します。localhostや `127.0.0.1` は追加せず、ブラウザからはTailscale Serve経由だけで利用してください。
 
 | 設定名 | 内容 |
 |--------|------|
 | `WEB_TMUX_ALLOWED_ORIGINS` | 許可するHTTP Originのカンマ区切り完全一致リスト |
 | `WEB_TMUX_TAILSCALE_USERS` | 許可する `Tailscale-User-Login` のカンマ区切り完全一致リスト |
-| `WEB_TMUX_ACCESS_TOKEN` | `POST /auth/session` でセッションCookieを取得するための共有シークレット（32文字以上）。詳しくは[アクセストークン](#アクセストークン)を参照 |
 
 `.web-tmux.env` を編集したらサーバーを再起動します:
 
@@ -227,13 +210,13 @@ tailscale serve --https=8765 off
 
 ## セキュリティ
 
-- サーバーは `127.0.0.1` にのみバインドし、リモート接続はTailscale Serve経由に限定します。ただし127.0.0.1へのバインドはホスト境界であってユーザー境界ではありません。同じマシン上の別Unixユーザーも接続できてしまうため、`POST /auth/session` は下記の共有シークレット（アクセストークン）も必須にしています。
+- サーバーは `127.0.0.1` にのみバインドし、許可Originからlocalhostを除外することで、ブラウザアクセスをTailscale Serve経由に限定します。ただしループバック待受はホスト境界であってユーザー境界ではなく、別のローカルUnixユーザーはプロキシヘッダーを偽装できるため、信頼できないローカルユーザーがいない個人用マシンを前提とします。
 - HTTPとWebSocketは許可済みHost／Originを必須とし、Tailnet接続では許可済みの `Tailscale-User-Login` も検証します。
-- `POST /auth/session` は、JSONボディの `token` が `.web-tmux.env` の `WEB_TMUX_ACCESS_TOKEN`（32文字以上のランダムな秘密値、サーバーはこれが無いと起動を拒否します）と一致した場合にのみ、HttpOnly、SameSite=Strict、HMAC署名付きCookieを発行します。`GET /auth/session` は常に405を返します。Cookieは8時間またはサーバー再起動で失効します。Tailnet HTTPSではSecure属性も付きます。失敗した試行はレート制限されます。
-- Origin欠落、Host不一致、Cookie不正、アクセストークン誤り、未許可ユーザーは、tmux状態を生成する前に拒否します。Tailscale IDヘッダーを持たないタグ付き端末も利用できず、`127.0.0.1` からであっても正しいアクセストークンを持たない別Unixユーザーはセッションを取得できません。
+- Tailscale IDの検証後、`GET /auth/session` がHttpOnly、SameSite=Strict、HMAC署名付きCookieを自動発行します。モバイルのサスペンド復帰時やサーバー再起動後を含め、WebSocket接続のたびにブラウザがCookieを自動更新します。Tailnet HTTPSではSecure属性も付きます。
+- Origin欠落、Host不一致、Cookie不正、未許可ユーザーは、tmux状態を生成する前に拒否します。Tailscale IDヘッダーを持たないタグ付き端末も利用できません。
 - WebSocketは最大8接続、1メッセージ64 KiB、入力1メッセージ8 KiBに制限され、圧縮は無効です。操作・入力レートと送信キューにも上限があります。
 - CSP、フレーム埋め込み禁止、MIME sniffing防止、Referrer／Permissions PolicyをHTTPレスポンスに付与します。
-- 不正なOrigin、ID、メッセージ、レート超過は、端末入力・Cookie値・アクセストークンを含めず `server.log` に記録します。
+- 不正なOrigin、ID、メッセージ、レート超過は、端末入力やCookie値を含めず `server.log` に記録します。
 - `tailscale serve status` が上記2ポートのtailnet-only公開だけになっていることを維持してください。
 
 ## サードパーティのブラウザアセット
@@ -254,7 +237,7 @@ web-tmux/
 ├── tmux_control.py       # tmux -CC 制御モードラッパー
 ├── layout_parser.py      # tmux レイアウト文字列パーサー
 ├── test_security.py      # 認証・検証・制限のテスト
-├── test_server.py        # POST /auth/session ハンドラのテスト
+├── test_server.py        # 自動セッションHTTPハンドラのテスト
 ├── pyproject.toml        # Pythonプロジェクトと固定依存関係
 ├── uv.lock               # uv用ロックファイル
 ├── requirements.txt      # venv + pip用固定依存関係
@@ -270,10 +253,10 @@ web-tmux/
 
 ## テスト
 
-`setup.sh` 実行後、プロジェクトの仮想環境でテストを実行します。`server` モジュールのimport時に `WEB_TMUX_ACCESS_TOKEN` が必須（未設定だと `AccessController` がfail-closedで例外を送出）なので、テスト用の値を渡してください:
+`setup.sh` 実行後、プロジェクトの仮想環境でテストを実行します:
 
 ```bash
-WEB_TMUX_ACCESS_TOKEN=$(openssl rand -hex 32) .venv/bin/python -m unittest -v
+.venv/bin/python -m unittest -v
 ```
 
 ## ログ
