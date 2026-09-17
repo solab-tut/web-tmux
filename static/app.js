@@ -1779,16 +1779,20 @@ function onLayoutConflict(msg) {
   const names = (msg.sessions || []).map((s) => `"${s}"`).join(', ');
   const plural = (msg.sessions || []).length === 1 ? 'session is' : 'sessions are';
   document.getElementById('layout-conflict-text').textContent =
-    `${names} ${plural} already running. Replace them, or restore this layout alongside them under new names?`;
+    `${names} ${plural} already running. Replace them, restore them under new names, or skip them and restore only the remaining sessions?`;
   setLayoutConflictOpen(true);
 }
 
 function onRestoreResult(msg) {
-  const failed = (msg.sessions || []).filter((s) => s.status !== 'restored');
-  if (!failed.length) return;   // success stays quiet, matching the rest of this UI
-  const total = (msg.sessions || []).length;
-  const names = failed.map((s) => s.session).join(', ');
-  showLayoutNote(`Restored ${total - failed.length}/${total} — failed: ${names}`);
+  const sessions = msg.sessions || [];
+  const restored = sessions.filter((s) => s.status === 'restored');
+  const skipped = sessions.filter((s) => s.status === 'skipped');
+  const failed = sessions.filter((s) => s.status === 'failed');
+  if (!skipped.length && !failed.length) return;   // full success stays quiet
+  const details = [];
+  if (skipped.length) details.push(`skipped: ${skipped.map((s) => s.session).join(', ')}`);
+  if (failed.length) details.push(`failed: ${failed.map((s) => s.session).join(', ')}`);
+  showLayoutNote(`Restored ${restored.length}/${sessions.length} — ${details.join(' — ')}`);
 }
 
 function onLayoutError(msg) {
@@ -1915,6 +1919,9 @@ document.getElementById('layout-conflict-replace').addEventListener('click', () 
 });
 document.getElementById('layout-conflict-duplicate').addEventListener('click', () => {
   resolveLayoutConflict('duplicate');
+});
+document.getElementById('layout-conflict-skip').addEventListener('click', () => {
+  resolveLayoutConflict('skip');
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape' || !_conflictLayout) return;

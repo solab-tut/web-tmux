@@ -258,6 +258,24 @@ class RestoreSnapshotTest(unittest.TestCase):
         self.assertEqual([r['target'] for r in results], ['web-2', 'dev'])
         self.assertEqual(self._kills(), [])
 
+    def test_skip_ignores_conflicts_and_restores_only_non_conflicting_sessions(self):
+        self.live = 'web\t0\n'   # only 'web' collides
+
+        results = self.restore(mode='skip')
+
+        self.assertEqual(results, [
+            {'session': 'web', 'target': 'web', 'status': 'skipped'},
+            {'session': 'dev', 'target': 'dev', 'status': 'restored'},
+        ])
+        self.assertEqual(self._verbs(), [
+            'list-sessions',
+            'new-session', 'split-window', 'select-layout', 'select-window', 'select-pane',
+        ])
+        self.assertEqual([r[3] for r in self._renames()], ['dev'])
+        self.assertEqual(self._kills(), [])
+        self.assertEqual(self.tmux.commands, ['switch-client -t "dev"'])
+        self.assertEqual(self.tmux.session, 'dev')
+
     def test_duplicate_does_not_collide_with_another_session_in_the_same_batch(self):
         # The snapshot itself holds 'web' and 'web-2'; only 'web' is actually
         # live. Renaming 'web' naively to 'web-2' would land on the batch's

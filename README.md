@@ -118,9 +118,10 @@ back to `$HOME`.
 Restoring recreates each session under the name it had when it was saved. If
 any of those names are already running, you are asked whether to **Replace**
 them, restore them **as copies** alongside the existing ones under free
-names, or **Cancel** — the choice applies to all of the conflicting sessions
-at once. Sessions that don't conflict are restored either way. Each session
-is built under a throwaway name first, so a failure restoring one of them
+names, **Skip existing** sessions and restore only the non-conflicting ones,
+or **Cancel** — the choice applies to all of the conflicting sessions at
+once. Sessions that don't conflict are restored with any restore choice. Each
+session is built under a throwaway name first, so a failure restoring one of them
 never disturbs the others or your existing sessions; a note in the sidebar
 says if any session couldn't be restored.
 

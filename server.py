@@ -386,7 +386,7 @@ _MESSAGE_FIELDS = {
     'delete_layout': ({'type', 'name'}, {'name'}),
 }
 
-_RESTORE_MODES = {'auto', 'replace', 'duplicate'}
+_RESTORE_MODES = {'auto', 'replace', 'duplicate', 'skip'}
 
 
 def _validated_message(raw: str | bytes) -> dict:
@@ -717,6 +717,13 @@ async def _restore_snapshot(websocket, snap: dict, mode: str) -> list[dict]:
     try:
         for session_snap in snap['sessions']:
             target = session_snap['session']
+            if target in live and mode == 'skip':
+                results.append({
+                    'session': target,
+                    'target':  target,
+                    'status':  'skipped',
+                })
+                continue
             # Only a real name clash gets renamed — 'duplicate' leaves every
             # non-conflicting session under its original name, it just avoids
             # replacing the ones that collide.

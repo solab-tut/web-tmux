@@ -129,6 +129,9 @@ class MessageValidationTest(unittest.TestCase):
         server._validated_message(
             json.dumps({'type': 'restore_layout', 'name': 'a', 'mode': 'replace'})
         )
+        server._validated_message(
+            json.dumps({'type': 'restore_layout', 'name': 'a', 'mode': 'skip'})
+        )
 
     def test_layout_names_are_independent_of_live_sessions(self):
         # A slot names a session that may not exist yet — that is the whole
