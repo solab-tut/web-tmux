@@ -121,6 +121,41 @@ class MessageValidationTest(unittest.TestCase):
                 'rows': 24,
             }))
 
+    def test_valid_layout_messages(self):
+        msg = server._validated_message(json.dumps({'type': 'save_layout', 'name': '作業用'}))
+        self.assertEqual(msg['name'], '作業用')
+        server._validated_message(json.dumps({'type': 'list_layouts'}))
+        server._validated_message(json.dumps({'type': 'delete_layout', 'name': 'a'}))
+        server._validated_message(
+            json.dumps({'type': 'restore_layout', 'name': 'a', 'mode': 'replace'})
+        )
+
+    def test_layout_names_are_independent_of_live_sessions(self):
+        # A slot names a session that may not exist yet — that is the whole
+        # point of restoring it — so _allowed_sessions must not gate these.
+        msg = server._validated_message(
+            json.dumps({'type': 'restore_layout', 'name': 'not-a-session'})
+        )
+        self.assertEqual(msg['name'], 'not-a-session')
+
+    def test_bad_layout_messages_are_rejected(self):
+        bad_messages = (
+            json.dumps({'type': 'save_layout', 'name': ''}),
+            json.dumps({'type': 'save_layout', 'name': '   '}),
+            json.dumps({'type': 'save_layout', 'name': 'x' * 65}),
+            json.dumps({'type': 'save_layout', 'name': 'a\nb'}),
+            json.dumps({'type': 'save_layout', 'name': 42}),
+            json.dumps({'type': 'save_layout', 'name': 'a', 'overwrite': 'yes'}),
+            json.dumps({'type': 'save_layout', 'name': 'a', 'mode': 'replace'}),
+            json.dumps({'type': 'restore_layout', 'name': 'a', 'mode': 'nuke'}),
+            json.dumps({'type': 'delete_layout'}),
+            json.dumps({'type': 'list_layouts', 'name': 'a'}),
+        )
+        for raw in bad_messages:
+            with self.subTest(raw=raw):
+                with self.assertRaises(server.PolicyViolation):
+                    server._validated_message(raw)
+
 
 class HeaderAndRateLimitTest(unittest.TestCase):
     def test_security_headers_are_strict(self):

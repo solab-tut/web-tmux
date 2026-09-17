@@ -420,38 +420,6 @@
     }
   }
 
-  // Text of the rows currently on screen, for the clipboard sheet. Mirrors what
-  // getActivePaneViewportText() returns for the live terminal.
-  function visibleText() {
-    if (!engaged || !attachedPane) return null;
-    const top = scroller.scrollTop;
-    const bottom = top + scroller.clientHeight;
-    const padH = pad.offsetHeight;
-    const out = [];
-    const rows = rowsEl.children;
-    for (let i = 0; i < rows.length; i++) {
-      const elTop = padH + i * rowH;
-      if (elTop + rowH <= top) continue;
-      if (elTop >= bottom) break;
-      out.push(rows[i].textContent.replace(/\s+$/, ''));
-    }
-    return out.join('\n');
-  }
-
-  function scrollByPages(direction) {
-    if (!root) return;
-    const pane = deps.getActivePane();
-    if (!attachedPane || !engaged) {
-      if (direction > 0) return;          // already at the bottom in LIVE
-      if (!open(0)) return;
-    }
-    if (!pane) return;
-    if (buildStart >= buildEnd) materialise(pane);
-    const delta = direction * Math.max(1, Math.floor(pane.term.rows / 2)) * rowH;
-    scroller.scrollBy({ top: delta, behavior: 'smooth' });
-    setEngaged(true);
-  }
-
   // ─── Events ────────────────────────────────────────────────────────────────
 
   // Reaching the bottom mid-flick must not tear down the content underneath a
@@ -573,8 +541,6 @@
     detach,
     sync,
     noteOutput,
-    scrollByPages,
-    visibleText,
     isEngaged: () => engaged,
   };
 })();

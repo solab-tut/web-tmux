@@ -16,26 +16,6 @@
       <div id="topbar-host"></div>
       <div id="session-name">—</div>
       <div id="topbar-spacer"></div>
-      <div id="topbar-actions">
-        <button id="scroll-up-half" class="topbar-btn" type="button" aria-label="Scroll up" title="Scroll up half page">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 4l6 8H6z" fill="currentColor"/>
-            <rect x="6" y="17" width="12" height="2" rx="1" fill="currentColor"/>
-          </svg>
-        </button>
-        <button id="scroll-down-half" class="topbar-btn" type="button" aria-label="Scroll down" title="Scroll down half page">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="6" y="5" width="12" height="2" rx="1" fill="currentColor"/>
-            <path d="M12 20l-6-8h12z" fill="currentColor"/>
-          </svg>
-        </button>
-        <button id="clipboard-toggle" class="topbar-btn" type="button" aria-label="Clipboard" title="Clipboard">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="7" y="4" width="10" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
-            <rect x="9" y="2.5" width="6" height="3.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
-          </svg>
-        </button>
-      </div>
       <div id="font-size-picker">
         <button id="font-size-toggle" class="topbar-btn" type="button" aria-label="Font size" title="Change font size">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -94,6 +74,13 @@
           </div>
           <div id="pane-list"></div>
         </div>
+        <div class="side-section side-footer">
+          <div class="side-head">
+            <span>layouts</span>
+            <button class="side-btn" id="btn-save-layout" title="save current session layout">+</button>
+          </div>
+          <div id="layout-list"></div>
+        </div>
       </div>
       <div id="main">
         <div id="pane-area"></div>
@@ -149,20 +136,19 @@
       </button>
     </div>
 
-    <div id="clipboard-sheet" class="sheet hidden" aria-hidden="true">
+    <!-- Shown when restoring a layout whose session name is already taken. -->
+    <div id="layout-conflict-sheet" class="sheet hidden" aria-hidden="true">
       <div class="sheet-backdrop"></div>
-      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="clipboard-title">
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="layout-conflict-title">
         <div class="sheet-head">
-          <div id="clipboard-title">Clipboard</div>
-          <button id="clipboard-close" class="sheet-close" type="button" aria-label="Close clipboard">×</button>
+          <div id="layout-conflict-title">Already running</div>
+          <button id="layout-conflict-close" class="sheet-close" type="button" aria-label="Close">×</button>
         </div>
-        <label class="sheet-label" for="clipboard-copy-text">Copy text</label>
-        <textarea id="clipboard-copy-text" readonly spellcheck="false"></textarea>
-        <label class="sheet-label" for="clipboard-paste-text">Paste text</label>
-        <textarea id="clipboard-paste-text" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Paste here, then send to terminal"></textarea>
+        <div class="sheet-text" id="layout-conflict-text"></div>
         <div class="sheet-actions">
-          <button id="clipboard-send" type="button">Send</button>
-          <button id="clipboard-copy-all" type="button">Copy all</button>
+          <button id="layout-conflict-replace" type="button">Replace</button>
+          <button id="layout-conflict-duplicate" type="button">Restore as copy</button>
+          <button id="layout-conflict-cancel" type="button">Cancel</button>
         </div>
       </div>
     </div>

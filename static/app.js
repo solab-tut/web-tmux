@@ -184,6 +184,11 @@ let _editingSessionName = '';
 let _editingWindowIndex = null;
 let _confirmDeleteSession = '';
 let _confirmDeleteWindow = null;
+let _layouts = [];                // saved layout slots, newest first
+let _savingLayout = false;        // the "name this slot" editor is open
+let _confirmDeleteLayout = '';
+let _overwriteLayout = '';        // slot awaiting an overwrite confirmation
+let _conflictLayout = '';         // slot whose session name is already taken
 const _pendingSnapshotPanes = new Set();
 const _scheduledSnapshotPanes = new Set();
 const _snapshotWatchdogs = new Map();   // pane → timer holding output hostage
@@ -765,6 +770,10 @@ function handleMsg(msg) {
     case 'window_renamed':  onWindowsChanged(msg); break;
     case 'sessions_changed': onSessionsChanged(msg); break;
     case 'state':           onState(msg);          break;
+    case 'layouts':         onLayouts(msg);        break;
+    case 'layout_conflict': onLayoutConflict(msg); break;
+    case 'layout_error':    onLayoutError(msg);    break;
+    case 'restore_result':  onRestoreResult(msg);  break;
   }
 }
 
@@ -824,6 +833,7 @@ function onInit(msg) {
   updateCurrentWindow(msg.windows);
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
   scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
+  wsSendType('list_layouts');   // also refreshes the list after a reconnect
 }
 
 function onWindowSwitched(msg) {
@@ -1555,7 +1565,7 @@ function killWindow(idx) {
   ws.send(JSON.stringify({ type: 'kill_window', window: idx }));
 }
 
-function buildInlineConfirm({ label, onConfirm, onCancel }) {
+function buildInlineConfirm({ label, confirmText = 'delete', onConfirm, onCancel }) {
   const div = document.createElement('div');
   div.className = 'item-inline-editor';
 
@@ -1566,7 +1576,7 @@ function buildInlineConfirm({ label, onConfirm, onCancel }) {
   const yes = document.createElement('button');
   yes.type = 'button';
   yes.className = 'item-inline-btn danger';
-  yes.textContent = 'delete';
+  yes.textContent = confirmText;
 
   const cancel = document.createElement('button');
   cancel.type = 'button';
@@ -1642,8 +1652,188 @@ function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
   return editor;
 }
 
+// ─── Saved layouts ────────────────────────────────────────────────────────────
+// A slot holds the shape of every session that was open when it was saved —
+// window names, splits, each pane's cwd. Restoring rebuilds each of those
+// sessions under its original name; nothing that was running in them comes
+// back.
+
+function layoutMeta(slot) {
+  const when = slot.saved_at ? slot.saved_at.slice(5, 16).replace('T', ' ') : '';
+  const sessions = `${slot.sessions} session${slot.sessions === 1 ? '' : 's'}`;
+  return `${sessions} · ${slot.windows}w/${slot.panes}p${when ? ' · ' + when : ''}`;
+}
+
+function renderLayoutList() {
+  const list = document.getElementById('layout-list');
+  list.innerHTML = '';
+
+  if (_savingLayout) {
+    const div = document.createElement('div');
+    div.className = 'layout-item editing';
+    div.appendChild(buildInlineEditor({
+      kind: 'layout',
+      value: '',
+      label: 'slot',
+      onSave: (name) => {
+        _savingLayout = false;
+        saveLayout(name);
+      },
+      onCancel: () => {
+        _savingLayout = false;
+        renderLayoutList();
+      },
+    }));
+    list.appendChild(div);
+  }
+
+  _layouts.forEach((slot) => {
+    const div = document.createElement('div');
+    div.className = 'layout-item';
+    div.dataset.layoutName = slot.name;
+
+    if (_confirmDeleteLayout === slot.name) {
+      div.classList.add('confirming');
+      div.appendChild(buildInlineConfirm({
+        label: `Delete layout "${slot.name}"?`,
+        onConfirm: () => {
+          _confirmDeleteLayout = '';
+          deleteLayout(slot.name);
+        },
+        onCancel: () => {
+          _confirmDeleteLayout = '';
+          renderLayoutList();
+        },
+      }));
+    } else if (_overwriteLayout === slot.name) {
+      div.classList.add('confirming');
+      div.appendChild(buildInlineConfirm({
+        label: `Overwrite "${slot.name}"?`,
+        confirmText: 'overwrite',
+        onConfirm: () => {
+          _overwriteLayout = '';
+          saveLayout(slot.name, true);
+        },
+        onCancel: () => {
+          _overwriteLayout = '';
+          renderLayoutList();
+        },
+      }));
+    } else {
+      div.tabIndex = 0;
+      div.title = `Restore ${slot.sessions} session${slot.sessions === 1 ? '' : 's'}`;
+      div.innerHTML =
+        `<span class="layout-name">${escHtml(slot.name)}</span>` +
+        `<span class="layout-meta">${escHtml(layoutMeta(slot))}</span>`;
+      div.appendChild(buildDeleteButton(`Delete layout ${slot.name}`, () => {
+        _overwriteLayout = '';
+        _confirmDeleteLayout = slot.name;
+        renderLayoutList();
+      }));
+      div.addEventListener('click', () => {
+        restoreLayout(slot.name);
+        if (isMobileWidth()) setSidebarOpen(false);
+      });
+    }
+    list.appendChild(div);
+  });
+
+  if (!_layouts.length && !_savingLayout) {
+    const hint = document.createElement('div');
+    hint.id = 'layout-empty';
+    hint.textContent = 'none saved yet';
+    list.appendChild(hint);
+  }
+}
+
+function saveLayout(name, overwrite) {
+  name = (name || '').trim();
+  if (!name) {
+    renderLayoutList();
+    return;
+  }
+  wsSendType('save_layout', overwrite ? { name, overwrite: true } : { name });
+}
+
+function restoreLayout(name, mode) {
+  wsSendType('restore_layout', mode ? { name, mode } : { name });
+}
+
+function deleteLayout(name) {
+  wsSendType('delete_layout', { name });
+}
+
+function onLayouts(msg) {
+  _layouts = msg.layouts || [];
+  renderLayoutList();
+}
+
+function onLayoutConflict(msg) {
+  if (msg.scope === 'slot') {
+    _confirmDeleteLayout = '';
+    _overwriteLayout = msg.name;
+    renderLayoutList();
+    return;
+  }
+  _conflictLayout = msg.name;
+  const names = (msg.sessions || []).map((s) => `"${s}"`).join(', ');
+  const plural = (msg.sessions || []).length === 1 ? 'session is' : 'sessions are';
+  document.getElementById('layout-conflict-text').textContent =
+    `${names} ${plural} already running. Replace them, or restore this layout alongside them under new names?`;
+  setLayoutConflictOpen(true);
+}
+
+function onRestoreResult(msg) {
+  const failed = (msg.sessions || []).filter((s) => s.status !== 'restored');
+  if (!failed.length) return;   // success stays quiet, matching the rest of this UI
+  const total = (msg.sessions || []).length;
+  const names = failed.map((s) => s.session).join(', ');
+  showLayoutNote(`Restored ${total - failed.length}/${total} — failed: ${names}`);
+}
+
+function onLayoutError(msg) {
+  const messages = {
+    busy:           'Another layout operation is still running.',
+    capture_failed: 'Could not read one of the open sessions.',
+    too_large:      'Too many sessions, windows, or panes to save.',
+    restore_failed: 'Restore failed; nothing was changed.',
+    not_found:      'That layout is gone.',
+    store_full:     'No free layout slots left — delete one first.',
+    save_failed:    'Could not write the layout file.',
+  };
+  showLayoutNote(messages[msg.code] || 'Layout operation failed.');
+}
+
+function showLayoutNote(text) {
+  const list = document.getElementById('layout-list');
+  const note = document.createElement('div');
+  note.id = 'layout-empty';
+  note.textContent = text;
+  list.prepend(note);
+  setTimeout(() => note.remove(), 6000);
+}
+
+function setLayoutConflictOpen(open) {
+  const sheet = document.getElementById('layout-conflict-sheet');
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function closeLayoutConflict() {
+  _conflictLayout = '';
+  setLayoutConflictOpen(false);
+  focusActivePane();
+}
+
+function resolveLayoutConflict(mode) {
+  const name = _conflictLayout;
+  setLayoutConflictOpen(false);
+  _conflictLayout = '';
+  if (name) restoreLayout(name, mode);
+}
+
 function moveSidebarFocus(list, delta) {
-  const items = [...list.querySelectorAll('.session-item, .window-item, .pane-item')];
+  const items = [...list.querySelectorAll('.session-item, .window-item, .pane-item, .layout-item')];
   if (items.length === 0) return;
   const current = document.activeElement;
   const currentIdx = items.indexOf(current);
@@ -1664,6 +1854,8 @@ function activateSidebarItem(item) {
     const paneId = item.dataset.paneId || '';
     const isCurrentPane = paneId === activePaneId;
     selectPane(paneId, isCurrentPane ? { toggleZoom: true } : { forceZoom: true });
+  } else if (item.classList.contains('layout-item')) {
+    restoreLayout(item.dataset.layoutName || '');
   }
   if (isMobileWidth()) setSidebarOpen(false);
 }
@@ -1689,6 +1881,7 @@ function handleSidebarListKeydown(ev) {
 document.getElementById('session-list').addEventListener('keydown', handleSidebarListKeydown);
 document.getElementById('window-list').addEventListener('keydown', handleSidebarListKeydown);
 document.getElementById('pane-list').addEventListener('keydown', handleSidebarListKeydown);
+document.getElementById('layout-list').addEventListener('keydown', handleSidebarListKeydown);
 
 // ─── Sidebar action buttons ───────────────────────────────────────────────────
 
@@ -1706,6 +1899,28 @@ document.getElementById('btn-new-session').addEventListener('click', () => {
   wsSendType('new_session');
   focusActivePane();
 });
+document.getElementById('btn-save-layout').addEventListener('click', () => {
+  _confirmDeleteLayout = '';
+  _overwriteLayout = '';
+  _savingLayout = true;
+  renderLayoutList();
+});
+
+document.getElementById('layout-conflict-close').addEventListener('click', closeLayoutConflict);
+document.getElementById('layout-conflict-cancel').addEventListener('click', closeLayoutConflict);
+document.querySelector('#layout-conflict-sheet .sheet-backdrop')
+  .addEventListener('click', closeLayoutConflict);
+document.getElementById('layout-conflict-replace').addEventListener('click', () => {
+  resolveLayoutConflict('replace');
+});
+document.getElementById('layout-conflict-duplicate').addEventListener('click', () => {
+  resolveLayoutConflict('duplicate');
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !_conflictLayout) return;
+  ev.preventDefault();
+  closeLayoutConflict();
+}, true);   // capture, so xterm doesn't swallow it first
 document.getElementById('btn-split-h').addEventListener('click', () => {
   wsSendType('split_window', { direction: 'h', pane: activePaneId || '' });
   focusActivePane();
@@ -1979,90 +2194,13 @@ function sendVirtualKey(name) {
   sendPaneInput(data);
 }
 
-function scrollActivePaneHalfPage(direction) {
-  HistoryOverlay.scrollByPages(direction);
-}
-
-function hideSoftwareKeyboard() {
-  const pane = getActivePane();
-  if (pane) {
-    try { pane.term.blur(); } catch (_) {}
-  }
-  const activeEl = document.activeElement;
-  if (activeEl && typeof activeEl.blur === 'function') {
-    try { activeEl.blur(); } catch (_) {}
-  }
-}
-
-function getActivePaneViewportText() {
-  // While scrolled back, "what's on screen" is the overlay, not the terminal.
-  const histText = HistoryOverlay.visibleText();
-  if (histText !== null) return histText;
-
-  const pane = getActivePane();
-  if (!pane) return '';
-  const buffer = pane.term.buffer.active;
-  const start = Math.max(0, buffer.viewportY);
-  const end = Math.min(buffer.length, start + pane.term.rows);
-  const lines = [];
-  for (let i = start; i < end; i++) {
-    const line = buffer.getLine(i);
-    if (!line) continue;
-    lines.push(line.translateToString(true));
-  }
-  return lines.join('\n');
-}
-
-function setClipboardSheetOpen(open) {
-  const sheet = document.getElementById('clipboard-sheet');
-  if (!sheet) return;
-  sheet.classList.toggle('hidden', !open);
-  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
-}
-
-function openClipboardSheet() {
-  const copyBox = document.getElementById('clipboard-copy-text');
-  const pasteBox = document.getElementById('clipboard-paste-text');
-  copyBox.value = getActivePaneViewportText();
-  pasteBox.value = '';
-  setClipboardSheetOpen(true);
-}
-
-function closeClipboardSheet() {
-  setClipboardSheetOpen(false);
-  focusActivePane();
-}
-
-async function copyClipboardSheetText() {
-  const copyBox = document.getElementById('clipboard-copy-text');
-  if (!copyBox.value) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    try {
-      await navigator.clipboard.writeText(copyBox.value);
-      return;
-    } catch (_) {}
-  }
-  copyBox.focus();
-  copyBox.select();
-}
-
-function sendClipboardSheetPaste() {
-  const pasteBox = document.getElementById('clipboard-paste-text');
-  if (!pasteBox.value) {
-    closeClipboardSheet();
-    return;
-  }
-  sendPaneInput(pasteBox.value);
-  closeClipboardSheet();
-}
-
 function preserveKeyboardState(ev) {
   // Keep virtual-key buttons from stealing focus away from xterm's textarea on iPhone.
   ev.preventDefault();
   markClientActive();
 }
 
-document.querySelectorAll('#bottombar button, #topbar-actions button').forEach((btn) => {
+document.querySelectorAll('#bottombar button').forEach((btn) => {
   btn.addEventListener('pointerdown', preserveKeyboardState);
 });
 
@@ -2072,41 +2210,11 @@ document.querySelectorAll('#bottombar .vkey').forEach((btn) => {
   });
 });
 
-document.getElementById('scroll-up-half').addEventListener('click', () => {
-  hideSoftwareKeyboard();
-  scrollActivePaneHalfPage(-1);
-});
-
-document.getElementById('scroll-down-half').addEventListener('click', () => {
-  hideSoftwareKeyboard();
-  scrollActivePaneHalfPage(1);
-});
-
 document.getElementById('ctrl-toggle').addEventListener('click', () => {
   markClientActive();
   setCtrlActive(!_ctrlActive);
   // Ctrl should reopen the software keyboard if it was closed.
   focusActivePane();
-});
-
-document.getElementById('clipboard-toggle').addEventListener('click', () => {
-  openClipboardSheet();
-});
-
-document.getElementById('clipboard-close').addEventListener('click', () => {
-  closeClipboardSheet();
-});
-
-document.querySelector('#clipboard-sheet .sheet-backdrop').addEventListener('click', () => {
-  closeClipboardSheet();
-});
-
-document.getElementById('clipboard-send').addEventListener('click', () => {
-  sendClipboardSheetPaste();
-});
-
-document.getElementById('clipboard-copy-all').addEventListener('click', () => {
-  copyClipboardSheetText();
 });
 
 // ─── Soft keyboard / viewport handling (mobile) ───────────────────────────────

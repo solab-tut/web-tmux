@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,9 @@ from urllib.parse import urlsplit
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+import layout_store
 from layout_parser import parse_layout
+from layout_store import Ref
 from tmux_control import SNAPSHOT_SCROLLBACK_LINES, TmuxControl
 from web_security import AccessController
 
@@ -53,6 +56,8 @@ _active_connections: set[ServerConnection] = set()
 _allowed_sessions: set[str] = set()
 _allowed_windows: set[int] = set()
 _allowed_panes: set[str] = set()
+_layout_lock = asyncio.Lock()   # save/restore/delete run one at a time
+_restore_seq = 0
 
 
 def _single_header(headers, name: str) -> str | None:
@@ -99,7 +104,7 @@ def _security_headers() -> tuple[tuple[str, str], ...]:
         ('Content-Security-Policy', csp),
         ('Cross-Origin-Opener-Policy', 'same-origin'),
         ('Cross-Origin-Resource-Policy', 'same-origin'),
-        ('Permissions-Policy', 'clipboard-read=(), clipboard-write=(self)'),
+        ('Permissions-Policy', 'clipboard-read=(), clipboard-write=()'),
         ('Referrer-Policy', 'no-referrer'),
         ('X-Content-Type-Options', 'nosniff'),
         ('X-Frame-Options', 'DENY'),
@@ -191,6 +196,20 @@ def _window_name(value) -> str:
     return value
 
 
+def _layout_name(value) -> str:
+    # Layout slot names are store keys, not tmux targets, so they are checked
+    # for shape only — _allowed_sessions can't help here, since a slot names a
+    # session that may not exist yet (that's the point of restoring it).
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    if not value or len(value) > layout_store.MAX_SLOT_NAME:
+        return ''
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+        return ''
+    return value
+
+
 def _tmux_quote(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
@@ -228,6 +247,28 @@ async def _run_tmux(*args: str) -> int:
         stderr=asyncio.subprocess.DEVNULL,
     )
     return await proc.wait()
+
+
+TMUX_CAPTURE_LIMIT = 256 * 1024
+
+
+async def _run_tmux_capture(*args: str) -> tuple[int, str]:
+    """Like _run_tmux, but hands back stdout. Used where failure must be seen —
+    TmuxControl.send_command reports %error as success, so it can't be trusted
+    for save/restore."""
+    proc = await asyncio.create_subprocess_exec(
+        'tmux', *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+    except asyncio.TimeoutError:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return 1, ''
+    return proc.returncode or 0, out[:TMUX_CAPTURE_LIMIT].decode('utf-8', errors='surrogateescape')
 
 
 async def _run_tmux_size_safe(*args: str) -> int:
@@ -339,7 +380,13 @@ _MESSAGE_FIELDS = {
     'get_current_view': ({'type'}, set()),
     'select_pane': ({'type', 'pane', 'force_zoom', 'toggle_zoom'}, {'pane'}),
     'select_window': ({'type', 'window'}, {'window'}),
+    'list_layouts': ({'type'}, set()),
+    'save_layout': ({'type', 'name', 'overwrite'}, {'name'}),
+    'restore_layout': ({'type', 'name', 'mode'}, {'name'}),
+    'delete_layout': ({'type', 'name'}, {'name'}),
 }
+
+_RESTORE_MODES = {'auto', 'replace', 'duplicate'}
 
 
 def _validated_message(raw: str | bytes) -> dict:
@@ -406,6 +453,13 @@ def _validated_message(raw: str | bytes) -> dict:
             for key in ('force_zoom', 'toggle_zoom'):
                 if key in msg and not isinstance(msg[key], bool):
                     raise PolicyViolation('invalid zoom flag')
+    elif msg_type in {'save_layout', 'restore_layout', 'delete_layout'}:
+        if not _layout_name(msg['name']):
+            raise PolicyViolation('invalid layout name')
+        if msg_type == 'save_layout' and 'overwrite' in msg and not isinstance(msg['overwrite'], bool):
+            raise PolicyViolation('invalid overwrite flag')
+        if msg_type == 'restore_layout' and 'mode' in msg and msg['mode'] not in _RESTORE_MODES:
+            raise PolicyViolation('invalid restore mode')
     return msg
 
 
@@ -468,6 +522,232 @@ async def ws_handler(websocket: ServerConnection) -> None:
         _active_connections.discard(websocket)
         await client.stop()
         log.info('ws disconnect %s', websocket.remote_address)
+
+
+class _RestoreFailed(Exception):
+    pass
+
+
+async def _send_layouts(websocket, store: dict | None = None) -> None:
+    if store is None:
+        store = layout_store.load_store()
+    await websocket.send(json.dumps({
+        'type':    'layouts',
+        'layouts': layout_store.slot_summaries(store),
+    }))
+
+
+async def _send_layout_error(websocket, name: str, code: str) -> None:
+    # Fixed codes only — tmux's own error text never reaches the browser.
+    await websocket.send(json.dumps({'type': 'layout_error', 'name': name, 'code': code}))
+
+
+async def _live_sessions_info() -> dict[str, bool]:
+    """{session_name: attached} for every session currently running."""
+    rc, raw = await _run_tmux_capture(
+        'list-sessions', '-F', '#{session_name}\t#{session_attached}')
+    if rc != 0:
+        return {}
+    info: dict[str, bool] = {}
+    for line in raw.splitlines():
+        name, _, attached = line.partition('\t')
+        if name:
+            info[name] = attached not in ('', '0')   # mirrors tmux_control.py's own check
+    return info
+
+
+async def _live_session_names() -> set[str]:
+    return set(await _live_sessions_info())
+
+
+async def _capture_one_session(session: str, attached: bool) -> dict | None:
+    rc, win_raw = await _run_tmux_capture(
+        'list-windows', '-t', session, '-F', layout_store.WIN_FMT)
+    if rc != 0:
+        return None
+    rc, pane_raw = await _run_tmux_capture(
+        'list-panes', '-s', '-t', session, '-F', layout_store.PANE_FMT)
+    if rc != 0:
+        return None
+    return layout_store.parse_session_snapshot(session, win_raw, pane_raw, attached=attached)
+
+
+async def _capture_all_sessions(name: str) -> tuple[dict | None, str]:
+    """Snapshot every currently open session under one named slot.
+
+    All-or-nothing: if any one session can't be read, the whole save is
+    refused rather than silently saving a workspace with a session missing.
+    """
+    live = await _live_sessions_info()
+    if not live:
+        return None, 'capture_failed'
+    if len(live) > layout_store.MAX_SESSIONS_PER_SNAPSHOT:
+        return None, 'too_large'
+    sessions = []
+    for session, attached in live.items():
+        one = await _capture_one_session(session, attached)
+        if one is None:
+            return None, 'capture_failed'
+        sessions.append(one)
+    now = datetime.now().astimezone().isoformat(timespec='seconds')
+    snap = layout_store.build_snapshot(name, sessions, now=now)
+    return (snap, '') if snap else (None, 'too_large')
+
+
+def _with_existing_cwd(argv: list[str]) -> list[str]:
+    # A directory saved weeks ago may be gone by now, and -c on a missing path
+    # fails the whole command. The trailing -c is the one we put there.
+    if '-c' not in argv:
+        return argv
+    i = len(argv) - 1 - argv[::-1].index('-c')
+    if i + 1 >= len(argv) or os.path.isdir(argv[i + 1]):
+        return argv
+    argv = list(argv)
+    argv[i + 1] = os.path.expanduser('~')
+    return argv
+
+
+async def _build_temp_session(session_snap: dict, temp: str) -> None:
+    """Run the restore plan. Raises _RestoreFailed leaving nothing but `temp`."""
+    captured: dict[str, str] = {}
+    first_window = ''
+
+    for step in layout_store.build_restore_steps(session_snap, temp):
+        op = step['op']
+
+        if op == 'move_first_window':
+            # new-session lands on base-index; nudge it to the saved index.
+            if first_window and first_window != str(step['window']):
+                rc = await _run_tmux('move-window',
+                                     '-s', f'{step["session"]}:{first_window}',
+                                     '-t', f'{step["session"]}:{step["window"]}')
+                if rc != 0:
+                    raise _RestoreFailed('move-window')
+            continue
+
+        argv = _with_existing_cwd(
+            [captured[a.key] if isinstance(a, Ref) else a for a in step['argv']])
+        rc, out = await _run_tmux_capture(*argv)
+        if rc != 0:
+            if op == 'layout':
+                # Only the geometry is lost; the panes themselves are fine.
+                log.warning('restore: select-layout failed for %s', argv[2])
+                continue
+            raise _RestoreFailed(op)
+
+        if 'capture' in step:
+            fields = out.strip().split('\t')
+            if op == 'new_session':
+                if len(fields) != 2:
+                    raise _RestoreFailed(op)
+                first_window, pane = fields
+            else:
+                pane = fields[0]
+            if not pane:
+                raise _RestoreFailed(op)
+            captured[step['capture']] = pane
+
+
+async def _restore_one_session(session_snap: dict, target: str, mode: str,
+                                live: set[str]) -> tuple[bool, str]:
+    """Rebuild one session's shape under a throwaway name, then rename it to
+    `target`. Building elsewhere first means a failure costs nothing: the
+    session already running under `target` (if any) is untouched until the
+    very end. Returns (succeeded, the name it actually ended up under).
+
+    Only when `target` is the session the control client is presently
+    attached to (`tmux.session`) does killing/renaming it risk the control
+    client itself — TmuxControl recreates tmux.session on %exit, so that one
+    session needs the switch-client-before-kill dance. Every other session in
+    the batch is unattached from the control client's point of view and can
+    be killed/renamed directly.
+    """
+    global _restore_seq
+    _restore_seq += 1
+    temp = f'web-tmux-restore-{os.getpid()}-{_restore_seq}'
+    if not _session_name(target) or temp in live:
+        return False, target
+
+    await _run_tmux('set-option', '-g', 'window-size', 'latest')
+    try:
+        await _build_temp_session(session_snap, temp)
+    except _RestoreFailed as exc:
+        log.warning('restore of session %r failed at %s; discarding %s',
+                    session_snap['session'], exc, temp)
+        await _run_tmux('kill-session', '-t', temp)
+        return False, target
+    finally:
+        await _run_tmux('set-option', '-g', 'window-size', 'latest')
+
+    is_attached_here = target == tmux.session
+    if is_attached_here:
+        await tmux.send_command(f'switch-client -t {_tmux_quote(temp)}')
+        tmux.session = temp
+    if mode == 'replace' and target in live:
+        await _run_tmux('kill-session', '-t', target)
+    if await _run_tmux('rename-session', '-t', temp, target) == 0:
+        if is_attached_here:
+            tmux.session = target
+        return True, target
+    log.warning('restore: could not rename %s to %r; leaving it as-is', temp, target)
+    if is_attached_here:
+        tmux.session = temp
+    return True, temp
+
+
+async def _restore_snapshot(websocket, snap: dict, mode: str) -> list[dict]:
+    """Restore every session in `snap` independently — one session's failure
+    does not stop the others. Returns a per-session result list; the caller
+    reports it to the browser as `restore_result`.
+    """
+    live = await _live_session_names()
+    # Names already spoken for in this batch, kept up to date as targets are
+    # picked, so a 'duplicate' rename can't land on another session this same
+    # snapshot is about to (re)create.
+    reserved = set(live) | {s['session'] for s in snap['sessions']}
+
+    # Same reason as select_window: keep this connection off the broadcast
+    # list for the WHOLE batch, not just one session's build, so no other
+    # session's %layout-change can overtake the window_switched that ends it.
+    was_subscribed = websocket in tmux.subscribers
+    if was_subscribed:
+        tmux.subscribers.remove(websocket)
+
+    results: list[dict] = []
+    try:
+        for session_snap in snap['sessions']:
+            target = session_snap['session']
+            # Only a real name clash gets renamed — 'duplicate' leaves every
+            # non-conflicting session under its original name, it just avoids
+            # replacing the ones that collide.
+            if target in live and mode in ('duplicate', 'auto'):
+                target = layout_store.unique_session_name(target, reserved)
+            reserved.add(target)
+
+            ok, final_target = await _restore_one_session(session_snap, target, mode, live)
+            results.append({
+                'session': session_snap['session'],
+                'target':  final_target,
+                'status':  'restored' if ok else 'failed',
+            })
+
+        # Focus on whichever session was attached at save time, if it came
+        # back; otherwise the first one that did. If everything failed, the
+        # browser's current view is left alone.
+        focus = next((r['target'] for s, r in zip(snap['sessions'], results)
+                      if s.get('attached') and r['status'] == 'restored'), None)
+        if focus is None:
+            focus = next((r['target'] for r in results if r['status'] == 'restored'), None)
+        if focus is not None:
+            if focus != tmux.session:
+                await tmux.send_command(f'switch-client -t {_tmux_quote(focus)}')
+                tmux.session = focus
+            await _send_current_view(websocket)
+    finally:
+        if was_subscribed:
+            tmux.subscribers.append(websocket)
+
+    return results
 
 
 async def _handle_msg(websocket, msg: dict) -> None:
@@ -684,6 +964,77 @@ async def _handle_msg(websocket, msg: dict) -> None:
         finally:
             if was_subscribed:
                 tmux.subscribers.append(websocket)
+
+    elif t == 'list_layouts':
+        await _send_layouts(websocket)
+
+    elif t == 'save_layout':
+        name = _layout_name(msg.get('name'))
+        if _layout_lock.locked():
+            await _send_layout_error(websocket, name, 'busy')
+            return
+        async with _layout_lock:
+            store = layout_store.load_store()
+            if name in store['slots'] and not _to_bool(msg.get('overwrite')):
+                await websocket.send(json.dumps(
+                    {'type': 'layout_conflict', 'name': name, 'scope': 'slot'}))
+                return
+            snap, code = await _capture_all_sessions(name)
+            if snap is None:
+                await _send_layout_error(websocket, name, code)
+                return
+            if not layout_store.put_slot(store, snap):
+                await _send_layout_error(websocket, name, 'store_full')
+                return
+            try:
+                layout_store.save_store(store)
+            except OSError:
+                log.exception('could not write the layout store')
+                await _send_layout_error(websocket, name, 'save_failed')
+                return
+        await _send_layouts(websocket)
+
+    elif t == 'restore_layout':
+        _resize_master = websocket
+        name = _layout_name(msg.get('name'))
+        mode = msg.get('mode') or 'auto'
+        if _layout_lock.locked():
+            await _send_layout_error(websocket, name, 'busy')
+            return
+        async with _layout_lock:
+            snap = layout_store.load_store()['slots'].get(name)
+            if snap is None:
+                await _send_layout_error(websocket, name, 'not_found')
+                return
+            if mode == 'auto':
+                conflicts = layout_store.conflicting_sessions(snap, await _live_session_names())
+                if conflicts:
+                    await websocket.send(json.dumps(
+                        {'type': 'layout_conflict', 'name': name,
+                         'scope': 'snapshot', 'sessions': conflicts}))
+                    return
+            results = await _restore_snapshot(websocket, snap, mode)
+            await websocket.send(json.dumps(
+                {'type': 'restore_result', 'name': name, 'sessions': results}))
+        await _send_layouts(websocket)
+
+    elif t == 'delete_layout':
+        name = _layout_name(msg.get('name'))
+        if _layout_lock.locked():
+            await _send_layout_error(websocket, name, 'busy')
+            return
+        async with _layout_lock:
+            store = layout_store.load_store()
+            if store['slots'].pop(name, None) is None:
+                await _send_layout_error(websocket, name, 'not_found')
+                return
+            try:
+                layout_store.save_store(store)
+            except OSError:
+                log.exception('could not write the layout store')
+                await _send_layout_error(websocket, name, 'save_failed')
+                return
+        await _send_layouts(websocket)
 
 
 # ──────────────────────────────────────────── main

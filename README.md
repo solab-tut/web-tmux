@@ -17,7 +17,8 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 - Terminal automatically resizes to match the browser viewport
 - Color themes: Dark (default), Light, Nord
 - Adjustable font size (11–18 px), persisted in `localStorage`
-- **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), clipboard sheet, scroll buttons, IME support
+- Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
+- **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
 
 ## Requirements
 
@@ -104,6 +105,27 @@ TMUX_SESSION=my-session ./server.sh
 | **+** (windows row) | New window in current session |
 | **+** (sessions row) | New session |
 | **⇿ / ⇕** | Split active pane horizontally / vertically |
+| **Layouts** | Click to restore a saved layout; 🗑 to delete it |
+| **+** (layouts row) | Save every currently open session under one named layout |
+
+A layout is a snapshot of your whole workspace — every session that was open
+when you saved it, each with its window names, how its panes are split, and
+each pane's working directory. Commands that were running and what was on
+screen are not saved; restoring gives you the same sessions and frames back,
+with fresh shells in them. A working directory that no longer exists falls
+back to `$HOME`.
+
+Restoring recreates each session under the name it had when it was saved. If
+any of those names are already running, you are asked whether to **Replace**
+them, restore them **as copies** alongside the existing ones under free
+names, or **Cancel** — the choice applies to all of the conflicting sessions
+at once. Sessions that don't conflict are restored either way. Each session
+is built under a throwaway name first, so a failure restoring one of them
+never disturbs the others or your existing sessions; a note in the sidebar
+says if any session couldn't be restored.
+
+Layouts live in `~/.local/share/web-tmux/layouts.json` (see
+[Security notes](#security-notes)).
 
 ### Theme and font size
 
@@ -125,7 +147,6 @@ On screens ≤ 768 px wide:
 - Tap the **☰** button to open / close the sidebar
 - **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
   - `Ctrl` toggle applies a Control modifier to the next keystroke
-- **Top-right buttons** — half-page scroll up/down, clipboard sheet (copy viewport text / paste text to terminal)
 
 ## Remote access with Tailscale
 
@@ -217,6 +238,7 @@ tailscale serve --https=8765 off
 - WebSocket traffic is limited to eight connections, 64 KiB per message, and 8 KiB per input message, with compression disabled. Control rate, input rate, and outbound queues are also bounded.
 - HTTP responses include CSP, frame-embedding protection, MIME-sniffing protection, Referrer Policy, and a restricted Permissions Policy.
 - Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values.
+- Saved layouts are written to `~/.local/share/web-tmux/layouts.json` with mode 600 inside a mode 700 directory. They record working-directory paths, so treat the file as private; it never leaves the machine and is not part of the repository.
 - Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
 
 ## Third-party browser assets
@@ -236,8 +258,10 @@ web-tmux/
 ├── web_security.py       # Origin, Host, identity, and signed-cookie checks
 ├── tmux_control.py       # tmux -CC control-mode wrapper
 ├── layout_parser.py      # tmux layout string parser
+├── layout_store.py       # Saved session layouts: capture, restore plan, store
 ├── test_security.py      # Authentication, validation, and limit tests
-├── test_server.py        # Automatic session HTTP handler tests
+├── test_server.py        # Session HTTP handler and layout restore tests
+├── test_layout_store.py  # Layout capture, ordering, planning, and store tests
 ├── pyproject.toml        # Python project and pinned dependency
 ├── uv.lock               # Lock file for uv
 ├── requirements.txt      # Pinned dependency for venv + pip
@@ -250,6 +274,10 @@ web-tmux/
     ├── app.js
     └── vendor/          # vendored xterm.js runtime assets and licenses
 ```
+
+Saved layouts live outside the repository, in
+`~/.local/share/web-tmux/layouts.json` (override the directory with
+`WEB_TMUX_STATE_DIR`).
 
 ## Tests
 
