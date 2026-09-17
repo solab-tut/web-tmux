@@ -283,6 +283,7 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 
 .topbar-btn {
+  flex: 0 0 30px;
   width: 30px;
   height: 30px;
   display: inline-flex;
