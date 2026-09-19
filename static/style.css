@@ -55,6 +55,7 @@
 
   --status-ok:         #44aa44;
   --status-err:        #aa4444;
+  --status-warn:       #c8952c;
   --status-idle:       #444444;
 
   --backdrop:          rgba(0,0,0,.4);
@@ -119,6 +120,7 @@
 
   --status-ok:         #27ae60;
   --status-err:        #c0392b;
+  --status-warn:       #b9770e;
   --status-idle:       #aaaaaa;
 
   --backdrop:          rgba(0,0,0,.25);
@@ -183,6 +185,7 @@
 
   --status-ok:         #a3be8c;
   --status-err:        #bf616a;
+  --status-warn:       #ebcb8b;
   --status-idle:       #4c566a;
 
   --backdrop:          rgba(0,0,0,.45);
@@ -890,13 +893,25 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 
 /* ── Status indicator ────────────────────────────── */
+/* Tappable while the connection is down: a thumb-sized target beats hunting
+   for the reload button, and a connected dot stays out of the way. */
 #status {
   font-size: 12px;
   color: var(--status-idle);
-  pointer-events: none;
   flex-shrink: 0;
+  /* The negative margin cancels the padding, so the dot keeps its old
+     position in the bar and only its hit area grows. */
+  padding: 6px 8px;
+  margin: -6px -8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-#status.connected    { color: var(--status-ok); }
+#status.connected {
+  color: var(--status-ok);
+  pointer-events: none;
+  cursor: default;
+}
+#status.connecting   { color: var(--status-warn); }
 #status.disconnected { color: var(--status-err); }
 
 /* ── Mobile breakpoint (≤768px) ──────────────────── */

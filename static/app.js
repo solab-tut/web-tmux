@@ -28,6 +28,21 @@ const SNAPSHOT_MAX_DELAY_MS = 600;
 // still queued after this is written as-is: stale-but-live beats a frozen pane.
 const SNAPSHOT_HOLD_TIMEOUT_MS = 2500;
 
+// Every step of connecting has to end on its own. A phone waking from sleep
+// keeps sockets that look alive but carry nothing, so a request made right
+// after the resume can hang for minutes — long enough for the browser to sit
+// on "loading" forever and for the reconnect chain to stall behind it.
+const AUTH_FETCH_TIMEOUT_MS  = 8000;    // /auth/session must answer by then
+const WS_OPEN_TIMEOUT_MS     = 10000;   // …and the socket must reach OPEN
+const RECONNECT_BASE_MS      = 1000;
+const RECONNECT_MAX_MS       = 15000;
+const RECONNECT_JITTER_MS    = 250;
+// A socket the network dropped without telling us still reads as OPEN. Probe
+// it whenever the page comes back, and whenever it has been quiet for a while.
+const LIVENESS_TIMEOUT_MS    = 5000;    // probe reply window
+const LIVENESS_IDLE_MS       = 30000;   // silence that makes a probe worthwhile
+const CONNECTION_SUPERVISOR_MS = 15000; // last-resort sweep
+
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
   tab:   '\t',
@@ -683,44 +698,101 @@ function updateCurrentWindow(windows) {
 
 let _connecting = false;
 let _reconnectTimer = null;
+let _reconnectAttempt = 0;
+let _authAbort = null;          // aborts an /auth/session fetch that hangs
+let _wsOpenTimer = null;        // gives up on a socket stuck in CONNECTING
+let _livenessTimer = null;      // waits for the reply to a liveness probe
+let _lastMessageAt = 0;         // last frame received from the server
+let _connectStartedAt = 0;      // start of the attempt in flight
+
+function clearReconnectTimer() {
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+}
+
+function clearWsOpenTimer() {
+  if (_wsOpenTimer) {
+    clearTimeout(_wsOpenTimer);
+    _wsOpenTimer = null;
+  }
+}
+
+function clearLivenessTimer() {
+  if (_livenessTimer) {
+    clearTimeout(_livenessTimer);
+    _livenessTimer = null;
+  }
+}
 
 function scheduleReconnect() {
   if (_reconnectTimer) return;
+  const backoff = Math.min(
+    RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** _reconnectAttempt,
+  );
+  _reconnectAttempt++;
   _reconnectTimer = setTimeout(() => {
     _reconnectTimer = null;
     connect();
-  }, 2000);
+  }, backoff + Math.random() * RECONNECT_JITTER_MS);
 }
 
 async function connect() {
+  // Every in-flight path below ends in onclose or in the catch, both of which
+  // schedule the next attempt — but re-arm here too, so a caller that finds an
+  // attempt already running can never be the one that drops the chain.
   if (_connecting || (ws && (
     ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING
-  ))) return;
+  ))) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect();
+    return;
+  }
   _connecting = true;
+  _connectStartedAt = Date.now();
   _historyRequested.clear();
+  setStatus('connecting');
+  const abort = new AbortController();
+  _authAbort = abort;
+  const authTimer = setTimeout(() => abort.abort(), AUTH_FETCH_TIMEOUT_MS);
   try {
     const auth = await fetch('/auth/session', {
       method: 'GET',
       credentials: 'same-origin',
       cache: 'no-store',
+      signal: abort.signal,
     });
     if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
 
     const socket = new WebSocket(WS_URL);
     ws = socket;
+    clearWsOpenTimer();
+    // A socket that never leaves CONNECTING would otherwise block every
+    // retry: the guard above treats it as an attempt still in progress.
+    _wsOpenTimer = setTimeout(() => {
+      _wsOpenTimer = null;
+      if (socket.readyState === WebSocket.CONNECTING) socket.close();
+    }, WS_OPEN_TIMEOUT_MS);
     socket.onopen = () => {
+      clearWsOpenTimer();
+      _reconnectAttempt = 0;
+      _lastMessageAt = Date.now();
       setStatus('connected');
       if (document.visibilityState !== 'hidden') markClientActive();
     };
     socket.onclose = () => {
       if (ws === socket) {
         ws = null;
+        clearWsOpenTimer();
+        clearLivenessTimer();
         setStatus('disconnected');
         scheduleReconnect();
       }
     };
     socket.onerror = () => setStatus('disconnected');
     socket.onmessage = (ev) => {
+      _lastMessageAt = Date.now();
+      clearLivenessTimer();
       let msg;
       try { msg = JSON.parse(ev.data); }
       catch (e) { console.error('parse error', e); return; }
@@ -732,9 +804,74 @@ async function connect() {
     setStatus('disconnected');
     scheduleReconnect();
   } finally {
+    clearTimeout(authTimer);
+    if (_authAbort === abort) _authAbort = null;
     _connecting = false;
   }
 }
+
+// Reconnect now, whatever the socket currently claims. Used by the status
+// dot and by any resume that finds the connection unusable.
+function reconnectNow() {
+  clearReconnectTimer();
+  clearWsOpenTimer();
+  clearLivenessTimer();
+  _reconnectAttempt = 0;
+  if (_authAbort) _authAbort.abort();
+  const socket = ws;
+  if (socket) {
+    ws = null;
+    socket.onclose = null;
+    try { socket.close(); } catch (_) {}
+  }
+  connect();
+}
+
+// The server answers get_state with a 'state' frame, so any reply at all
+// proves the socket still carries traffic. Silence means it is half-open:
+// alive to readyState, dead on the wire.
+function probeLiveness() {
+  if (!ws || ws.readyState !== WebSocket.OPEN || _livenessTimer) return;
+  const socket = ws;
+  const sentAt = Date.now();
+  clearLivenessTimer();
+  _livenessTimer = setTimeout(() => {
+    _livenessTimer = null;
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    if (_lastMessageAt >= sentAt) return;
+    console.warn('no reply to the liveness probe — reconnecting');
+    reconnectNow();
+  }, LIVENESS_TIMEOUT_MS);
+  wsSendType('get_state');
+}
+
+// Single entry point for "the page is back / time passed — is the connection
+// still real?". Anything stuck past its deadline is torn down here so the
+// normal reconnect path can take over.
+function ensureConnected(resumed) {
+  if (_connecting) {
+    if (Date.now() - _connectStartedAt > AUTH_FETCH_TIMEOUT_MS && _authAbort) {
+      _authAbort.abort();
+    }
+    return;
+  }
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    clearReconnectTimer();
+    if (resumed) _reconnectAttempt = 0;
+    connect();
+    return;
+  }
+  if (ws.readyState === WebSocket.CONNECTING) {
+    if (Date.now() - _connectStartedAt > WS_OPEN_TIMEOUT_MS) ws.close();
+    return;
+  }
+  if (resumed || Date.now() - _lastMessageAt > LIVENESS_IDLE_MS) probeLiveness();
+}
+
+setInterval(() => {
+  if (document.visibilityState === 'hidden') return;
+  ensureConnected(false);
+}, CONNECTION_SUPERVISOR_MS);
 
 // A handler that dies half-way leaves the client inconsistent — panes not
 // created, the layout not repositioned, output still held for a snapshot that
@@ -2111,8 +2248,14 @@ function escHtml(s) {
 function setStatus(state) {
   const el = document.getElementById('status');
   el.className = state;
-  el.title     = state;
+  el.title     = state === 'connected' ? state : `${state} — tap to reconnect`;
+  el.setAttribute('aria-label', el.title);
 }
+
+document.getElementById('status').addEventListener('click', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  reconnectNow();
+});
 
 // ─── Sidebar drawer (hamburger) ───────────────────────────────────────────────
 
@@ -2142,15 +2285,25 @@ document.getElementById('sidebar-backdrop').addEventListener('click', () => {
   focusActivePane();
 });
 
-window.addEventListener('focus', activateClient);
+window.addEventListener('focus', () => {
+  activateClient();
+  ensureConnected(true);
+});
 document.addEventListener('pointerdown', markClientActive, { passive: true });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     _clientActive = false;
-  } else if (document.hasFocus()) {
-    activateClient();
+  } else {
+    // The socket may have died while the page was away without the close
+    // event ever being delivered, so check it before trusting it.
+    ensureConnected(true);
+    if (document.hasFocus()) activateClient();
   }
 });
+// A phone waking up, a tab restored from the back/forward cache, and the
+// network coming back are all resumes the visibility change alone can miss.
+window.addEventListener('pageshow', () => ensureConnected(true));
+window.addEventListener('online', () => ensureConnected(true));
 
 // Initial state: open on desktop, closed on mobile
 setSidebarOpen(!isMobileWidth());
