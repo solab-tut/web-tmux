@@ -41,9 +41,12 @@ STATIC_DIR = os.path.join(HERE, 'static')
 WS_PORT    = 8765
 HTTP_PORT  = 8766
 SESSION    = os.environ.get('TMUX_SESSION', 'web')
+AUTH_PATH     = '/auth/session'
+VENDOR_PREFIX = '/vendor/'
 
 MAX_CONNECTIONS = 8
 MAX_INPUT_BYTES = 8 * 1024
+MAX_CLIENT_LOG_CHARS = 200
 MAX_OUTBOUND_QUEUE_BYTES = 1024 * 1024
 WS_MAX_MESSAGE_BYTES = 64 * 1024
 CONTROL_RATE = 30.0
@@ -82,6 +85,29 @@ class TokenBucket:
         return True
 
 
+def _cache_headers(path: str) -> tuple[tuple[str, str], ...]:
+    """Caching rules per kind of response.
+
+    `no-store` on the document would be the safe default, but it also makes the
+    page ineligible for the back/forward cache in every major browser: a tab
+    that has been away for a while can then only come back by re-fetching the
+    document, and on a phone that request lands exactly when the network is
+    least likely to answer. Nothing served here is secret — the terminal itself
+    only ever travels over the WebSocket — so the shell is merely revalidated,
+    the versioned vendor files are cached outright, and only the response that
+    carries the session cookie stays unstored.
+    """
+    if path == AUTH_PATH:
+        return (
+            ('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0'),
+            ('Pragma', 'no-cache'),
+            ('Expires', '0'),
+        )
+    if path.startswith(VENDOR_PREFIX):
+        return (('Cache-Control', 'public, max-age=31536000, immutable'),)
+    return (('Cache-Control', 'no-cache'),)
+
+
 def _security_headers() -> tuple[tuple[str, str], ...]:
     connect_sources = ' '.join(("'self'", *ACCESS.csp_connect_sources))
     csp = '; '.join((
@@ -95,12 +121,9 @@ def _security_headers() -> tuple[tuple[str, str], ...]:
         "object-src 'none'",
         "script-src 'self'",
         "style-src 'self'",
-        "worker-src 'none'",
+        "worker-src 'self'",   # the app shell's service worker, /sw.js
     ))
     return (
-        ('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0'),
-        ('Pragma', 'no-cache'),
-        ('Expires', '0'),
         ('Content-Security-Policy', csp),
         ('Cross-Origin-Opener-Policy', 'same-origin'),
         ('Cross-Origin-Resource-Policy', 'same-origin'),
@@ -119,9 +142,23 @@ class SecureStaticHandler(SimpleHTTPRequestHandler):
         return self.server_version
 
     def end_headers(self) -> None:
+        for name, value in _cache_headers(self._path()):
+            self.send_header(name, value)
         for name, value in _security_headers():
             self.send_header(name, value)
         super().end_headers()
+
+    def _path(self) -> str:
+        try:
+            return urlsplit(self.path).path
+        except ValueError:
+            return ''
+
+    # The completion line below (log_request) only appears once a response has
+    # been written. Logging the arrival too is what tells a request that never
+    # reached us apart from one that reached us and stalled.
+    def _log_arrival(self) -> None:
+        log.info('http start %s %s', self.command, self._path()[:128])
 
     def _authorize(self):
         return ACCESS.authorize_http(
@@ -142,21 +179,23 @@ class SecureStaticHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        self._log_arrival()
         context = self._authorize()
         if context is None:
             self._forbidden()
             return
-        if urlsplit(self.path).path == '/auth/session':
+        if self._path() == AUTH_PATH:
             self._auth_session(context)
             return
         super().do_GET()
 
     def do_HEAD(self) -> None:
+        self._log_arrival()
         context = self._authorize()
         if context is None:
             self._forbidden()
             return
-        if urlsplit(self.path).path == '/auth/session':
+        if self._path() == AUTH_PATH:
             self._auth_session(context)
             return
         super().do_HEAD()
@@ -365,6 +404,7 @@ def _update_allowed_targets(state: dict) -> None:
 _MESSAGE_FIELDS = {
     'input': ({'type', 'pane', 'data'}, {'pane', 'data'}),
     'client_active': ({'type'}, set()),
+    'client_log': ({'type', 'text'}, {'text'}),
     'resize': ({'type', 'cols', 'rows'}, {'cols', 'rows'}),
     'new_window': ({'type'}, set()),
     'new_session': ({'type', 'name'}, set()),
@@ -411,6 +451,13 @@ def _validated_message(raw: str | bytes) -> dict:
             raise PolicyViolation('invalid input target or data')
         if len(data.encode('utf-8')) > MAX_INPUT_BYTES:
             raise PolicyViolation('input is too large')
+    elif msg_type == 'client_log':
+        text = msg['text']
+        # Control characters would let a client forge whole log lines.
+        if (not isinstance(text, str) or not text
+                or len(text) > MAX_CLIENT_LOG_CHARS
+                or any(ch < ' ' or ch == '\x7f' for ch in text)):
+            raise PolicyViolation('invalid client log')
     elif msg_type == 'resize':
         cols, rows = msg['cols'], msg['rows']
         if (isinstance(cols, bool) or not isinstance(cols, int) or not 10 <= cols <= 500
@@ -770,6 +817,11 @@ async def _handle_msg(websocket, msg: dict) -> None:
 
     elif t == 'client_active':
         _resize_master = websocket
+
+    elif t == 'client_log':
+        # Phones have no usable dev tools, so the page reports what it saw on
+        # resume here and it lands in server.log next to the HTTP requests.
+        log.info('client %s', msg['text'])
 
     elif t == 'resize':
         if websocket is not _resize_master:

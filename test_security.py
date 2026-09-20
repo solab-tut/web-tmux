@@ -56,8 +56,14 @@ class AccessControllerTest(unittest.TestCase):
         self.assertTrue(self.controller.validate_session(cookie, context))
         self.assertFalse(self.controller.validate_session(cookie + 'x', context))
 
-        self.now[0] += 8 * 60 * 60 + 1
+        self.now[0] += self.controller.session_ttl + 1
         self.assertFalse(self.controller.validate_session(cookie, context))
+
+    def test_session_outlives_a_phone_left_alone_for_days(self):
+        # A cookie that expires overnight forces the page to make an HTTP
+        # request the moment it wakes up, which is when that request is least
+        # likely to finish. Days, not hours.
+        self.assertGreaterEqual(self.controller.session_ttl, 7 * 24 * 60 * 60)
 
     def test_invalid_remote_configuration_fails_closed(self):
         with self.assertRaises(ValueError):
@@ -167,6 +173,37 @@ class HeaderAndRateLimitTest(unittest.TestCase):
         self.assertNotIn('unsafe-inline', headers['Content-Security-Policy'])
         self.assertEqual(headers['X-Frame-Options'], 'DENY')
         self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+
+    def test_only_the_cookie_response_is_unstored(self):
+        # no-store on the shell would disable the back/forward cache, which is
+        # what lets a phone come back without touching the network at all.
+        auth = dict(server._cache_headers('/auth/session'))
+        self.assertIn('no-store', auth['Cache-Control'])
+
+        shell = dict(server._cache_headers('/'))
+        self.assertEqual(shell['Cache-Control'], 'no-cache')
+        self.assertNotIn('Pragma', shell)
+
+        vendor = dict(server._cache_headers('/vendor/xterm/5.3.0/lib/xterm.js'))
+        self.assertIn('immutable', vendor['Cache-Control'])
+
+        for path in ('/auth/session', '/', '/app.js'):
+            with self.subTest(path=path):
+                self.assertNotIn('Cache-Control', dict(server._security_headers()))
+
+    def test_client_log_rejects_forged_lines(self):
+        server._validated_message(json.dumps({'type': 'client_log', 'text': 'ev=visible'}))
+        bad = (
+            {'type': 'client_log'},
+            {'type': 'client_log', 'text': ''},
+            {'type': 'client_log', 'text': 'x' * (server.MAX_CLIENT_LOG_CHARS + 1)},
+            {'type': 'client_log', 'text': 'ok\nWARNING forged'},
+            {'type': 'client_log', 'text': 42},
+        )
+        for msg in bad:
+            with self.subTest(msg=msg):
+                with self.assertRaises(server.PolicyViolation):
+                    server._validated_message(json.dumps(msg))
 
     def test_token_bucket_is_bounded(self):
         bucket = server.TokenBucket(rate=1, capacity=2)

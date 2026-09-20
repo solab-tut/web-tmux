@@ -148,9 +148,11 @@ TMUX_SESSION=my-session ./server.sh
 - **下部ツールバー** — 仮想キー：`Esc`、`Ctrl`、`Tab`、`Enter`、矢印キー
   - `Ctrl` トグルを有効にすると次の 1 文字に Ctrl 修飾を適用します
 
+iOS がタブを破棄したあと、Safari はそのタブを履歴ナビゲーションとして復元します。このとき WebKit は、ページの読み込みが完了していて保留中の要求が何も無くても「読み込み中」表示を残し続けます。そこで復元されたタブは、接続が確立した時点で通常のナビゲーションとして自分を読み込み直します（Service Worker がキャッシュから返すのでネットワークは使いません）。`static/app.js` の `RENAVIGATE_RESTORED_TABS = false` にすれば、読み込み表示は残りますが復元されたタブをそのまま使えます。
+
 ## Tailscale を使ったリモートアクセス
 
-[Tailscale Serve](https://tailscale.com/kb/1312/serve) を使うと、web-tmux を Tailnet 内のデバイスから HTTPS で利用できます。web-tmux は短命なセッションCookieを発行する前に、ブラウザのOriginと `Tailscale-User-Login` ヘッダーを検証します。
+[Tailscale Serve](https://tailscale.com/kb/1312/serve) を使うと、web-tmux を Tailnet 内のデバイスから HTTPS で利用できます。web-tmux は署名付きセッションCookieを発行する前に、ブラウザのOriginと `Tailscale-User-Login` ヘッダーを検証します。
 
 ### 仕組み
 
@@ -233,11 +235,13 @@ tailscale serve --https=8765 off
 
 - サーバーは `127.0.0.1` にのみバインドし、許可Originからlocalhostを除外することで、ブラウザアクセスをTailscale Serve経由に限定します。ただしループバック待受はホスト境界であってユーザー境界ではなく、別のローカルUnixユーザーはプロキシヘッダーを偽装できるため、信頼できないローカルユーザーがいない個人用マシンを前提とします。
 - HTTPとWebSocketは許可済みHost／Originを必須とし、Tailnet接続では許可済みの `Tailscale-User-Login` も検証します。
-- Tailscale IDの検証後、`GET /auth/session` がHttpOnly、SameSite=Strict、HMAC署名付きCookieを自動発行します。モバイルのサスペンド復帰時やサーバー再起動後を含め、WebSocket接続のたびにブラウザがCookieを自動更新します。Tailnet HTTPSではSecure属性も付きます。
+- Tailscale IDの検証後、`GET /auth/session` がHttpOnly、SameSite=Strict、HMAC署名付きCookieを自動発行します（有効期限30日）。ページは初回ロード時に取得し、接続が安定してから更新し、ハンドシェイクが拒否されたとき（署名鍵が作り直されるサーバー再起動後など）に再取得します。モバイルのスリープ復帰を含む再接続ではCookieを再利用し、HTTPリクエストを一切出しません。Tailnet HTTPSではSecure属性も付きます。
 - Origin欠落、Host不一致、Cookie不正、未許可ユーザーは、tmux状態を生成する前に拒否します。Tailscale IDヘッダーを持たないタグ付き端末も利用できません。
 - WebSocketは最大8接続、1メッセージ64 KiB、入力1メッセージ8 KiBに制限され、圧縮は無効です。操作・入力レートと送信キューにも上限があります。
 - CSP、フレーム埋め込み禁止、MIME sniffing防止、Referrer／Permissions PolicyをHTTPレスポンスに付与します。
-- 不正なOrigin、ID、メッセージ、レート超過は、端末入力やCookie値を含めず `server.log` に記録します。
+- Service Worker（`static/sw.js`）がアプリ本体をキャッシュし、ブラウザが破棄済みタブを作り直すときに自分で出すドキュメント要求に応答します。この読み込みがネットワークを待つことはありません。`/auth/session` には一切触れず、キャッシュにはアプリ本体しか入りません（端末の内容はWebSocket側にしか流れず、そちらの認証はそのままです）。認可が外れたブラウザでもキャッシュされた画面は開けますが、接続はできません。
+- `no-store` はCookieを発行する応答だけに付けます。アプリ本体は毎回再検証、`/vendor/` 配下のバージョン付きファイルはキャッシュ可能にしてあり、ブラウザがネットワークに戻らずページを復元できます（いずれも端末の内容や秘密情報を含みません）。
+- 不正なOrigin、ID、メッセージ、レート超過は、端末入力やCookie値を含めず `server.log` に記録します。再接続時にはページが接続状態の短い診断行（`client ...`）も記録します。端末の内容は含みません。不要なら `static/app.js` の `CLIENT_DIAGNOSTICS = false` で止められます。
 - 保存したレイアウトは `~/.local/share/web-tmux/layouts.json` に、モード700のディレクトリ内でモード600のファイルとして書き出されます。作業ディレクトリのパスを含むため機密として扱ってください。ネットワークには出ず、リポジトリにも含まれません。
 - `tailscale serve status` が上記2ポートのtailnet-only公開だけになっていることを維持してください。
 
@@ -272,6 +276,7 @@ web-tmux/
     ├── index.html
     ├── style.css
     ├── app.js
+    ├── sw.js             # 復元されたタブへアプリ本体をオフラインで返す
     └── vendor/          # 同梱した xterm.js 実行時アセットとライセンス
 ```
 

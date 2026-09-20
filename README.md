@@ -150,9 +150,11 @@ On screens ≤ 768 px wide:
 - **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
   - `Ctrl` toggle applies a Control modifier to the next keystroke
 
+When iOS has discarded a tab, Safari brings it back as a history navigation, and WebKit then leaves the browser showing "loading" indefinitely even though the page is complete and nothing is pending. Once the connection is up, such a tab reloads itself as an ordinary navigation, which the service worker answers from its cache without touching the network. Set `RENAVIGATE_RESTORED_TABS = false` in `static/app.js` to keep the restored tab instead and live with the indicator.
+
 ## Remote access with Tailscale
 
-[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS. web-tmux validates the exact browser origin and the `Tailscale-User-Login` identity header before issuing a short-lived session cookie.
+[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS. web-tmux validates the exact browser origin and the `Tailscale-User-Login` identity header before issuing a signed session cookie.
 
 ### How it works
 
@@ -235,11 +237,13 @@ tailscale serve --https=8765 off
 
 - The server binds to `127.0.0.1` only, and the allowed origin configuration excludes localhost, so browser access must go through Tailscale Serve. Loopback binding is a host boundary, not a user boundary: another local Unix user can forge proxy headers, so this deployment model assumes a personal machine without untrusted local users.
 - HTTP and WebSocket requests require an allowed Host/origin. Tailnet requests also require an allowed `Tailscale-User-Login`.
-- After validating the Tailscale identity, `GET /auth/session` automatically issues an HttpOnly, SameSite=Strict, HMAC-signed cookie. The browser refreshes it before every WebSocket connection, including reconnects after mobile suspension or a server restart. Tailnet HTTPS cookies also carry the Secure attribute.
+- After validating the Tailscale identity, `GET /auth/session` automatically issues an HttpOnly, SameSite=Strict, HMAC-signed cookie, valid for 30 days. The page asks for it on first load, renews it from a connection that has already been up for a while, and asks again when a handshake is rejected — for instance after a server restart, which mints a new signing secret. Reconnects, including the ones after a phone wakes up, reuse the cookie and make no HTTP request at all. Tailnet HTTPS cookies also carry the Secure attribute.
 - Missing origins, mismatched hosts, invalid cookies, and unauthorized users are rejected before tmux state is generated. Tagged Tailscale devices without an identity header cannot connect.
 - WebSocket traffic is limited to eight connections, 64 KiB per message, and 8 KiB per input message, with compression disabled. Control rate, input rate, and outbound queues are also bounded.
 - HTTP responses include CSP, frame-embedding protection, MIME-sniffing protection, Referrer Policy, and a restricted Permissions Policy.
-- Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values.
+- A service worker (`static/sw.js`) caches the app shell and answers the document request the browser makes on its own when it re-creates a discarded tab, so that load never waits for the network. It never touches `/auth/session`, and the cache holds nothing but the shell — terminal contents only ever travel over the WebSocket, which stays fully authenticated. A browser that is no longer authorized can still open the cached shell, but it cannot connect.
+- Only the cookie-issuing response is `no-store`. The app shell is revalidated on every use and the versioned files under `/vendor/` are cached, so a browser can restore the page without going back to the network — none of it contains terminal data or secrets.
+- Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values. The page also reports a short connection diagnostic there when it reconnects (`client ...`), carrying only connection state — no terminal data. Set `CLIENT_DIAGNOSTICS = false` in `static/app.js` to turn it off.
 - Saved layouts are written to `~/.local/share/web-tmux/layouts.json` with mode 600 inside a mode 700 directory. They record working-directory paths, so treat the file as private; it never leaves the machine and is not part of the repository.
 - Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
 
@@ -274,6 +278,7 @@ web-tmux/
     ├── index.html
     ├── style.css
     ├── app.js
+    ├── sw.js             # serves the app shell to restored tabs, offline
     └── vendor/          # vendored xterm.js runtime assets and licenses
 ```
 

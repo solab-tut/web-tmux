@@ -81,7 +81,10 @@ class AccessController:
         tailscale_users: tuple[str, ...] = (),
         *,
         secret: bytes | None = None,
-        session_ttl: int = 8 * 60 * 60,
+        # Long enough that a phone left alone overnight — or for a week — comes
+        # back with a cookie the WebSocket handshake still accepts, so the page
+        # never has to make an HTTP request at the moment it wakes up.
+        session_ttl: int = 30 * 24 * 60 * 60,
         now=time.time,
     ) -> None:
         parsed_origins: list[AllowedOrigin] = []

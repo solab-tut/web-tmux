@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import threading
 import unittest
 from functools import partial
@@ -42,6 +43,7 @@ class AuthSessionEndpointTest(unittest.TestCase):
         self,
         method,
         *,
+        path='/auth/session',
         host='host.example.ts.net:8766',
         login='owner@example.com',
     ):
@@ -49,7 +51,7 @@ class AuthSessionEndpointTest(unittest.TestCase):
         headers = {'Host': host}
         if login is not None:
             headers['Tailscale-User-Login'] = login
-        conn.request(method, '/auth/session', headers=headers)
+        conn.request(method, path, headers=headers)
         resp = conn.getresponse()
         data = resp.read()
         conn.close()
@@ -79,6 +81,54 @@ class AuthSessionEndpointTest(unittest.TestCase):
                 resp, _ = self._request(method)
                 self.assertEqual(resp.status, 204)
                 self.assertIn('web_tmux_session=', resp.getheader('Set-Cookie', ''))
+
+    def test_served_files_are_cacheable_but_still_locked_down(self):
+        cases = (
+            ('/auth/session', 'no-store', True),
+            ('/', 'no-cache', False),
+            ('/app.js', 'no-cache', False),
+            ('/sw.js', 'no-cache', False),
+            ('/vendor/xterm/5.3.0/lib/xterm.js', 'immutable', False),
+        )
+        for path, expected, unstored in cases:
+            with self.subTest(path=path):
+                resp, _ = self._request('GET', path=path)
+                cache_control = resp.getheader('Cache-Control', '')
+                self.assertIn(expected, cache_control)
+                self.assertEqual('no-store' in cache_control, unstored)
+                self.assertIn(
+                    "frame-ancestors 'none'",
+                    resp.getheader('Content-Security-Policy', ''),
+                )
+
+
+class ServiceWorkerShellTest(unittest.TestCase):
+    """The worker answers restored tabs from its cache, so its precache list
+    has to stay in step with what the page actually loads: a file the page
+    pulls in but the worker never cached would be fetched over the network at
+    exactly the moment the network is unreliable."""
+
+    def setUp(self):
+        with open(os.path.join(server.STATIC_DIR, 'index.html')) as fh:
+            self.index = fh.read()
+        with open(os.path.join(server.STATIC_DIR, 'sw.js')) as fh:
+            self.worker = fh.read()
+
+    def test_precache_covers_every_asset_the_page_loads(self):
+        referenced = set(re.findall(r'(?:src|href)="(?!data:|https?:)([^"]+)"', self.index))
+        self.assertIn('app.js', referenced)   # the regex still finds things
+        cached = set(re.findall(r"'(/[^']*)'", self.worker))
+        for asset in sorted(referenced):
+            with self.subTest(asset=asset):
+                self.assertTrue(
+                    os.path.exists(os.path.join(server.STATIC_DIR, asset)),
+                    f'{asset} is referenced but missing',
+                )
+                self.assertIn(f'/{asset}', cached, f'{asset} is not precached')
+
+    def test_the_cookie_endpoint_is_never_served_from_the_cache(self):
+        self.assertIn("url.pathname === AUTH_PATH", self.worker)
+        self.assertIn(f"AUTH_PATH = '{server.AUTH_PATH}'", self.worker)
 
 
 NOW = '2026-09-17T13:20:11+09:00'

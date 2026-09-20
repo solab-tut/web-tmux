@@ -42,6 +42,22 @@ const RECONNECT_JITTER_MS    = 250;
 const LIVENESS_TIMEOUT_MS    = 5000;    // probe reply window
 const LIVENESS_IDLE_MS       = 30000;   // silence that makes a probe worthwhile
 const CONNECTION_SUPERVISOR_MS = 15000; // last-resort sweep
+const AUTH_URL = '/auth/session';
+// Handshakes that fail this many times in a row are treated as "the cookie is
+// no longer accepted" rather than "the network is down", and earn one fetch.
+const HANDSHAKE_FAILURES_BEFORE_REAUTH = 2;
+const SESSION_REFRESH_AFTER_MS = 60 * 60 * 1000;  // cookie age worth renewing
+const SESSION_REFRESH_DELAY_MS = 30000;           // …once the link looks stable
+// How long to wait for the load event before connecting regardless.
+const CONNECT_AFTER_LOAD_FALLBACK_MS = 3000;
+// Turning a restored tab back into a normal navigation (see
+// renavigateIfRestored). Set to false to keep restored tabs as they are.
+const RENAVIGATE_RESTORED_TABS = true;
+const RENAVIGATE_KEY = 'web-tmux-renavigated-at';
+const RENAVIGATE_MIN_INTERVAL_MS = 30000;
+// Resume diagnostics, reported over the socket because a phone has no console.
+// Flip to false once the loading-indicator question is settled.
+const CLIENT_DIAGNOSTICS = true;
 
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
@@ -704,6 +720,23 @@ let _wsOpenTimer = null;        // gives up on a socket stuck in CONNECTING
 let _livenessTimer = null;      // waits for the reply to a liveness probe
 let _lastMessageAt = 0;         // last frame received from the server
 let _connectStartedAt = 0;      // start of the attempt in flight
+let _authNeeded = true;         // fetch a cookie before the next handshake
+let _lastAuthAt = 0;            // when the cookie was last issued
+let _lastOpenedAt = 0;          // when the current socket reached OPEN
+let _handshakeFailures = 0;     // sockets closed before ever opening
+let _lastOpenedSocket = null;   // the most recent socket that reached OPEN;
+                                // a socket closing that is not this one never
+                                // got past the handshake
+// Counters reported to the server: a gap between attempts and completions is
+// what an unfinished request looks like from inside the page.
+let _authAttempts = 0;
+let _authOk = 0;
+let _authAborted = 0;
+let _wsAttempts = 0;
+let _lastResume = 'load';
+let _diagnosticsSent = false;   // a diagnostic went out on this socket
+let _diagnosticsOff = false;    // …and the server did not accept it
+let _renavigated = false;       // this document is on its way out
 
 function clearReconnectTimer() {
   if (_reconnectTimer) {
@@ -752,18 +785,16 @@ async function connect() {
   _connectStartedAt = Date.now();
   _historyRequested.clear();
   setStatus('connecting');
-  const abort = new AbortController();
-  _authAbort = abort;
-  const authTimer = setTimeout(() => abort.abort(), AUTH_FETCH_TIMEOUT_MS);
   try {
-    const auth = await fetch('/auth/session', {
-      method: 'GET',
-      credentials: 'same-origin',
-      cache: 'no-store',
-      signal: abort.signal,
-    });
-    if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
+    // The cookie outlives the page by a month, so a resume normally opens the
+    // socket straight away. That matters beyond saving a round trip: WebKit
+    // counts an unfinished fetch as page loading, and a fetch issued in the
+    // first seconds after a phone wakes up can hang without ever finishing —
+    // leaving the browser spinning on a page that otherwise works perfectly.
+    // Ask for a cookie only when the handshake has told us we need one.
+    if (_authNeeded) await fetchSession();
 
+    _wsAttempts++;
     const socket = new WebSocket(WS_URL);
     ws = socket;
     clearWsOpenTimer();
@@ -775,16 +806,39 @@ async function connect() {
     }, WS_OPEN_TIMEOUT_MS);
     socket.onopen = () => {
       clearWsOpenTimer();
+      _lastOpenedSocket = socket;
+      _lastOpenedAt = Date.now();
+      _lastMessageAt = _lastOpenedAt;
       _reconnectAttempt = 0;
-      _lastMessageAt = Date.now();
+      _handshakeFailures = 0;
+      _authNeeded = false;
       setStatus('connected');
       if (document.visibilityState !== 'hidden') markClientActive();
+      reportDiagnostics();
+      renavigateIfRestored();
     };
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
+      // 1008 is the server rejecting something we sent. The only message it
+      // could object to here is the diagnostic one — an older server does not
+      // know the type — so stop sending it rather than loop: connect, get
+      // closed, reconnect.
+      if (ev && ev.code === 1008 && _diagnosticsSent) {
+        console.warn('server rejected a message; disabling diagnostics');
+        _diagnosticsOff = true;
+      }
       if (ws === socket) {
         ws = null;
         clearWsOpenTimer();
         clearLivenessTimer();
+        // Closed before it ever opened: either the handshake was rejected —
+        // the cookie is gone, expired, or signed by a server that has since
+        // restarted — or the network is down. Re-auth only once the second
+        // attempt has failed too, so a dead network does not drag an HTTP
+        // request along on every retry.
+        if (socket !== _lastOpenedSocket) {
+          _handshakeFailures++;
+          if (_handshakeFailures >= HANDSHAKE_FAILURES_BEFORE_REAUTH) _authNeeded = true;
+        }
         setStatus('disconnected');
         scheduleReconnect();
       }
@@ -804,10 +858,45 @@ async function connect() {
     setStatus('disconnected');
     scheduleReconnect();
   } finally {
-    clearTimeout(authTimer);
-    if (_authAbort === abort) _authAbort = null;
     _connecting = false;
   }
+}
+
+async function fetchSession() {
+  const abort = new AbortController();
+  _authAbort = abort;
+  _authAttempts++;
+  const timer = setTimeout(() => abort.abort(), AUTH_FETCH_TIMEOUT_MS);
+  try {
+    const auth = await fetch(AUTH_URL, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: abort.signal,
+    });
+    if (!auth.ok) throw new Error(`session authorization failed: ${auth.status}`);
+    _authOk++;
+    _lastAuthAt = Date.now();
+    _authNeeded = false;
+  } catch (error) {
+    if (abort.signal.aborted) _authAborted++;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (_authAbort === abort) _authAbort = null;
+  }
+}
+
+// Renew the cookie well before it expires, but only from a connection that has
+// already been up for a while: by then the network has proved it works, which
+// is exactly what the moment of waking up cannot promise.
+function maybeRefreshSession() {
+  if (_connecting || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (document.visibilityState === 'hidden') return;
+  const now = Date.now();
+  if (now - _lastOpenedAt < SESSION_REFRESH_DELAY_MS) return;
+  if (now - _lastAuthAt < SESSION_REFRESH_AFTER_MS) return;
+  fetchSession().catch((e) => console.warn('session refresh failed', e));
 }
 
 // Reconnect now, whatever the socket currently claims. Used by the status
@@ -842,7 +931,75 @@ function probeLiveness() {
     console.warn('no reply to the liveness probe — reconnecting');
     reconnectNow();
   }, LIVENESS_TIMEOUT_MS);
-  wsSendType('get_state');
+  wsSend('get_state');
+}
+
+// What the page saw at the last resume, sent once per connection. The browser
+// showing "loading" on a page that works has to be explained from inside the
+// page: whether this document is still the one being loaded (readyState,
+// navigation type), whether the browser navigated again instead of restoring
+// from the back/forward cache, and whether any request we made never finished.
+function reportDiagnostics() {
+  if (!CLIENT_DIAGNOSTICS || _diagnosticsOff) return;
+  let nav = '?';
+  let loadEnd = -1;
+  try {
+    const entry = performance.getEntriesByType('navigation')[0];
+    nav = (entry && entry.type) || '?';
+    // 0 means the load event never fired: the document itself is still
+    // loading, as opposed to the browser merely showing that it is.
+    if (entry) loadEnd = Math.round(entry.loadEventEnd);
+  } catch (_) {}
+  const fields = [
+    `ev=${_lastResume}`,
+    `nav=${nav}`,
+    `rs=${document.readyState}`,
+    `le=${loadEnd}`,
+    `online=${navigator.onLine}`,
+    // Whether this document was served by the worker: on a restored tab that
+    // is the difference between a load that touched the network and one that
+    // did not.
+    `sw=${navigator.serviceWorker && navigator.serviceWorker.controller ? 1 : 0}`,
+    `auth=${_authAttempts}/${_authOk}/${_authAborted}`,   // tried/ok/aborted
+    `ws=${_wsAttempts}`,
+    `hsfail=${_handshakeFailures}`,
+    `age=${Math.round(performance.now() / 1000)}s`,
+  ];
+  _diagnosticsSent = wsSend('client_log', { text: fields.join(' ').slice(0, 200) });
+}
+
+function noteResume(kind) {
+  _lastResume = kind;
+}
+
+// A tab that the phone discarded comes back as a history navigation, and
+// WebKit then leaves the browser showing "loading" for good: measurements at
+// that moment show a completed load event, every request finished, and
+// nothing pending — the stop button has nothing to cancel either. A normal
+// navigation never ends up in that state, and with the service worker in
+// place one costs no network at all, so replace this document with one.
+//
+// Waiting for the socket means the app is known to work before the page is
+// thrown away, and the guard in sessionStorage means this can happen at most
+// once per tab per window of time — if the guard cannot be written, the
+// workaround is skipped rather than risk a reload loop.
+function renavigateIfRestored() {
+  if (!RENAVIGATE_RESTORED_TABS || _renavigated) return;
+  let nav = '';
+  try { nav = performance.getEntriesByType('navigation')[0]?.type || ''; }
+  catch (_) { return; }
+  if (nav !== 'back_forward') return;
+  try {
+    const last = parseInt(sessionStorage.getItem(RENAVIGATE_KEY), 10) || 0;
+    if (Date.now() - last < RENAVIGATE_MIN_INTERVAL_MS) return;
+    sessionStorage.setItem(RENAVIGATE_KEY, String(Date.now()));
+    if (parseInt(sessionStorage.getItem(RENAVIGATE_KEY), 10) <= last) return;
+  } catch (_) {
+    return;   // no way to remember we did this — leave the tab alone
+  }
+  _renavigated = true;
+  console.info('restored tab: reloading as a normal navigation');
+  location.replace(location.href);
 }
 
 // Single entry point for "the page is back / time passed — is the connection
@@ -865,12 +1022,16 @@ function ensureConnected(resumed) {
     if (Date.now() - _connectStartedAt > WS_OPEN_TIMEOUT_MS) ws.close();
     return;
   }
+  // A resume that finds the socket still alive reports nothing otherwise, and
+  // that is exactly the moment worth seeing in the log.
+  if (resumed) reportDiagnostics();
   if (resumed || Date.now() - _lastMessageAt > LIVENESS_IDLE_MS) probeLiveness();
 }
 
 setInterval(() => {
   if (document.visibilityState === 'hidden') return;
   ensureConnected(false);
+  maybeRefreshSession();
 }, CONNECTION_SUPERVISOR_MS);
 
 // A handler that dies half-way leaves the client inconsistent — panes not
@@ -2029,7 +2190,15 @@ document.getElementById('layout-list').addEventListener('keydown', handleSidebar
 function wsSendType(type, extra) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   markClientActive();
-  ws.send(JSON.stringify({ type, ...(extra || {}) }));
+  wsSend(type, extra);
+}
+
+// Plain send, for messages that are not the user acting on this tab: a probe
+// or a diagnostic must not take resize mastership away from another device.
+function wsSend(type, extra) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type, ...(extra || {}) })); return true; }
+  catch (_) { return false; }
 }
 
 document.getElementById('btn-new-window').addEventListener('click', () => {
@@ -2287,6 +2456,7 @@ document.getElementById('sidebar-backdrop').addEventListener('click', () => {
 
 window.addEventListener('focus', () => {
   activateClient();
+  noteResume('focus');
   ensureConnected(true);
 });
 document.addEventListener('pointerdown', markClientActive, { passive: true });
@@ -2296,14 +2466,31 @@ document.addEventListener('visibilitychange', () => {
   } else {
     // The socket may have died while the page was away without the close
     // event ever being delivered, so check it before trusting it.
+    noteResume('visible');
     ensureConnected(true);
     if (document.hasFocus()) activateClient();
   }
 });
 // A phone waking up, a tab restored from the back/forward cache, and the
 // network coming back are all resumes the visibility change alone can miss.
-window.addEventListener('pageshow', () => ensureConnected(true));
-window.addEventListener('online', () => ensureConnected(true));
+window.addEventListener('pageshow', (ev) => {
+  noteResume(ev.persisted ? 'pageshow-bfcache' : 'pageshow');
+  ensureConnected(true);
+});
+window.addEventListener('online', () => {
+  noteResume('online');
+  ensureConnected(true);
+});
+// Leaving for the back/forward cache with a socket still open makes the page
+// less likely to be kept; pageshow above brings the connection back.
+window.addEventListener('pagehide', () => {
+  const socket = ws;
+  if (socket) {
+    ws = null;
+    socket.onclose = null;
+    try { socket.close(); } catch (_) {}
+  }
+});
 
 // Initial state: open on desktop, closed on mobile
 setSidebarOpen(!isMobileWidth());
@@ -2531,4 +2718,34 @@ document.getElementById('topbar-host').textContent = _host;
 
 initTheme();
 initFontSize();
-connect();
+
+// Nothing may touch the network until the document has finished loading.
+// WebKit folds a fetch or a WebSocket started during the load into the page's
+// own loading state, and on a history navigation served entirely from cache —
+// instant, so our connection is under way before the load event fires — the
+// browser is left showing "loading" for good on a page that works fine. The
+// timer is a floor: if the load event never arrives, connect anyway.
+let _connectStarted = false;
+function connectAfterLoad() {
+  if (_connectStarted) return;
+  _connectStarted = true;
+  registerServiceWorker();
+  setTimeout(connect, 0);
+}
+
+// The worker answers the document request the browser makes on its own when
+// it re-creates a discarded tab, which is the one load neither this page nor
+// the stop button can do anything about. Failing to register is not fatal:
+// the app works exactly as before, the browser just keeps showing "loading"
+// on a restored tab.
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/sw.js')
+    .catch((e) => console.warn('service worker registration failed', e));
+}
+if (document.readyState === 'complete') {
+  connectAfterLoad();
+} else {
+  window.addEventListener('load', connectAfterLoad, { once: true });
+  setTimeout(connectAfterLoad, CONNECT_AFTER_LOAD_FALLBACK_MS);
+}
