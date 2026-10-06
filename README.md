@@ -150,6 +150,8 @@ On screens ≤ 768 px wide:
 - **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
   - `Ctrl` toggle applies a Control modifier to the next keystroke
 
+On iOS / iPadOS the software keyboard carries an AutoFill bar above it, showing key, card and location icons. It is not specific to password fields: it appears whenever a form control has focus, and the terminal focuses xterm.js's hidden `<textarea>`. **A page cannot suppress it** — only a native `WKWebView` host can override `inputAccessoryView`, and no device setting turns it off. `static/app.js` already sets `autocomplete="off"`, which WebKit ignores. Twelve shapes were tried on an iOS 26 device — a wrapping `<form>`, several `input` types, `contenteditable`, several `inputmode` values, off-screen placement — and the bar stayed up for all of them.
+
 When iOS has discarded a tab, Safari brings it back as a history navigation, and WebKit then leaves the browser showing "loading" indefinitely even though the page is complete and nothing is pending. Once the connection is up, such a tab reloads itself as an ordinary navigation, which the service worker answers from its cache without touching the network. Set `RENAVIGATE_RESTORED_TABS = false` in `static/app.js` to keep the restored tab instead and live with the indicator.
 
 ## Remote access with Tailscale
