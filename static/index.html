@@ -24,6 +24,19 @@
           <rect x="9" y="2.5" width="6" height="3.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
         </svg>
       </button>
+      <div id="virtual-keyboard-picker">
+        <button id="virtual-keyboard-toggle" class="topbar-btn" type="button" aria-label="Virtual keys" title="Virtual keys">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M6.5 9h1m2.5 0h1m2.5 0h1m2.5 0h1M6.5 12.5h1m2.5 0h1m2.5 0h1m2.5 0h1M7.5 16h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <div id="virtual-keyboard-menu" hidden>
+          <button data-virtual-keyboard-mode="auto" type="button">Auto</button>
+          <button data-virtual-keyboard-mode="on" type="button">On</button>
+          <button data-virtual-keyboard-mode="off" type="button">Off</button>
+        </div>
+      </div>
       <div id="font-size-picker">
         <button id="font-size-toggle" class="topbar-btn" type="button" aria-label="Font size" title="Change font size">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -95,7 +108,7 @@
       </div>
     </div>
 
-    <!-- ── Bottom Bar (≤768px width only) ───────────────────── -->
+    <!-- ── Bottom Bar (touch devices by default; configurable) ──────── -->
     <div id="bottombar">
       <button class="vkey icon-btn key-wide" data-key="esc" type="button" aria-label="Escape" title="Escape">
         <svg viewBox="0 0 40 24" aria-hidden="true">

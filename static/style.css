@@ -281,7 +281,8 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 #topbar-spacer { flex: 1 1 0; min-width: 0; }
 
 #font-size-picker,
-#theme-picker {
+#theme-picker,
+#virtual-keyboard-picker {
   flex-shrink: 0;
 }
 
@@ -309,14 +310,16 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 .topbar-btn:hover  { background: var(--bg-active); color: var(--text-bright); }
 .topbar-btn:active { background: var(--bg-press); }
 
-/* ── Theme picker / Font-size picker ─────────────── */
+/* ── Top-bar pickers ─────────────────────────────── */
 #theme-picker,
-#font-size-picker {
+#font-size-picker,
+#virtual-keyboard-picker {
   position: relative;
 }
 
 #theme-menu,
-#font-size-menu {
+#font-size-menu,
+#virtual-keyboard-menu {
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
@@ -333,10 +336,12 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 
 #theme-menu[hidden],
-#font-size-menu[hidden] { display: none; }
+#font-size-menu[hidden],
+#virtual-keyboard-menu[hidden] { display: none; }
 
 #theme-menu button,
-#font-size-menu button {
+#font-size-menu button,
+#virtual-keyboard-menu button {
   width: 100%;
   padding: 6px 10px;
   text-align: left;
@@ -350,14 +355,21 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 
 #theme-menu button:hover,
-#font-size-menu button:hover {
+#font-size-menu button:hover,
+#virtual-keyboard-menu button:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
 
 #theme-menu button.active,
-#font-size-menu button.active {
+#font-size-menu button.active,
+#virtual-keyboard-menu button.active {
   color: var(--accent);
+}
+
+#virtual-keyboard-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 /* ── Middle (sidebar + main) ─────────────────────── */
@@ -736,16 +748,20 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 #hist.engaged #hist-exit { display: inline-flex; }
 #hist-exit svg { width: 20px; height: 20px; display: block; }
 
-/* ── Bottom Bar (virtual keys, mobile only) ──────── */
+/* ── Bottom Bar (virtual keys) ───────────────────── */
 #bottombar {
   flex: 0 0 auto;
-  display: none;          /* shown only on ≤768px (see media query) */
+  display: none;
   gap: 4px;
   padding: 6px;
   background: var(--bg-sink);
   border-top: 1px solid var(--border);
   overflow-x: auto;
   flex-wrap: nowrap;
+}
+
+html.virtual-keyboard-visible #bottombar {
+  display: flex;
 }
 
 #bottombar button {
@@ -937,10 +953,6 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   #sidebar-backdrop.visible {
     display: block;
   }
-  #bottombar {
-    display: flex;
-  }
-
   .side-head {
     padding: 7px 8px 4px;
     font-size: 9px;

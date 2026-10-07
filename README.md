@@ -147,8 +147,14 @@ On screens ≤ 768 px wide:
 - Only the active pane is shown fullscreen
 - Tap the **☰** button to open / close the sidebar
 - The top-bar **Paste** icon opens a paste sheet. Long-press its text area, paste, then tap **Send to terminal**
-- **Bottom toolbar** — virtual keys: `Esc`, `Ctrl`, `Tab`, `Enter`, arrow keys
-  - `Ctrl` toggle applies a Control modifier to the next keystroke
+
+The **bottom toolbar** (virtual keys for `Esc`, `Ctrl`, `Tab`, `Enter`, and the arrow keys) is shown automatically on touch-capable devices regardless of screen width. Because detection is based on touch input rather than the user agent, it also covers iPads using iPadOS's desktop-style user agent. The keyboard icon in the top bar offers three modes, saved for the next visit:
+
+- **Auto** — show on touch devices or at widths of 768 px or less (default)
+- **On** — always show
+- **Off** — always hide
+
+Enable the `Ctrl` toggle to apply Ctrl to the next character. This setting controls web-tmux's virtual-key toolbar, not the iOS / iPadOS software keyboard itself.
 
 On iOS / iPadOS the software keyboard carries an AutoFill bar above it, showing key, card and location icons. It is not specific to password fields: it appears whenever a form control has focus, and the terminal focuses xterm.js's hidden `<textarea>`. **A page cannot suppress it** — only a native `WKWebView` host can override `inputAccessoryView`, and no device setting turns it off. `static/app.js` already sets `autocomplete="off"`, which WebKit ignores. Twelve shapes were tried on an iOS 26 device — a wrapping `<form>`, several `input` types, `contenteditable`, several `inputmode` values, off-screen placement — and the bar stayed up for all of them.
 

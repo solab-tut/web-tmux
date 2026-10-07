@@ -112,6 +112,10 @@ const FONT_SIZE_STORAGE_KEY = 'web-tmux-font-size';
 const VALID_FONT_SIZES = [11, 12, 13, 14, 16, 18];
 const DEFAULT_FONT_SIZE = 13;
 
+const VIRTUAL_KEYBOARD_MODE_STORAGE_KEY = 'web-tmux-virtual-keyboard-mode';
+const VALID_VIRTUAL_KEYBOARD_MODES = ['auto', 'on', 'off'];
+const DEFAULT_VIRTUAL_KEYBOARD_MODE = 'auto';
+
 function currentThemeName() {
   return document.documentElement.dataset.theme || 'dark';
 }
@@ -166,6 +170,61 @@ function applyFontSize(size, save = true) {
     resetResizeCache();
     refitCurrentLayout();
   }
+}
+
+function hasTouchInput() {
+  const coarsePointer = window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches;
+  return navigator.maxTouchPoints > 0 || !!coarsePointer;
+}
+
+function usesTouchInterface() {
+  return isMobileWidth() || hasTouchInput();
+}
+
+function currentVirtualKeyboardMode() {
+  const saved = localStorage.getItem(VIRTUAL_KEYBOARD_MODE_STORAGE_KEY);
+  return VALID_VIRTUAL_KEYBOARD_MODES.includes(saved) ? saved : DEFAULT_VIRTUAL_KEYBOARD_MODE;
+}
+
+function shouldShowVirtualKeyboard(mode) {
+  if (mode === 'on') return true;
+  if (mode === 'off') return false;
+  // Width keeps the previous phone behaviour, while touch capability catches
+  // iPads in both orientations (including iPadOS's desktop-style user agent).
+  return usesTouchInterface();
+}
+
+function applyVirtualKeyboardMode(mode, save = true) {
+  if (!VALID_VIRTUAL_KEYBOARD_MODES.includes(mode)) return;
+  if (save) localStorage.setItem(VIRTUAL_KEYBOARD_MODE_STORAGE_KEY, mode);
+
+  const root = document.documentElement;
+  const wasVisible = root.classList.contains('virtual-keyboard-visible');
+  const visible = shouldShowVirtualKeyboard(mode);
+  root.classList.toggle('virtual-keyboard-visible', visible);
+
+  const toggle = document.getElementById('virtual-keyboard-toggle');
+  const modeLabel = mode === 'auto' ? 'Auto' : mode === 'on' ? 'On' : 'Off';
+  const stateLabel = visible ? 'shown' : 'hidden';
+  toggle.classList.toggle('active', visible);
+  toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+  toggle.title = `Virtual keys: ${modeLabel} (${stateLabel})`;
+  toggle.setAttribute('aria-label', toggle.title);
+
+  document.querySelectorAll('#virtual-keyboard-menu [data-virtual-keyboard-mode]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.virtualKeyboardMode === mode);
+  });
+
+  if (visible !== wasVisible && Object.keys(panes).length > 0) {
+    requestAnimationFrame(() => {
+      resetResizeCache();
+      refitCurrentLayout();
+    });
+  }
+}
+
+function initVirtualKeyboard() {
+  applyVirtualKeyboardMode(currentVirtualKeyboardMode(), false);
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -259,11 +318,11 @@ function validResize(cols, rows) {
 // Only send resize when the size actually changed (avoids feedback loops)
 let _lastResize = { cols: 0, rows: 0 };
 function maybeSendResize(cols, rows) {
-  // Mobile browsers can round xterm's sub-pixel cell width down just enough
+  // Touch-oriented browsers can round xterm's sub-pixel cell width down just enough
   // for the final column to be painted outside the visible pane. TUIs that
   // position their cursor at the right edge then appear shifted or truncated.
-  // Keep one spare xterm column on mobile; desktop keeps the exact fit.
-  cols = Math.floor(cols) - (isMobileWidth() ? MOBILE_TMUX_COL_SAFETY_MARGIN : 0);
+  // Keep one spare xterm column there; pointer-only desktop keeps the exact fit.
+  cols = Math.floor(cols) - (usesTouchInterface() ? MOBILE_TMUX_COL_SAFETY_MARGIN : 0);
   rows = Math.floor(rows);
   if (cols < 10) cols = 10;
   if (!_clientActive || document.visibilityState === 'hidden') return;
@@ -1590,7 +1649,7 @@ function focusActivePane(opts) {
 
   const focusOnce = (remaining) => {
     if (document.visibilityState === 'hidden') return;
-    if (isMobileWidth() && Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) return;
+    if (usesTouchInterface() && Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) return;
 
     let paneId = activePaneId;
     if (!paneId || !panes[paneId]) {
@@ -2499,6 +2558,9 @@ setSidebarOpen(!isMobileWidth());
 let _prevMobile = isMobileWidth();
 window.addEventListener('resize', () => {
   const nowMobile = isMobileWidth();
+  if (currentVirtualKeyboardMode() === 'auto') {
+    applyVirtualKeyboardMode('auto', false);
+  }
   if (nowMobile !== _prevMobile) {
     setSidebarOpen(!nowMobile);
     _prevMobile = nowMobile;
@@ -2596,7 +2658,20 @@ document.getElementById('paste-cancel').addEventListener('click', closePasteShee
 document.getElementById('paste-send').addEventListener('click', sendPasteSheetText);
 document.querySelector('#paste-sheet .sheet-backdrop').addEventListener('click', closePasteSheet);
 
-// ─── Soft keyboard / viewport handling (mobile) ───────────────────────────────
+document.getElementById('virtual-keyboard-toggle').addEventListener('click', (e) => {
+  const menu = document.getElementById('virtual-keyboard-menu');
+  menu.hidden = !menu.hidden;
+  e.stopPropagation();
+});
+
+document.querySelectorAll('#virtual-keyboard-menu [data-virtual-keyboard-mode]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    applyVirtualKeyboardMode(btn.dataset.virtualKeyboardMode);
+    document.getElementById('virtual-keyboard-menu').hidden = true;
+  });
+});
+
+// ─── Soft keyboard / viewport handling (touch devices) ───────────────────────
 // On iOS, `height: 100vh` returns the LARGEST possible viewport (URL bar hidden),
 // which is bigger than the actually visible area when the URL bar is showing.
 // We pin #app's height to visualViewport.height so the layout always fits the
@@ -2611,7 +2686,7 @@ function markTouchScroll() {
 
 function runViewportRefit() {
   _viewportRefitTimer = null;
-  if (!isMobileWidth()) return;
+  if (!usesTouchInterface()) return;
   if (_layoutApplying || Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) {
     _viewportRefitTimer = setTimeout(runViewportRefit, MOBILE_VIEWPORT_REFIT_DELAY_MS);
     return;
@@ -2645,7 +2720,7 @@ function applyViewportFix() {
   const widthChanged = width !== _lastViewportSize.width;
   const heightChanged = height !== _lastViewportSize.height;
   _lastViewportSize = { width, height };
-  if (isMobileWidth()) {
+  if (usesTouchInterface()) {
     app.style.height = `${vv.height}px`;
     if (widthChanged || heightChanged) {
       scheduleViewportRefit();
@@ -2688,6 +2763,8 @@ document.addEventListener('click', () => {
   if (menu) menu.hidden = true;
   const fsMenu = document.getElementById('font-size-menu');
   if (fsMenu) fsMenu.hidden = true;
+  const keyboardMenu = document.getElementById('virtual-keyboard-menu');
+  if (keyboardMenu) keyboardMenu.hidden = true;
 });
 
 document.getElementById('font-size-toggle').addEventListener('click', (e) => {
@@ -2707,7 +2784,7 @@ document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
 
 HistoryOverlay.init({
   getActivePane: () => (activePaneId ? panes[activePaneId] || null : null),
-  isMobile:      isMobileWidth,
+  isMobile:      usesTouchInterface,
   getTheme:      () => XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   focusPane:     () => focusActivePane({ retries: 2 }),
 });
@@ -2718,6 +2795,19 @@ document.getElementById('topbar-host').textContent = _host;
 
 initTheme();
 initFontSize();
+initVirtualKeyboard();
+
+if (window.matchMedia) {
+  const coarsePointerQuery = window.matchMedia('(any-pointer: coarse)');
+  const refreshAutoVirtualKeyboard = () => {
+    if (currentVirtualKeyboardMode() === 'auto') applyVirtualKeyboardMode('auto', false);
+  };
+  if (coarsePointerQuery.addEventListener) {
+    coarsePointerQuery.addEventListener('change', refreshAutoVirtualKeyboard);
+  } else if (coarsePointerQuery.addListener) {
+    coarsePointerQuery.addListener(refreshAutoVirtualKeyboard);
+  }
+}
 
 // Nothing may touch the network until the document has finished loading.
 // WebKit folds a fetch or a WebSocket started during the load into the page's
