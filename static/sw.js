@@ -10,7 +10,7 @@
 // Everything here is the app shell. Terminal contents never travel over HTTP —
 // they only ever go through the WebSocket — so nothing cached here is private.
 
-const CACHE = 'web-tmux-shell-v2';
+const CACHE = 'web-tmux-shell-v3';
 const DOCUMENT = '/';
 const AUTH_PATH = '/auth/session';
 const IMMUTABLE_PREFIX = '/vendor/';

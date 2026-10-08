@@ -1,9 +1,12 @@
 import asyncio
 import base64
 import os
+import json
 import unittest
+from unittest import mock
 
 from tmux_control import (
+    CLIPBOARD_MAX_BYTES,
     TmuxControl,
     _parse_pane_state,
     _strip_terminal_response_sequences,
@@ -147,6 +150,70 @@ class PaneStateParseTest(unittest.TestCase):
             {'mouse_standard_flag': 0, 'mouse_button_flag': 0,
              'mouse_all_flag': 1, 'mouse_sgr_flag': 1},
         )
+
+
+class _FakeSaveBuffer:
+    def __init__(self, data, returncode=0, delay=0.0):
+        self.data = data
+        self.returncode = returncode
+        self.delay = delay
+
+    async def communicate(self):
+        await asyncio.sleep(self.delay)
+        return self.data, b''
+
+
+class ClipboardForwardTest(unittest.TestCase):
+    """A new tmux paste buffer goes out to the browsers as a clipboard message."""
+
+    def _run(self, lines, buffers):
+        async def scenario():
+            tc = TmuxControl()
+            events = []
+            tc.subscribers.append(_Recorder(events))
+            calls = []
+
+            async def fake_exec(*args, **kwargs):
+                calls.append(args)
+                return buffers[args[3]]
+
+            with mock.patch('tmux_control.asyncio.create_subprocess_exec', fake_exec):
+                for line in lines:
+                    tc._handle_line(line)
+                while tc._clipboard_tasks:
+                    await asyncio.gather(*tc._clipboard_tasks)
+            return calls, [json.loads(data) for _, data in events]
+        return asyncio.run(scenario())
+
+    def test_buffer_is_forwarded_with_exact_bytes(self):
+        calls, msgs = self._run(
+            ['%paste-buffer-changed buffer3'],
+            {'buffer3': _FakeSaveBuffer('line1\n日本語\n'.encode())},
+        )
+        self.assertEqual(calls, [('tmux', 'save-buffer', '-b', 'buffer3', '-')])
+        self.assertEqual(msgs, [{'type': 'clipboard', 'text': 'line1\n日本語\n'}])
+
+    def test_only_the_latest_copy_is_forwarded(self):
+        _, msgs = self._run(
+            ['%paste-buffer-changed slow', '%paste-buffer-changed fast'],
+            {
+                'slow': _FakeSaveBuffer(b'old', delay=0.05),
+                'fast': _FakeSaveBuffer(b'new'),
+            },
+        )
+        self.assertEqual(msgs, [{'type': 'clipboard', 'text': 'new'}])
+
+    def test_oversized_or_missing_buffer_is_not_forwarded(self):
+        _, msgs = self._run(
+            ['%paste-buffer-changed big'],
+            {'big': _FakeSaveBuffer(b'x' * (CLIPBOARD_MAX_BYTES + 1))},
+        )
+        self.assertEqual(msgs, [])
+        _, msgs = self._run(
+            ['%paste-buffer-changed gone'],
+            {'gone': _FakeSaveBuffer(b'', returncode=1)},
+        )
+        self.assertEqual(msgs, [])
 
 
 if __name__ == '__main__':

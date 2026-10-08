@@ -668,6 +668,24 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   inset: 0;
 }
 
+/* Shown when the browser refused a clipboard write; clicking it retries the
+   write inside a user gesture (see showClipboardOffer). */
+#clipboard-offer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 30;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#clipboard-offer[hidden] { display: none; }
+
 .pane-wrap {
   position: absolute;
   overflow: hidden;

@@ -173,6 +173,9 @@ class HeaderAndRateLimitTest(unittest.TestCase):
         self.assertNotIn('unsafe-inline', headers['Content-Security-Policy'])
         self.assertEqual(headers['X-Frame-Options'], 'DENY')
         self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+        # The page may write the clipboard (copies from pane apps) but never read it.
+        self.assertIn('clipboard-read=()', headers['Permissions-Policy'])
+        self.assertIn('clipboard-write=(self)', headers['Permissions-Policy'])
 
     def test_only_the_cookie_response_is_unstored(self):
         # no-store on the shell would disable the back/forward cache, which is

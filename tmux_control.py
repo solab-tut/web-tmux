@@ -30,6 +30,11 @@ log = logging.getLogger(__name__)
 # old per-snapshot budget could.
 SNAPSHOT_SCROLLBACK_LINES = 10000
 
+# A paste buffer larger than this is not forwarded to the browser clipboard.
+# The broadcast goes through every client's 1 MiB outbound queue, and JSON
+# escaping can grow non-ASCII text several times over.
+CLIPBOARD_MAX_BYTES = 128 * 1024
+
 _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
 )
@@ -310,6 +315,8 @@ class TmuxControl:
         self._response_remainder: dict[str, bytes] = {}
         self._prefix_key_names: set[str] | None = None
         self._prefix_pending: bool = False
+        self._clipboard_seq: int = 0
+        self._clipboard_tasks: set[asyncio.Task] = set()
 
     # ──────────────────────────────────────── lifecycle
 
@@ -807,6 +814,9 @@ class TmuxControl:
         if line.startswith('%sessions-changed'):
             self._broadcast({'type': 'sessions_changed'})
             return True
+        if line.startswith('%paste-buffer-changed '):
+            self._on_paste_buffer_changed(line[22:])
+            return True
         if line.startswith('%exit'):
             log.info('tmux session exited')
             self._schedule_restart()
@@ -840,6 +850,49 @@ class TmuxControl:
             return
         if line.startswith('%'):
             log.debug('unhandled control line: %s', line[:200])
+
+    # ──────────────────────────────────────── clipboard
+
+    def _on_paste_buffer_changed(self, name: str) -> None:
+        # Applications in a pane copy into tmux paste buffers (Claude Code's
+        # mouse selection, copy-mode, OSC 52 with set-clipboard on). A control
+        # client has no terminal clipboard for tmux to set, so forward the new
+        # buffer to the browsers, which put it on the OS clipboard.
+        self._clipboard_seq += 1
+        task = asyncio.get_running_loop().create_task(
+            self._forward_paste_buffer(name, self._clipboard_seq)
+        )
+        self._clipboard_tasks.add(task)
+        task.add_done_callback(self._clipboard_tasks.discard)
+
+    async def _forward_paste_buffer(self, name: str, seq: int) -> None:
+        # save-buffer gives the exact bytes; show-buffer through the control
+        # channel would lose the trailing newline in the %begin/%end framing.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'tmux', 'save-buffer', '-b', name, '-',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError as e:
+            log.warning('could not read paste buffer %s: %s', name, e)
+            return
+        try:
+            data, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning('reading paste buffer %s timed out', name)
+            proc.kill()
+            await proc.wait()
+            return
+        # A later copy finished first or is still on its way; it wins.
+        if seq != self._clipboard_seq:
+            return
+        if proc.returncode != 0 or not data:
+            return
+        if len(data) > CLIPBOARD_MAX_BYTES:
+            log.info('paste buffer %s is %d bytes, not forwarded to the clipboard', name, len(data))
+            return
+        self._broadcast({'type': 'clipboard', 'text': data.decode('utf-8', errors='replace')})
 
     def _broadcast(self, msg: dict) -> None:
         if not self.subscribers:

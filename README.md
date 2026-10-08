@@ -140,6 +140,10 @@ Click the **◑** (theme) or **Aa** (font size) icons in the top-right corner to
 
 Font size options: 11, 12, 13, 14, 16, 18 px.
 
+### Copying from mouse-aware apps
+
+Apps that take over the mouse (Claude Code's fullscreen view, vim with `mouse=a`, tmux copy-mode) copy into a tmux paste buffer instead of the browser's selection. web-tmux forwards each new paste buffer to the OS clipboard of the browser that has focus. Chrome and Edge accept the write directly; if the browser refuses it (Safari, Firefox), a **Copy N characters** button appears at the bottom right for 10 seconds — click it to finish the copy. Buffers over 128 KiB are not forwarded.
+
 ### Mobile
 
 On screens ≤ 768 px wide:

@@ -127,7 +127,9 @@ def _security_headers() -> tuple[tuple[str, str], ...]:
         ('Content-Security-Policy', csp),
         ('Cross-Origin-Opener-Policy', 'same-origin'),
         ('Cross-Origin-Resource-Policy', 'same-origin'),
-        ('Permissions-Policy', 'clipboard-read=(), clipboard-write=()'),
+        # The page writes what pane applications copy (tmux paste buffers) to
+        # the OS clipboard; reading the clipboard stays off.
+        ('Permissions-Policy', 'clipboard-read=(), clipboard-write=(self)'),
         ('Referrer-Policy', 'no-referrer'),
         ('X-Content-Type-Options', 'nosniff'),
         ('X-Frame-Options', 'DENY'),

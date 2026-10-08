@@ -1117,6 +1117,7 @@ function handleMsg(msg) {
     case 'layout_conflict': onLayoutConflict(msg); break;
     case 'layout_error':    onLayoutError(msg);    break;
     case 'restore_result':  onRestoreResult(msg);  break;
+    case 'clipboard':       onClipboard(msg);      break;
   }
 }
 
@@ -2181,6 +2182,51 @@ function onLayoutError(msg) {
     save_failed:    'Could not write the layout file.',
   };
   showLayoutNote(messages[msg.code] || 'Layout operation failed.');
+}
+
+// ─── Clipboard ────────────────────────────────────────────────────────────────
+
+// What a pane application copies (Claude Code's mouse selection, tmux
+// copy-mode, OSC 52) lands in a tmux paste buffer, and the server forwards each
+// new buffer here. Every connected browser hears it; only the one the user is
+// in front of writes it, so a phone left open does not fight the PC.
+let _clipboardOfferTimer = null;
+
+function onClipboard(msg) {
+  if (typeof msg.text !== 'string' || !msg.text) return;
+  if (!document.hasFocus()) return;
+  writeClipboard(msg.text).then(hideClipboardOffer, () => showClipboardOffer(msg.text));
+}
+
+function writeClipboard(text) {
+  if (!navigator.clipboard || !navigator.clipboard.writeText) {
+    return Promise.reject(new Error('clipboard API unavailable'));
+  }
+  return navigator.clipboard.writeText(text);
+}
+
+// Safari and Firefox only let a page write the clipboard close to a user
+// gesture, and the copy arrives after a server round trip. When the write is
+// refused, offer a button whose click is that gesture.
+function showClipboardOffer(text) {
+  const btn = document.getElementById('clipboard-offer');
+  btn.textContent = `Copy ${text.length} characters`;
+  btn.onclick = () => {
+    writeClipboard(text).catch((e) => console.warn('clipboard write failed', e));
+    hideClipboardOffer();
+    focusActivePane();
+  };
+  btn.hidden = false;
+  clearTimeout(_clipboardOfferTimer);
+  _clipboardOfferTimer = setTimeout(hideClipboardOffer, 10000);
+}
+
+function hideClipboardOffer() {
+  clearTimeout(_clipboardOfferTimer);
+  _clipboardOfferTimer = null;
+  const btn = document.getElementById('clipboard-offer');
+  btn.hidden = true;
+  btn.onclick = null;
 }
 
 function showLayoutNote(text) {
