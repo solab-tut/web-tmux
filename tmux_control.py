@@ -20,6 +20,7 @@ import pty
 import re
 import struct
 import termios
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +299,9 @@ class TmuxControl:
         self._master_fd: int | None = None
         self._buf: str  = ''
         self._pending: list[asyncio.Future] = []
+        # Callbacks run the moment a command list's last %end is parsed, before
+        # any later line — the only point that is ordered with %output.
+        self._on_end: dict[asyncio.Future, Callable[[], None]] = {}
         self._cur_resp: list[str] = []
         self._in_resp: bool = False
         self._restart_lock = asyncio.Lock()
@@ -405,6 +409,7 @@ class TmuxControl:
         self._decode_remainder = {}
         self._prefix_key_names = None
         self._prefix_pending = False
+        self._on_end.clear()
         while self._pending:
             fut = self._pending.pop(0)
             if not fut.done():
@@ -440,35 +445,63 @@ class TmuxControl:
 
     async def send_command(self, cmd: str) -> str:
         """Send one tmux command, await %begin/%end response."""
+        return (await self.send_command_list([cmd]))[0]
+
+    async def send_command_list(
+        self,
+        cmds: list[str],
+        on_end: Callable[[list[str]], None] | None = None,
+    ) -> list[str]:
+        """Send commands as one `a ; b` line and return each one's response.
+
+        tmux runs a command line as a single queue pass, without reading pane
+        output in between, and answers every command with its own %begin/%end
+        block. So the responses describe one instant of the pane, and pane
+        output before/after that instant is ordered around them in the stream.
+
+        on_end, if given, gets the responses synchronously while the last %end
+        is handled: anything it broadcasts is ordered exactly after the %output
+        that preceded the commands and before the %output that follows them.
+        """
+        empty = [''] * len(cmds)
         for attempt in range(2):
             await self._ensure_connected()
             if self._master_fd is None:
-                return ''
+                return empty
 
             loop = asyncio.get_event_loop()
-            fut: asyncio.Future = loop.create_future()
-            self._pending.append(fut)
+            futs: list[asyncio.Future] = [loop.create_future() for _ in cmds]
+            self._pending.extend(futs)
+            if on_end is not None:
+                self._on_end[futs[-1]] = lambda futs=futs: on_end([f.result() for f in futs])
             try:
-                os.write(self._master_fd, (cmd + '\n').encode('utf-8'))
+                os.write(self._master_fd, (' ; '.join(cmds) + '\n').encode('utf-8'))
             except OSError as e:
-                if fut in self._pending:
-                    self._pending.remove(fut)
+                self._drop_pending(futs)
                 log.error('send_command write error: %s', e)
                 if attempt == 0:
                     await self._restart_client()
                     continue
-                return ''
+                return empty
 
             try:
-                return await asyncio.wait_for(asyncio.shield(fut), timeout=5.0)
+                return list(await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(*futs)), timeout=5.0
+                ))
             except asyncio.TimeoutError:
-                if fut in self._pending:
-                    self._pending.remove(fut)
+                self._drop_pending(futs)
                 if attempt == 0:
                     await self._restart_client()
                     continue
-                return ''
-        return ''
+                return empty
+        return empty
+
+    def _drop_pending(self, futs: list[asyncio.Future]) -> None:
+        for fut in futs:
+            if fut in self._pending:
+                self._pending.remove(fut)
+            self._on_end.pop(fut, None)
+            fut.cancel()
 
     async def _ensure_prefix_key_names(self) -> set[str]:
         if self._prefix_key_names is not None:
@@ -538,17 +571,36 @@ class TmuxControl:
 
         await self._send_literal_input(pane_id, data[literal_start:])
 
-    async def capture_pane(self, pane_id: str) -> bytes:
-        """Visible screen only — no history.
+    async def snapshot_pane(self, pane_id: str, deliver: Callable[[dict], None]) -> None:
+        """Visible screen, cursor and terminal modes of one pane, atomically.
 
         get_snapshot fires on pane focus, layout changes, alt-screen exit and
         resize, and the client redraws these rows in place without touching its
         scrollback (buildSnapshotFrame in app.js). History arrives separately,
         once per pane, via capture_history().
+
+        Both commands go out on one line so no pane output lands between them:
+        every %output the stream carried before this response is already in the
+        capture. deliver() runs at that exact point in the stream, so a client
+        that queues it with its broadcasts can drop what it held back for the
+        pane instead of replaying it on top of the redraw. It is not called if
+        tmux never answers.
         """
-        raw = await self.send_command(f'capture-pane -t {pane_id} -p -e -N -S 0')
-        # Response content uses the same vis(3) encoding as %output data.
-        return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
+        def on_end(responses: list[str]) -> None:
+            state_raw, screen_raw = responses
+            # Response content uses the same vis(3) encoding as %output data.
+            screen = _strip_terminal_response_sequences(
+                _strip_zsh_eol_marks(_decode_output(screen_raw))
+            )
+            state = _parse_pane_state(state_raw)
+            if state['pane_cols'] <= 0 or state['pane_rows'] <= 0:
+                return   # %error (pane gone): the client's watchdog releases it
+            deliver({'data': screen, **state})
+
+        await self.send_command_list([
+            f'display-message -p -t {pane_id} "{_PANE_STATE_FORMAT}"',
+            f'capture-pane -t {pane_id} -p -e -N -S 0',
+        ], on_end=on_end)
 
     async def capture_history(self, pane_id: str, lines: int) -> bytes:
         """The scrollback *above* the visible screen (-E -1 stops before it).
@@ -561,21 +613,6 @@ class TmuxControl:
             f'capture-pane -t {pane_id} -p -e -N -S -{lines} -E -1'
         )
         return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
-
-    async def get_pane_cursor(self, pane_id: str) -> dict:
-        raw = await self.send_command(
-            f'display-message -p -t {pane_id} '
-            '"#{cursor_x}|#{cursor_y}|#{pane_width}|#{pane_height}"'
-        )
-        parts = raw.strip().split('|', 3)
-        if len(parts) < 4:
-            return {'cursor_x': 0, 'cursor_y': 0, 'pane_cols': 0, 'pane_rows': 0}
-        return {
-            'cursor_x': int(parts[0]) if parts[0].isdigit() else 0,
-            'cursor_y': int(parts[1]) if parts[1].isdigit() else 0,
-            'pane_cols': int(parts[2]) if parts[2].isdigit() else 0,
-            'pane_rows': int(parts[3]) if parts[3].isdigit() else 0,
-        }
 
     async def get_initial_state(self) -> dict:
         sess_raw = await self.send_command(
@@ -788,6 +825,12 @@ class TmuxControl:
                 fut = self._pending.pop(0)
                 if not fut.done():
                     fut.set_result(result)
+                callback = self._on_end.pop(fut, None)
+                if callback is not None:
+                    try:
+                        callback()
+                    except Exception:
+                        log.exception('command response callback failed')
             self._cur_resp = []
             return
         if self._handle_notification_line(line):
@@ -809,6 +852,41 @@ class TmuxControl:
 
 
 # ──────────────────────────────────────────── helpers
+
+# What a snapshot needs besides the screen text: where the cursor is and the
+# modes the pane's application set, which the client's redraw has to put back
+# (a lost scroll region makes every later scroll move the wrong rows).
+_PANE_STATE_FIELDS: tuple[tuple[str, str, int], ...] = (
+    ('cursor_x',            'cursor_x',            0),
+    ('cursor_y',            'cursor_y',            0),
+    ('pane_cols',           'pane_width',          0),
+    ('pane_rows',           'pane_height',         0),
+    ('alternate_on',        'alternate_on',        0),
+    ('scroll_region_upper', 'scroll_region_upper', 0),
+    ('scroll_region_lower', 'scroll_region_lower', -1),
+    ('origin_flag',         'origin_flag',         0),
+    ('wrap_flag',           'wrap_flag',           1),
+    ('insert_flag',         'insert_flag',         0),
+    ('keypad_cursor_flag',  'keypad_cursor_flag',  0),
+    ('keypad_flag',         'keypad_flag',         0),
+    ('cursor_flag',         'cursor_flag',         1),
+    ('mouse_standard_flag', 'mouse_standard_flag', 0),
+    ('mouse_button_flag',   'mouse_button_flag',   0),
+    ('mouse_all_flag',      'mouse_all_flag',      0),
+    ('mouse_sgr_flag',      'mouse_sgr_flag',      0),
+)
+_PANE_STATE_FORMAT = '|'.join(f'#{{{fmt}}}' for _, fmt, _ in _PANE_STATE_FIELDS)
+
+
+def _parse_pane_state(raw: str) -> dict:
+    """display-message output → ints; anything missing keeps its default."""
+    parts = raw.strip().split('|')
+    state = {}
+    for i, (key, _, default) in enumerate(_PANE_STATE_FIELDS):
+        value = parts[i] if i < len(parts) else ''
+        state[key] = int(value) if value.isdigit() else default
+    return state
+
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
     winsize = struct.pack('HHHH', rows, cols, 0, 0)

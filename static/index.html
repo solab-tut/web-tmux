@@ -202,9 +202,14 @@
       <div id="hist-rows"></div>
       <div id="hist-tail"></div>
     </div>
+    <!-- One button, two jobs: back to the bottom from the scrollback, or out
+         of selection mode (#hist.selecting). Only the icon and label change. -->
     <button id="hist-exit" type="button" aria-label="Back to live" title="Back to live">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
+      <svg class="hist-icon-live" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 20l-7-9h14z" fill="currentColor"/>
+      </svg>
+      <svg class="hist-icon-select" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" fill="none"/>
       </svg>
     </button>
   </div>

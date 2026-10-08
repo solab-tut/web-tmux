@@ -394,5 +394,39 @@ class WithExistingCwdTest(unittest.TestCase):
         self.assertEqual(server._with_existing_cwd(argv), argv)
 
 
+
+class SnapshotDeliveryTest(unittest.TestCase):
+    def test_snapshot_is_queued_with_broadcasts_not_sent_directly(self):
+        class Client:
+            def __init__(self):
+                self.queued, self.sent = [], []
+
+            def enqueue(self, data):
+                self.queued.append(data)
+                return True
+
+            async def send(self, data):
+                self.sent.append(data)
+
+        async def fake_snapshot(pane, deliver):
+            deliver({
+                'data': b'row', 'cursor_x': 1, 'cursor_y': 2,
+                'pane_cols': 80, 'pane_rows': 24, 'alternate_on': 0,
+                'scroll_region_upper': 0, 'scroll_region_lower': 23,
+            })
+
+        client = Client()
+        tmux = type('Tmux', (), {'snapshot_pane': staticmethod(fake_snapshot)})()
+        with patch.object(server, 'tmux', tmux):
+            asyncio.run(server._handle_msg(client, {'type': 'get_snapshot', 'pane': '%3'}))
+        self.assertEqual(client.sent, [])
+        self.assertEqual(len(client.queued), 1)
+        msg = server.json.loads(client.queued[0])
+        self.assertEqual(msg['type'], 'snapshot')
+        self.assertEqual(msg['pane'], '%3')
+        self.assertEqual(msg['data'], 'cm93')   # base64 of b'row'
+        self.assertEqual(msg['scroll_region_lower'], 23)
+
+
 if __name__ == '__main__':
     unittest.main()

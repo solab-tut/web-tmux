@@ -282,6 +282,7 @@ let _conflictLayout = '';         // slot whose session name is already taken
 const _pendingSnapshotPanes = new Set();
 const _scheduledSnapshotPanes = new Set();
 const _snapshotWatchdogs = new Map();   // pane → timer holding output hostage
+const _snapshotsInFlight = new Map();   // pane → get_snapshot requests not yet answered
 let _snapshotRefreshDeadline = 0;
 const _bufferedPaneOutput = new Map();
 const _paneOutputScanTail = new Map();
@@ -464,7 +465,9 @@ function handleTerminalInput(data, paneId) {
   // Typing means "back to live" — but xterm's own DA/CPR replies come through
   // here too, and a snapshot's queries would otherwise yank the user out of the
   // scrollback they are reading.
-  if (!isTerminalResponseSequence(data)) HistoryOverlay.close();
+  // Focus reports (\x1b[I / \x1b[O) are not typing either: pressing the
+  // overlay's text to select it blurs the terminal.
+  if (!isTerminalResponseSequence(data) && !/^(?:\x1b\[[IO])+$/.test(data)) HistoryOverlay.close();
 
   if (_heldClientPrefix) {
     if (_heldClientPrefixTimer) {
@@ -628,6 +631,7 @@ function scheduleSnapshotRefresh(paneIds) {
       }
       _pendingSnapshotPanes.add(paneId);
       armSnapshotWatchdog(paneId);
+      _snapshotsInFlight.set(paneId, (_snapshotsInFlight.get(paneId) || 0) + 1);
       ws.send(JSON.stringify({ type: 'get_snapshot', pane: paneId }));
     });
   }, delay);
@@ -663,6 +667,7 @@ function clearSnapshotWatchdog(paneId) {
 function flushBufferedOutput(paneId) {
   clearSnapshotWatchdog(paneId);
   _pendingSnapshotPanes.delete(paneId);
+  _snapshotsInFlight.delete(paneId);
   const queued = _bufferedPaneOutput.get(paneId);
   _bufferedPaneOutput.delete(paneId);
   const p = panes[paneId];
@@ -740,26 +745,6 @@ function queuePaneOutput(paneId, data) {
   } else {
     _bufferedPaneOutput.set(paneId, [data]);
   }
-}
-
-function drainBufferedOutput(paneId) {
-  const p = panes[paneId];
-  if (!p) {
-    _bufferedPaneOutput.delete(paneId);
-    _pendingSnapshotPanes.delete(paneId);
-    clearSnapshotWatchdog(paneId);
-    return;
-  }
-  const queued = _bufferedPaneOutput.get(paneId);
-  if (!queued || queued.length === 0) {
-    _bufferedPaneOutput.delete(paneId);
-    _pendingSnapshotPanes.delete(paneId);
-    clearSnapshotWatchdog(paneId);
-    return;
-  }
-  _bufferedPaneOutput.delete(paneId);
-  const data = queued.length === 1 ? queued[0] : concatBytes(queued);
-  p.term.write(data, () => drainBufferedOutput(paneId));
 }
 
 function updateCurrentWindow(windows) {
@@ -843,6 +828,7 @@ async function connect() {
   _connecting = true;
   _connectStartedAt = Date.now();
   _historyRequested.clear();
+  _snapshotsInFlight.clear();   // the old socket's requests will never be answered
   setStatus('connecting');
   try {
     // The cookie outlives the page by a month, so a resume normally opens the
@@ -1209,16 +1195,34 @@ function onWindowSwitched(msg) {
   scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
 }
 
+// The server queues a snapshot behind the output frames that preceded its
+// capture, so every byte held for the pane is already part of the capture: it
+// goes in *before* the redraw (lines it scrolled away still reach the
+// scrollback) and the redraw then puts the screen exactly where tmux has it.
+// Replaying it after the redraw, as this used to, applied it twice — a TUI
+// that redraws relative to its cursor ("up N rows, rewrite") landed on the
+// wrong rows and the screen stayed shifted until the next full redraw.
 function onSnapshot(msg) {
-  clearSnapshotWatchdog(msg.pane);
-  const p = panes[msg.pane];
-  if (!p) {
-    _bufferedPaneOutput.delete(msg.pane);
-    _pendingSnapshotPanes.delete(msg.pane);
-    return;
+  const paneId = msg.pane;
+  const left = (_snapshotsInFlight.get(paneId) || 1) - 1;
+  if (left > 0) _snapshotsInFlight.set(paneId, left);
+  else _snapshotsInFlight.delete(paneId);
+  const held = _bufferedPaneOutput.get(paneId) || [];
+  _bufferedPaneOutput.delete(paneId);
+  // Another request is still out: keep holding until its snapshot arrives.
+  if (left === 0) {
+    clearSnapshotWatchdog(paneId);
+    _pendingSnapshotPanes.delete(paneId);
   }
+  const p = panes[paneId];
+  if (!p) return;
   const frame = buildSnapshotFrame(msg, p.term);
-  p.term.write(frame, () => { pinToBottom(p); drainBufferedOutput(msg.pane); });
+  p.term.write(held.length ? concatBytes([...held, frame]) : frame, () => {
+    pinToBottom(p);
+    // The frame may have turned mouse tracking on or off, which decides
+    // whether a swipe scrolls the scrollback or goes to the application.
+    if (paneId === activePaneId) HistoryOverlay.sync();
+  });
 }
 
 // One-time scrollback seed for a pane (see requestInitialHistory).
@@ -1488,13 +1492,33 @@ function positionSinglePane(paneId) {
   // browser layout pass so el.clientWidth/Height is non-zero.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     applyViewportFix();   // re-pin after layout, in case URL bar moved
-    try { p.fitAddon.fit(); } catch (e) { console.error('fit error:', e); }
-    pinToBottom(p);
-    maybeSendResize(p.term.cols, p.term.rows);
+    fitSinglePane(paneId);
     _layoutApplying = false;
     HistoryOverlay.sync();
     focusActivePane({ defer: true, retries: 2 });
   }));
+}
+
+// A lone pane (or a zoomed one) fills the pane area: ask tmux for the size
+// that fits it, but keep xterm at the size tmux actually has. tmux formats the
+// pane's output for its own width — autowrap, zsh's line editor, relative
+// cursor moves — so an xterm even one column wider (the touch safety margin
+// below, or another device holding resize mastership) shifts every wrapped
+// line. When tmux takes the new size, %layout-change brings it back here.
+function fitSinglePane(paneId) {
+  const p = panes[paneId];
+  if (!p) return;
+  let dims = null;
+  try { dims = p.fitAddon.proposeDimensions(); } catch (e) { console.error('fit error:', e); }
+  if (dims && Number.isFinite(dims.cols) && Number.isFinite(dims.rows)) {
+    maybeSendResize(dims.cols, dims.rows);
+  }
+  const tmuxSize = _currentLayoutPanes.find((lp) => '%' + lp.id === paneId) || dims;
+  if (tmuxSize && validResize(tmuxSize.cols, tmuxSize.rows)
+      && (p.term.cols !== tmuxSize.cols || p.term.rows !== tmuxSize.rows)) {
+    try { p.term.resize(tmuxSize.cols, tmuxSize.rows); } catch (_) {}
+  }
+  pinToBottom(p);
 }
 
 // ─── Pane management ──────────────────────────────────────────────────────────
@@ -1609,6 +1633,7 @@ function destroyPane(paneId) {
   _bufferedPaneOutput.delete(paneId);
   _pendingSnapshotPanes.delete(paneId);
   _scheduledSnapshotPanes.delete(paneId);
+  _snapshotsInFlight.delete(paneId);
   _paneOutputScanTail.delete(paneId);
   _historyRequested.delete(paneId);
   if (activePaneId === paneId) activePaneId = null;
@@ -1688,14 +1713,7 @@ function setActivePaneVisual(paneId) {
   // the usable viewport. In split layouts the active pane is only a fraction of
   // the tmux window, so do not send its pane cols/rows as the total size.
   if (isMobileWidth() && !_layoutApplying && _currentLayoutPanes.length <= 1) {
-    const p = panes[paneId];
-    if (p) {
-      requestAnimationFrame(() => {
-        try { p.fitAddon.fit(); } catch (_) {}
-        pinToBottom(p);
-        maybeSendResize(p.term.cols, p.term.rows);
-      });
-    }
+    if (panes[paneId]) requestAnimationFrame(() => fitSinglePane(paneId));
   }
 }
 
@@ -2432,17 +2450,40 @@ function lfToCrlf(bytes) {
 // reparse at unpredictable moments. The snapshot now carries only the pane's
 // visible rows: each row is drawn at a known position and terminated with
 // \x1b[K, which erases the rest of that line without scrolling anything.
+//
+// The pane's terminal modes come from tmux with the capture and are put back
+// after the rows are drawn. A soft reset (\x1b[!p) used to stand in for that,
+// but it dropped the scroll region the application still relies on — every
+// later scroll then moved the wrong rows — and also bracketed paste and focus
+// reporting, which tmux cannot report back; those are now left untouched.
 function buildSnapshotFrame(msg, term) {
   const paneRows = Math.max(1, msg.pane_rows || term.rows || 1);
   const paneCols = Math.max(1, msg.pane_cols || term.cols || 1);
   const cursorRow = clamp((msg.cursor_y || 0) + 1, 1, paneRows);
   const cursorCol = clamp((msg.cursor_x || 0) + 1, 1, paneCols);
+  const flag = (name, fallback) => (msg[name] === undefined ? fallback : !!msg[name]);
+  const regionTop = clamp(msg.scroll_region_upper || 0, 0, paneRows - 1);
+  const regionBottom = msg.scroll_region_lower === undefined || msg.scroll_region_lower < 0
+    ? paneRows - 1
+    : clamp(msg.scroll_region_lower, regionTop, paneRows - 1);
+  const fullRegion = regionTop === 0 && regionBottom === paneRows - 1;
+  const origin = flag('origin_flag', false) && !fullRegion;
 
-  // \x1b[?1049l — exit alternate screen (vim/htop etc.) and restore the normal screen
-  // \x1b[!p    — soft reset (clears modes/colors without clearing scrollback)
-  // MOUSE_DISABLE_SEQS before: disable mouse tracking before redrawing (ESC[!p alone is unreliable)
-  // MOUSE_DISABLE_SEQS after: neutralize any mouse-enable sequences inside the captured content
-  const parts = [asciiBytes('\x1b[?25l\x1b[?1049l\x1b[!p' + MOUSE_DISABLE_SEQS)];
+  // The redraw always lands on the normal screen, even for a pane tmux has on
+  // its alternate screen (vim, htop, Claude Code): the alternate buffer has no
+  // scrollback, so HistoryOverlay would refuse to open and touch scrolling
+  // would stop working in that pane.
+  //
+  // Draw with every mode that moves or clips the cursor at its default:
+  // full scroll region, absolute addressing, autowrap, replace mode, plain
+  // attributes and the ASCII charset. MOUSE_DISABLE_SEQS before and after the
+  // rows neutralizes any mouse-enable sequence inside the captured content;
+  // the modes tmux reports are switched back on at the end.
+  const parts = [asciiBytes(
+    '\x1b[?25l\x1b[?1049l' +
+    '\x1b[r\x1b[?6l\x1b[?7h\x1b[4l\x1b[0m\x1b(B\x0f' +
+    MOUSE_DISABLE_SEQS
+  )];
 
   const rows = splitCaptureRows(b64ToUint8(msg.data || ''));
   for (let i = 0; i < paneRows; i++) {
@@ -2451,7 +2492,25 @@ function buildSnapshotFrame(msg, term) {
     parts.push(asciiBytes('\x1b[K'));   // clear to end of line, no scroll
   }
 
-  parts.push(asciiBytes(MOUSE_DISABLE_SEQS + `\x1b[${cursorRow};${cursorCol}H\x1b[?25h`));
+  // capture-pane -e leaves the last row's attributes active.
+  let tail = '\x1b[0m' + MOUSE_DISABLE_SEQS;
+  // Mouse tracking the application really asked for (Claude Code, htop, vim
+  // with mouse=a) comes back from tmux's state, not from the captured bytes:
+  // wheel and swipe reach the application only while it is on.
+  if (flag('mouse_all_flag', false)) tail += '\x1b[?1003h';
+  else if (flag('mouse_button_flag', false)) tail += '\x1b[?1002h';
+  else if (flag('mouse_standard_flag', false)) tail += '\x1b[?1000h';
+  if (flag('mouse_sgr_flag', false)) tail += '\x1b[?1006h';
+  if (!fullRegion) tail += `\x1b[${regionTop + 1};${regionBottom + 1}r`;
+  if (!flag('wrap_flag', true)) tail += '\x1b[?7l';
+  if (flag('insert_flag', false)) tail += '\x1b[4h';
+  tail += flag('keypad_cursor_flag', false) ? '\x1b[?1h' : '\x1b[?1l';
+  tail += flag('keypad_flag', false) ? '\x1b=' : '\x1b>';
+  // With origin mode on, cursor addressing is relative to the scroll region.
+  if (origin) tail += `\x1b[?6h\x1b[${clamp(cursorRow - regionTop, 1, regionBottom - regionTop + 1)};${cursorCol}H`;
+  else tail += `\x1b[${cursorRow};${cursorCol}H`;
+  if (flag('cursor_flag', true)) tail += '\x1b[?25h';
+  parts.push(asciiBytes(tail));
   return concatBytes(parts);
 }
 

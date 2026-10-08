@@ -747,6 +747,9 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 #hist.engaged #hist-exit { display: inline-flex; }
 #hist-exit svg { width: 20px; height: 20px; display: block; }
+#hist-exit .hist-icon-select                   { display: none; }
+#hist.selecting #hist-exit .hist-icon-live     { display: none; }
+#hist.selecting #hist-exit .hist-icon-select   { display: block; }
 
 /* ── Bottom Bar (virtual keys) ───────────────────── */
 #bottombar {

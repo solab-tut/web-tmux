@@ -927,26 +927,30 @@ async def _handle_msg(websocket, msg: dict) -> None:
     elif t == 'get_snapshot':
         pane = _pane_id(msg.get('pane'))
         if pane:
-            content = await tmux.capture_pane(pane)
-            cursor = await tmux.get_pane_cursor(pane)
-            log.info(
-                'snapshot pane=%s bytes=%d cursor=%d,%d size=%dx%d',
-                pane,
-                len(content),
-                cursor['cursor_x'],
-                cursor['cursor_y'],
-                cursor['pane_cols'],
-                cursor['pane_rows'],
-            )
-            await websocket.send(json.dumps({
-                'type': 'snapshot',
-                'pane': pane,
-                'data': base64.b64encode(content).decode('ascii'),
-                'cursor_x': cursor['cursor_x'],
-                'cursor_y': cursor['cursor_y'],
-                'pane_cols': cursor['pane_cols'],
-                'pane_rows': cursor['pane_rows'],
-            }))
+            def deliver(snap: dict) -> None:
+                log.info(
+                    'snapshot pane=%s bytes=%d cursor=%d,%d size=%dx%d alt=%d region=%d-%d',
+                    pane,
+                    len(snap['data']),
+                    snap['cursor_x'],
+                    snap['cursor_y'],
+                    snap['pane_cols'],
+                    snap['pane_rows'],
+                    snap['alternate_on'],
+                    snap['scroll_region_upper'],
+                    snap['scroll_region_lower'],
+                )
+                # Queued with the broadcasts, not sent directly: the client
+                # treats every output frame for this pane that arrives before
+                # the snapshot as already captured and drops it.
+                websocket.enqueue(json.dumps({
+                    **snap,
+                    'type': 'snapshot',
+                    'pane': pane,
+                    'data': base64.b64encode(snap['data']).decode('ascii'),
+                }))
+
+            await tmux.snapshot_pane(pane, deliver)
 
     elif t == 'get_history':
         pane = _pane_id(msg.get('pane'))

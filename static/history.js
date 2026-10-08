@@ -66,6 +66,9 @@
   let touchMoved   = false;
   let touching     = false;
   let bottomResetTimer = null;
+  // Selection mode (see openSelection): the overlay stays up at the bottom
+  // until the exit button, typing or a pane change takes it down.
+  let pinned       = false;
 
   // ─── Colour ────────────────────────────────────────────────────────────────
 
@@ -304,9 +307,17 @@
     try { return term.buffer.active.type === 'alternate'; } catch (_) { return false; }
   }
 
+  // An application that turned on mouse tracking (Claude Code, htop, vim with
+  // mouse=a) keeps its own scrollback: the wheel — and on touch devices the
+  // swipe, see "Swipe → wheel" below — belongs to it, exactly as xterm does on desktop.
+  function mouseWanted(term) {
+    try { return term._core.coreMouseService.areMouseEventsActive; } catch (_) { return false; }
+  }
+
   function canOpen(pane) {
     if (!pane || !pane.term) return false;
     if (isAltScreen(pane.term)) return false;
+    if (mouseWanted(pane.term)) return false;
     return pane.term.buffer.active.length > pane.term.rows;
   }
 
@@ -327,6 +338,7 @@
   function detach(pane) {
     if (!attachedPane) return;
     if (pane && pane !== attachedPane) return;
+    setPinned(false);
     setEngaged(false);
     root.hidden = true;
     if (root.parentElement) root.parentElement.removeChild(root);
@@ -338,6 +350,17 @@
     rowsEl.innerHTML = '';
     buildStart = buildEnd = 0;
     pad.style.height = '0px';
+  }
+
+  function setPinned(on) {
+    if (pinned === on) return;
+    pinned = on;
+    root.classList.toggle('selecting', on);
+    if (exitBtn) {
+      const label = on ? 'Close selection' : 'Back to live';
+      exitBtn.setAttribute('aria-label', label);
+      exitBtn.title = label;
+    }
   }
 
   function setEngaged(on) {
@@ -370,8 +393,9 @@
 
   function close() {
     if (bottomResetTimer) { clearTimeout(bottomResetTimer); bottomResetTimer = null; }
+    setPinned(false);
     if (!attachedPane) return;
-    if (deps.isMobile()) {
+    if (deps.isMobile() && canOpen(attachedPane)) {
       // Stay armed so the next touch is caught by a live scroll surface.
       setEngaged(false);
       resetContent();
@@ -396,6 +420,9 @@
         return;
       }
       if (buildStart < buildEnd) return;   // rows still built; close() will reset
+      // The application just turned mouse tracking on: get out of the way of
+      // the swipe, which now goes to it.
+      if (!canOpen(attachedPane)) { detach(); return; }
       if (attachedPane.term.buffer.active.length === totalLines) return;
       syncSpacer(attachedPane);
       scroller.scrollTop = maxScrollTop();
@@ -411,6 +438,8 @@
       else if (pane && attachedPane !== pane) detach();
       return;
     }
+    if (pinned && attachedPane === pane) return;
+    setPinned(false);
     if (!canOpen(pane)) { detach(); return; }
     if (attachedPane !== pane) { attach(pane); return; }
     if (!engaged) {
@@ -428,13 +457,17 @@
     if (bottomResetTimer) clearTimeout(bottomResetTimer);
     bottomResetTimer = setTimeout(() => {
       bottomResetTimer = null;
-      if (!attachedPane || touching || !atBottom()) return;
+      if (!attachedPane || touching || pinned || !atBottom()) return;
       close();
     }, 180);
   }
 
   function onScroll() {
     if (!attachedPane) return;
+    if (pinned) {
+      if (scroller.scrollTop < TOP_TRIGGER_PX) prependChunk(attachedPane);
+      return;
+    }
     if (atBottom()) {
       setEngaged(false);
       scheduleBottomReset();
@@ -454,8 +487,7 @@
     if (engaged) return;                       // overlay handles it natively
     if (e.deltaY >= 0) return;                 // downward wheel stays in LIVE
     const pane = deps.getActivePane();
-    if (!canOpen(pane)) return;                // alt screen etc: leave it to xterm
-    if (pane.term._core.coreMouseService.areMouseEventsActive) return;
+    if (!canOpen(pane)) return;                // alt screen, mouse app: leave it to xterm
 
     e.preventDefault();
     e.stopPropagation();                       // keep xterm's wheel handler out of it
@@ -484,7 +516,7 @@
   function onOverlayTouchEnd(e) {
     touching = false;
     if (!attachedPane) return;
-    if (!touchMoved && Date.now() - touchStartAt < TAP_MAX_MS && atBottom()) {
+    if (!pinned && !touchMoved && Date.now() - touchStartAt < TAP_MAX_MS && atBottom()) {
       // A tap on the transparent armed surface means "focus the terminal".
       // The synthesized click would otherwise move focus to the overlay's
       // (unfocusable) scroll div and blur the textarea we are about to focus,
@@ -496,6 +528,136 @@
       return;
     }
     scheduleBottomReset();
+  }
+
+  // ─── Swipe → wheel ─────────────────────────────────────────────────────────
+  //
+  // With mouse tracking on, xterm ignores touches altogether and the overlay is
+  // not mounted (canOpen), so a swipe would do nothing. Desktop sends the wheel
+  // to the application as mouse reports; send the swipe the same way, one
+  // wheel notch per row of finger travel, and keep going for a moment after
+  // the finger lifts so a flick carries on like a native scroll.
+
+  const FLING_MIN_SPEED = 0.25;    // px/ms at release below which nothing carries on
+  const FLING_STOP_SPEED = 0.03;   // px/ms at which the fling ends
+  const FLING_DECAY_PER_MS = 0.996;
+
+  let swipe = null;       // { pane, col, row, x, y, startX, startY, lastY, lastAt, acc, step, v }
+  let flingFrame = null;
+  let longPressTimer = null;
+
+  // Holding a finger still for this long turns the screen into selectable text.
+  const LONG_PRESS_MS = 500;
+
+  function cancelLongPress() {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }
+
+  // Selection mode: the overlay with the pane's current rows, held open at the
+  // bottom so the screen looks exactly as it did, but as DOM text that iOS can
+  // select and copy natively. Opened from a long press because swipes in a
+  // mouse-tracking pane go to the application (see "Swipe → wheel"). The press
+  // that opens it cannot also start the native selection — the browser picked
+  // its target when the finger landed — so the user presses once more.
+  function openSelection(pane) {
+    if (!root || !pane || !pane.term) return;
+    attach(pane);
+    buildWindow(pane);
+    scroller.scrollTop = maxScrollTop();
+    setPinned(true);
+    setEngaged(true);
+  }
+
+  function stopFling() {
+    if (flingFrame) { cancelAnimationFrame(flingFrame); flingFrame = null; }
+  }
+
+  // Finger travelling down shows earlier output: that is wheel up.
+  function sendWheelNotches(s) {
+    const core = s.pane.term._core;
+    while (Math.abs(s.acc) >= s.step) {
+      const up = s.acc > 0;
+      s.acc += up ? -s.step : s.step;
+      core.coreMouseService.triggerMouseEvent({
+        col: s.col, row: s.row, x: s.x, y: s.y,
+        button: 4, action: up ? 0 : 1,   // WHEEL, UP / DOWN
+        ctrl: false, alt: false, shift: false,
+      });
+    }
+  }
+
+  function onPaneTouchStart(e) {
+    stopFling();
+    cancelLongPress();
+    swipe = null;
+    if (!deps.isMobile() || engaged || e.touches.length !== 1) return;
+    if (root && root.contains(e.target)) return;
+    const pane = deps.getActivePane();
+    if (!pane || !pane.term || !pane.el.contains(e.target) || !mouseWanted(pane.term)) return;
+    const screen = pane.el.querySelector('.xterm-screen');
+    if (!screen) return;
+    const rect = screen.getBoundingClientRect();
+    const t = e.touches[0];
+    const step = measureRowHeight(pane);
+    const cellW = rect.width / Math.max(1, pane.term.cols);
+    const x = Math.max(0, Math.round(t.clientX - rect.left));
+    const y = Math.max(0, Math.round(t.clientY - rect.top));
+    swipe = {
+      pane,
+      col: Math.min(pane.term.cols - 1, Math.floor(x / Math.max(1, cellW))),
+      row: Math.min(pane.term.rows - 1, Math.floor(y / Math.max(1, step))),
+      x, y,
+      startX: t.clientX,
+      startY: t.clientY,
+      lastY: t.clientY,
+      lastAt: e.timeStamp,
+      acc: 0,
+      step,
+      v: 0,
+    };
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      const s = swipe;
+      swipe = null;
+      if (s) openSelection(s.pane);
+    }, LONG_PRESS_MS);
+  }
+
+  function onPaneTouchMove(e) {
+    if (!swipe || e.touches.length !== 1) { cancelLongPress(); return; }
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - swipe.startX) > TAP_MOVE_PX
+        || Math.abs(t.clientY - swipe.startY) > TAP_MOVE_PX) cancelLongPress();
+    const dy = t.clientY - swipe.lastY;
+    const dt = Math.max(1, e.timeStamp - swipe.lastAt);
+    swipe.lastY = t.clientY;
+    swipe.lastAt = e.timeStamp;
+    swipe.v = 0.8 * (dy / dt) + 0.2 * swipe.v;
+    swipe.acc += dy;
+    sendWheelNotches(swipe);
+    // No page bounce or browser scroll underneath the application's own.
+    if (e.cancelable) e.preventDefault();
+  }
+
+  function onPaneTouchEnd(e) {
+    cancelLongPress();
+    const s = swipe;
+    swipe = null;
+    if (!s || e.type === 'touchcancel') return;
+    // A finger that stopped before lifting is not a flick.
+    if (e.timeStamp - s.lastAt > 100 || Math.abs(s.v) < FLING_MIN_SPEED) return;
+    let last = performance.now();
+    const tick = (now) => {
+      const dt = Math.max(1, now - last);
+      last = now;
+      s.acc += s.v * dt;
+      s.v *= Math.pow(FLING_DECAY_PER_MS, dt);
+      sendWheelNotches(s);
+      flingFrame = Math.abs(s.v) >= FLING_STOP_SPEED && mouseWanted(s.pane.term)
+        ? requestAnimationFrame(tick)
+        : null;
+    };
+    flingFrame = requestAnimationFrame(tick);
   }
 
   // ─── Init ──────────────────────────────────────────────────────────────────
@@ -531,7 +693,13 @@
 
     // Capture phase: this runs before xterm's own wheel listener on .xterm.
     const area = document.getElementById('pane-area');
-    if (area) area.addEventListener('wheel', onPaneWheel, { capture: true, passive: false });
+    if (area) {
+      area.addEventListener('wheel', onPaneWheel, { capture: true, passive: false });
+      area.addEventListener('touchstart', onPaneTouchStart, { capture: true, passive: true });
+      area.addEventListener('touchmove', onPaneTouchMove, { capture: true, passive: false });
+      area.addEventListener('touchend', onPaneTouchEnd, { capture: true, passive: true });
+      area.addEventListener('touchcancel', onPaneTouchEnd, { capture: true, passive: true });
+    }
   }
 
   window.HistoryOverlay = {
