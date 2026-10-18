@@ -498,6 +498,10 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Sessions can run long under several hosts: keep their rows tight. */
+.session-item { padding-top: 3px; padding-bottom: 3px; }
+.session-item .item-icon-btn { width: 18px; min-width: 18px; height: 18px; padding: 2px; }
+.session-item .item-icon-btn svg { width: 12px; height: 12px; }
 .session-item:hover,
 .layout-item:hover  { background: var(--bg-hover); }
 .session-item.active { border-left-color: var(--accent); background: var(--accent-a4); color: var(--text-bright); }
@@ -1096,6 +1100,7 @@ html.virtual-keyboard-visible #bottombar {
     padding: 7px 8px;
     font-size: 11px;
   }
+  .session-item { padding-top: 3px; padding-bottom: 3px; }
 
   .pane-id,
   .window-idx {
