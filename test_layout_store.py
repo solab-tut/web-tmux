@@ -33,13 +33,13 @@ def always_dir(_path):
     return True
 
 
-def session_snap(session='web', attached=False, windows=None):
+def session_snap(session='web', attached=False, windows=None, host='local'):
     """One entry of a snapshot's `sessions` list, as validate/restore see it."""
     if windows is None:
         windows = [{'index': 0, 'name': 'w', 'active': True, 'layout': LAYOUT1,
                     'panes': [{'cwd': '/a', 'active': True}]}]
     return {
-        'session': session, 'attached': attached,
+        'host': host, 'session': session, 'attached': attached,
         'width': 200, 'height': 50, 'pane_order': 'layout', 'active_window': 0,
         'windows': windows,
     }
@@ -208,17 +208,32 @@ class BuildSnapshotTest(unittest.TestCase):
     def test_rejects_no_sessions(self):
         self.assertIsNone(layout_store.build_snapshot('slot', [], now=NOW))
 
-    def test_rejects_too_many_sessions(self):
-        sessions = [session_snap(f's{i}') for i in range(layout_store.MAX_SESSIONS_PER_SNAPSHOT + 1)]
+    def test_rejects_too_many_sessions_on_one_host(self):
+        sessions = [session_snap(f's{i}') for i in range(layout_store.MAX_SESSIONS_PER_HOST + 1)]
         self.assertIsNone(layout_store.build_snapshot('slot', sessions, now=NOW))
 
     def test_accepts_the_session_cap_exactly(self):
-        sessions = [session_snap(f's{i}') for i in range(layout_store.MAX_SESSIONS_PER_SNAPSHOT)]
+        sessions = [session_snap(f's{i}') for i in range(layout_store.MAX_SESSIONS_PER_HOST)]
         self.assertIsNotNone(layout_store.build_snapshot('slot', sessions, now=NOW))
+
+    def test_the_per_host_cap_applies_to_each_host_separately(self):
+        sessions = [session_snap(f's{i}', host=h)
+                    for h in ('local', 'lan-box')
+                    for i in range(layout_store.MAX_SESSIONS_PER_HOST)]
+        self.assertIsNotNone(layout_store.build_snapshot('slot', sessions, now=NOW))
+
+    def test_rejects_too_many_hosts(self):
+        sessions = [session_snap('s', host=f'h{i}')
+                    for i in range(layout_store.MAX_HOSTS_PER_SNAPSHOT + 1)]
+        self.assertIsNone(layout_store.build_snapshot('slot', sessions, now=NOW))
 
     def test_rejects_duplicate_session_names(self):
         sessions = [session_snap('web'), session_snap('web')]
         self.assertIsNone(layout_store.build_snapshot('slot', sessions, now=NOW))
+
+    def test_same_session_name_on_two_hosts_is_two_sessions(self):
+        sessions = [session_snap('web'), session_snap('web', host='lan-box')]
+        self.assertIsNotNone(layout_store.build_snapshot('slot', sessions, now=NOW))
 
     def test_rejects_combined_pane_count_over_the_snapshot_cap(self):
         # Each session is within MAX_TOTAL_PANES on its own, but together they
@@ -235,12 +250,51 @@ class ConflictingSessionsTest(unittest.TestCase):
     def test_returns_names_that_are_live_in_snapshot_order(self):
         snap = snapshot(sessions=[session_snap('web'), session_snap('dev'), session_snap('ci')])
 
-        self.assertEqual(layout_store.conflicting_sessions(snap, {'ci', 'web'}), ['web', 'ci'])
+        self.assertEqual(layout_store.conflicting_sessions(snap, {'local': {'ci', 'web'}}),
+                         ['web', 'ci'])
 
     def test_empty_when_nothing_is_live(self):
         snap = snapshot(sessions=[session_snap('web')])
 
-        self.assertEqual(layout_store.conflicting_sessions(snap, set()), [])
+        self.assertEqual(layout_store.conflicting_sessions(snap, {'local': set()}), [])
+
+    def test_conflicts_are_per_host(self):
+        snap = snapshot(sessions=[session_snap('web'), session_snap('web', host='lan-box'),
+                                  session_snap('dev', host='lan-box')])
+
+        # 'web' running locally says nothing about lan-box's 'web'; a host
+        # that wasn't asked (unreachable) has no conflicts.
+        self.assertEqual(
+            layout_store.conflicting_sessions(snap, {'local': {'dev'}, 'lan-box': {'web'}}),
+            ['lan-box:web'])
+        self.assertEqual(layout_store.conflicting_sessions(snap, {'local': {'web'}}), ['web'])
+
+
+class GroupByHostTest(unittest.TestCase):
+
+    def test_keeps_snapshot_order(self):
+        a, b, c = session_snap('a', host='x'), session_snap('b'), session_snap('c', host='x')
+        self.assertEqual(layout_store.group_by_host(snapshot(sessions=[a, b, c])),
+                         [('x', [a, c]), ('local', [b])])
+
+
+class CwdFallbackTest(unittest.TestCase):
+
+    def test_keeps_a_directory_that_is_still_there(self):
+        argv = ['split-window', '-t', '%1', '-c', '/srv']
+        self.assertEqual(layout_store.cwd_fallback(argv, {'/srv'}, '/home/u'), argv)
+
+    def test_falls_back_to_home_when_the_directory_is_gone(self):
+        argv = ['split-window', '-t', '%1', '-c', '/gone']
+        self.assertEqual(layout_store.cwd_fallback(argv, {'/srv'}, '/home/u')[-1], '/home/u')
+
+    def test_uses_the_trailing_flag_not_a_window_named_dash_c(self):
+        argv = ['new-session', '-n', '-c', '-c', '/', '-x', '80', '-y', '24']
+        self.assertEqual(layout_store.cwd_fallback(argv, {'/'}, '/home/u'), argv)
+
+    def test_leaves_argv_without_a_cwd_alone(self):
+        argv = ['select-layout', '-t', 'web:0', '81f0,80x24,0,0,1']
+        self.assertEqual(layout_store.cwd_fallback(argv, set(), '/home/u'), argv)
 
 
 class ValidateSnapshotTest(unittest.TestCase):
@@ -268,6 +322,13 @@ class ValidateSnapshotTest(unittest.TestCase):
             with self.subTest(session=session):
                 self.assertFalse(layout_store.validate_snapshot(snap))
 
+    def test_rejects_bad_host(self):
+        for host in (None, '', '-oProxyCommand=x', 'user@box', 'box:22', 42):
+            snap = snapshot()
+            snap['sessions'][0]['host'] = host
+            with self.subTest(host=host):
+                self.assertFalse(layout_store.validate_snapshot(snap))
+
     def test_rejects_non_bool_attached(self):
         for attached in (1, 'true', None, 0):
             snap = snapshot()
@@ -283,7 +344,7 @@ class ValidateSnapshotTest(unittest.TestCase):
     def test_rejects_empty_or_oversized_sessions_list(self):
         empty = snapshot(); empty['sessions'] = []
         not_list = snapshot(); not_list['sessions'] = {}
-        too_many = snapshot(sessions=[session_snap(f's{i}')
+        too_many = snapshot(sessions=[session_snap(f's{i}', host=f'h{i % 8}')
                                       for i in range(layout_store.MAX_SESSIONS_PER_SNAPSHOT + 1)])
         for snap in (empty, not_list, too_many):
             self.assertFalse(layout_store.validate_snapshot(snap))
@@ -470,6 +531,16 @@ class StoreIOTest(unittest.TestCase):
 
         self.assertEqual(layout_store.load_store()['slots'], {})
 
+    def test_version_2_store_is_read_as_local_sessions(self):
+        old = snapshot('a')
+        del old['sessions'][0]['host']
+        with open(layout_store.store_path(), 'w', encoding='utf-8') as fh:
+            json.dump({'version': 2, 'slots': {'a': old}}, fh)
+
+        loaded = layout_store.load_store()
+        self.assertEqual(loaded['version'], layout_store.SCHEMA_VERSION)
+        self.assertEqual(loaded['slots']['a']['sessions'][0]['host'], 'local')
+
     def test_invalid_slots_are_dropped_on_load(self):
         bad = snapshot('bad')
         bad['sessions'][0]['windows'][0]['layout'] = 'not-a-layout'
@@ -499,8 +570,8 @@ class StoreIOTest(unittest.TestCase):
 
         summaries = layout_store.slot_summaries(store)
         self.assertEqual([s['name'] for s in summaries], ['new', 'old'])
-        self.assertEqual(summaries[0], {'name': 'new', 'sessions': 2, 'windows': 2,
-                                        'panes': 2, 'saved_at': new['saved_at']})
+        self.assertEqual(summaries[0], {'name': 'new', 'hosts': ['local'], 'sessions': 2,
+                                        'windows': 2, 'panes': 2, 'saved_at': new['saved_at']})
 
 
 if __name__ == '__main__':

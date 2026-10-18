@@ -103,7 +103,7 @@ TMUX_SESSION=my-session ./server.sh
 | **Windows** | Click to switch (zoomed windows unzoom automatically) |
 | **Panes** | Click active pane → toggle zoom on/off; click another pane → zoom to it |
 | **+** (windows row) | New window in current session |
-| **+** (sessions row) | New session |
+| **+** (sessions row) | New session (on the host you are on) |
 | **⇿ / ⇕** | Split active pane horizontally / vertically |
 | **Layouts** | Click to restore a saved layout; 🗑 to delete it |
 | **+** (layouts row) | Save every currently open session under one named layout |
@@ -163,6 +163,94 @@ Enable the `Ctrl` toggle to apply Ctrl to the next character. This setting contr
 On iOS / iPadOS the software keyboard carries an AutoFill bar above it, showing key, card and location icons. It is not specific to password fields: it appears whenever a form control has focus, and the terminal focuses xterm.js's hidden `<textarea>`. **A page cannot suppress it** — only a native `WKWebView` host can override `inputAccessoryView`, and no device setting turns it off. `static/app.js` already sets `autocomplete="off"`, which WebKit ignores. Twelve shapes were tried on an iOS 26 device — a wrapping `<form>`, several `input` types, `contenteditable`, several `inputmode` values, off-screen placement — and the bar stayed up for all of them.
 
 When iOS has discarded a tab, Safari brings it back as a history navigation, and WebKit then leaves the browser showing "loading" indefinitely even though the page is complete and nothing is pending. Once the connection is up, such a tab reloads itself as an ordinary navigation, which the service worker answers from its cache without touching the network. Set `RENAVIGATE_RESTORED_TABS = false` in `static/app.js` to keep the restored tab instead and live with the indicator.
+
+## tmux on other hosts (SSH)
+
+web-tmux can also attach to tmux running on other machines — including LAN
+machines that are not on your tailnet, reached through a tailnet node with
+`ProxyJump`. The browser still only talks to this server; this server runs
+`ssh <alias> tmux -CC` and the remote tmux shows up in the sidebar like a
+local one, with its windows, panes, scrollback and saved layouts. Sessions
+keep running on the remote host when the browser, this server, or the ssh
+connection goes away.
+
+**1. Describe how to reach each host in the server user's `~/.ssh/config`.**
+Any of these ways to authenticate works:
+
+- a key without a passphrase (simplest; a dedicated one is recommended);
+- a key in an ssh-agent — `server.sh` passes on `SSH_AUTH_SOCK`, from your
+  login shell or from `.web-tmux.env`;
+- a key with a passphrase, or a password: web-tmux asks for it in the
+  browser (see *Signing in* below).
+
+```
+Host gw-home                      # a tailnet node inside the LAN
+  HostName gw-home.tailnet-name.ts.net
+  User me
+  IdentityFile ~/.ssh/web-tmux_ed25519
+  IdentitiesOnly yes
+
+Host lan-box                      # LAN only, not on the tailnet
+  HostName 192.168.1.20
+  User me
+  ProxyJump gw-home
+  IdentityFile ~/.ssh/web-tmux_ed25519
+  IdentitiesOnly yes
+```
+
+**2. Connect once by hand** so both hops are in `known_hosts` — web-tmux
+never accepts an unknown host key (`StrictHostKeyChecking=yes`), it just
+reports the host as unreachable:
+
+```bash
+ssh lan-box tmux -V
+```
+
+**3. List the aliases** in `.web-tmux.env` and restart:
+
+```bash
+WEB_TMUX_SSH_HOSTS=lan-box,mac-mini:/opt/homebrew/bin/tmux
+```
+
+Only these aliases can ever be used; the browser picks from them and cannot
+name a host of its own. `alias:/path` sets the tmux binary when it is not on
+the PATH of a non-interactive ssh login (e.g. Homebrew on macOS). OpenSSH
+8.4 or newer is needed on this machine for signing in from the browser.
+
+**Using it.** With hosts configured, the session list is grouped by host,
+each with a status dot, a **+** for a new session there, and **↻** to retry
+an unreachable host. Picking a session on another host moves the server's
+control client there — every open browser follows, since they all watch the
+same one — and the top bar shows `server → alias` while you are on a remote
+host. If the connection to that host is lost and cannot be re-established,
+web-tmux falls back to the local session and says so. Saving a layout
+captures the sessions of every host that answers (a host that doesn't is
+left out, and the note says which); restoring rebuilds each session on its
+own host, never switches you to another host, and reports per session when a
+host can't be reached.
+
+**Signing in.** A host that needs a passphrase or password shows 🔑 in the
+list. Click it — or just pick that host's **+** or a session on it — and the
+browser that clicked gets ssh's own prompt (`Enter passphrase for key …`,
+`me@lan-box's password:`), one per hop when a ProxyJump host asks too. The
+answer goes from the WebSocket straight to ssh through `SSH_ASKPASS`; it is
+never stored or logged. Cancel stops the sign-in. Once signed in, the shared
+connection is kept for 8 hours after its last use, so nothing is asked again
+until then — or until web-tmux stops or restarts: it closes its ssh
+connections on the way out, and on start closes any that a killed server
+left behind.
+Background refreshes of the session list never ask anyone: a host that
+needs a password just shows 🔑 until someone signs in.
+
+**Remote requirements:** tmux 3.2 or newer (with 3.2/3.3 the prefix key is
+passed through to the pane instead of triggering tmux bindings), a POSIX
+login shell (sh/bash/zsh; not fish), and a UTF-8 capable system. Attaching
+sets the remote tmux server's global `window-size latest` and
+`history-limit 50000`, as it does locally.
+
+All ssh calls to a host share one connection (`ControlMaster`, kept for 10
+minutes), with sockets and a per-host ssh log in
+`~/.local/share/web-tmux/ssh/`.
 
 ## Remote access with Tailscale
 
@@ -258,6 +346,7 @@ tailscale serve --https=8765 off
 - Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values. The page also reports a short connection diagnostic there when it reconnects (`client ...`), carrying only connection state — no terminal data. Set `CLIENT_DIAGNOSTICS = false` in `static/app.js` to turn it off.
 - Saved layouts are written to `~/.local/share/web-tmux/layouts.json` with mode 600 inside a mode 700 directory. They record working-directory paths, so treat the file as private; it never leaves the machine and is not part of the repository.
 - Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
+- With `WEB_TMUX_SSH_HOSTS` set, anyone who gets into web-tmux (an allowed Tailscale identity, or a stolen session cookie) gets a shell on every listed host and on the jump hosts in between. Restricting the key with `command=` does not help — tmux itself can run anything — but `restrict,pty,from="<this server's tailnet IP>"` in each remote `authorized_keys` keeps the key from being used elsewhere or for forwarding. ssh runs with agent and X11 forwarding off and all configured forwardings cleared. The ssh socket directory is mode 700. Passphrases and passwords typed in the sign-in dialog only travel over the authenticated WebSocket to a mode-600 socket and on to ssh; they are never written to disk or logs, and only the browser that started a sign-in can answer its prompts. ssh runs without a controlling terminal and with an askpass that refuses everything outside a sign-in. Remote error text is logged (shortened, one line) but never sent to the browser, and terminal contents are not logged.
 
 ## Third-party browser assets
 
@@ -275,11 +364,15 @@ web-tmux/
 ├── server.py             # HTTP + WebSocket server
 ├── web_security.py       # Origin, Host, identity, and signed-cookie checks
 ├── tmux_control.py       # tmux -CC control-mode wrapper
+├── askpass.py            # ssh passphrase/password prompts answered from the browser
+├── tmux_hosts.py         # Local / ssh hosts: tmux argv, ssh master, host list
 ├── layout_parser.py      # tmux layout string parser
 ├── layout_store.py       # Saved session layouts: capture, restore plan, store
 ├── test_security.py      # Authentication, validation, and limit tests
 ├── test_server.py        # Session HTTP handler and layout restore tests
 ├── test_layout_store.py  # Layout capture, ordering, planning, and store tests
+├── test_tmux_control.py  # Control-mode parsing, attach, host switch tests
+├── test_tmux_hosts.py    # ssh argv/quoting, host config, host list tests
 ├── pyproject.toml        # Python project and pinned dependency
 ├── uv.lock               # Lock file for uv
 ├── requirements.txt      # Pinned dependency for venv + pip

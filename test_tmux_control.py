@@ -5,6 +5,8 @@ import json
 import unittest
 from unittest import mock
 
+import tmux_control
+from tmux_hosts import LOCAL_HOST, TmuxHost
 from tmux_control import (
     CLIPBOARD_MAX_BYTES,
     TmuxControl,
@@ -52,6 +54,19 @@ class TerminalResponseFilterTest(unittest.TestCase):
         )
 
 
+class _LiveProc:
+    returncode = None
+    pid = 1
+
+
+def _attached(tc, fd=None):
+    """Make `tc` look like a control client whose attach has been answered."""
+    tc._master_fd = fd
+    tc.proc = _LiveProc()
+    tc._ready.set()
+    return tc
+
+
 class _Recorder:
     def __init__(self, events):
         self.events = events
@@ -68,7 +83,7 @@ class SnapshotOrderingTest(unittest.TestCase):
         async def scenario():
             tc = TmuxControl()
             read_fd, write_fd = os.pipe()
-            tc._master_fd = write_fd
+            _attached(tc, write_fd)
 
             async def connected():
                 return None
@@ -152,15 +167,32 @@ class PaneStateParseTest(unittest.TestCase):
         )
 
 
-class _FakeSaveBuffer:
-    def __init__(self, data, returncode=0, delay=0.0):
+class _FakeStream:
+    def __init__(self, data, delay=0.0):
         self.data = data
-        self.returncode = returncode
         self.delay = delay
 
-    async def communicate(self):
+    async def read(self, n):
         await asyncio.sleep(self.delay)
-        return self.data, b''
+        self.delay = 0.0
+        chunk, self.data = self.data[:n], self.data[n:]
+        return chunk
+
+
+class _FakeSaveBuffer:
+    """A `tmux save-buffer` process: its stdout, and how it exits."""
+
+    def __init__(self, data, returncode=0, delay=0.0):
+        self.stdout = _FakeStream(data, delay)
+        self.stderr = _FakeStream(b'')
+        self.returncode = returncode
+        self.killed = False
+
+    async def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
 
 
 class ClipboardForwardTest(unittest.TestCase):
@@ -168,7 +200,7 @@ class ClipboardForwardTest(unittest.TestCase):
 
     def _run(self, lines, buffers):
         async def scenario():
-            tc = TmuxControl()
+            tc = _attached(TmuxControl())
             events = []
             tc.subscribers.append(_Recorder(events))
             calls = []
@@ -214,6 +246,169 @@ class ClipboardForwardTest(unittest.TestCase):
             {'gone': _FakeSaveBuffer(b'', returncode=1)},
         )
         self.assertEqual(msgs, [])
+
+
+class AttachLineTest(unittest.TestCase):
+    def test_attach_response_marks_ready_without_answering_a_command(self):
+        async def scenario():
+            tc = TmuxControl()
+            fut = asyncio.get_running_loop().create_future()
+            tc._pending.append(fut)
+            tc._handle_line('\x1bP1000p%begin 1 2 0')
+            tc._handle_line('%end 1 2 0')
+            return tc, fut
+        tc, fut = asyncio.run(scenario())
+        self.assertTrue(tc._ready.is_set())
+        self.assertFalse(fut.done())      # the attach's %end belongs to no command
+
+    def test_lines_before_attach_are_logged_not_broadcast(self):
+        events = []
+        tc = TmuxControl(host=TmuxHost('lan-box'))
+        tc.subscribers.append(_Recorder(events))
+        with self.assertLogs('tmux_control', 'WARNING') as logs:
+            tc._handle_line('ssh: connect to host lan-box port 22: No route to host')
+            tc._handle_line('%output %1 not-yet')
+        self.assertEqual(events, [])
+        self.assertIn('No route to host', logs.output[0])
+        self.assertFalse(tc._ready.is_set())
+
+
+class ControlLineLimitTest(unittest.TestCase):
+    def test_a_line_that_never_ends_reconnects_instead_of_growing(self):
+        async def scenario():
+            tc = TmuxControl(host=TmuxHost('lan-box'))
+            read_fd, write_fd = os.pipe()
+            os.set_blocking(read_fd, False)
+            _attached(tc, read_fd)
+            reconnects = []
+
+            async def reconnect():
+                reconnects.append(True)
+            tc._reconnect = reconnect
+            sent = 0
+            # 4096 in, 4096 read per round: the pipe never fills.
+            while sent <= tmux_control.MAX_CONTROL_LINE + 8192 and not reconnects:
+                sent += os.write(write_fd, b'x' * 4096)
+                tc._on_readable()
+                await asyncio.sleep(0)
+            os.close(read_fd)
+            os.close(write_fd)
+            return tc, reconnects
+        with self.assertLogs('tmux_control', 'WARNING'):
+            tc, reconnects = asyncio.run(scenario())
+        self.assertEqual(reconnects, [True])
+        self.assertEqual(tc._buf, '')
+
+
+class ResponseSizeLimitTest(unittest.TestCase):
+    def test_oversized_response_is_dropped_not_buffered(self):
+        async def scenario():
+            tc = _attached(TmuxControl(host=TmuxHost('lan-box')))
+            loop = asyncio.get_running_loop()
+            big, small = loop.create_future(), loop.create_future()
+            tc._pending += [big, small]
+            line = 'x' * 1023
+            tc._handle_line('%begin 1 1 1')
+            with self.assertLogs('tmux_control', 'WARNING'):
+                for _ in range(tmux_control.MAX_RESPONSE_BYTES // 1024 + 10):
+                    tc._handle_line(line)
+            held = tc._cur_resp_bytes, len(tc._cur_resp)
+            tc._handle_line('%end 1 1 1')
+            # The channel still works: the next response is delivered whole.
+            tc._handle_line('%begin 1 2 1')
+            tc._handle_line('ok')
+            tc._handle_line('%end 1 2 1')
+            return held, big.result(), small.result(), tc
+        (held_bytes, held_lines), big, small, tc = asyncio.run(scenario())
+        self.assertEqual(held_lines, 0)          # nothing kept past the limit
+        self.assertEqual(big, '')                # the oversized command reads as failed
+        self.assertEqual(small, 'ok')
+        self.assertFalse(tc._resp_overflow)
+
+
+class _Attempts:
+    """Stands in for _connect: succeeds per host as told."""
+
+    def __init__(self, tc, ok_hosts):
+        self.tc = tc
+        self.ok_hosts = ok_hosts
+        self.tried = []
+
+    async def __call__(self):
+        self.tried.append((self.tc.host.name, self.tc.session))
+        if self.tc.host.name in self.ok_hosts:
+            self.tc._failures = 0
+            return True
+        self.tc._failures += 1
+        return False
+
+
+class TargetSwitchTest(unittest.TestCase):
+    REMOTE = TmuxHost('lan-box')
+
+    def test_switch_failure_goes_back_to_the_previous_target(self):
+        async def scenario():
+            tc = TmuxControl('web')
+            tc._connect = _Attempts(tc, {'local'})
+            ok = await tc.switch_target(self.REMOTE, 'dev')
+            return tc, ok
+        tc, ok = asyncio.run(scenario())
+        self.assertFalse(ok)
+        self.assertEqual((tc.host.name, tc.session), ('local', 'web'))
+        self.assertEqual(tc._connect.tried, [('lan-box', 'dev'), ('local', 'web')])
+        self.assertEqual(tc.target_gen, 2)
+
+    def test_remote_falls_back_to_local_after_repeated_failures(self):
+        changes = []
+
+        async def scenario():
+            tc = TmuxControl('dev', self.REMOTE, fallback=(LOCAL_HOST, 'web'),
+                             on_target_changed=lambda *a: changes.append(a))
+            sub = object()
+            tc.subscribers.append(sub)
+            tc._connect = _Attempts(tc, {'local'})
+            results = [await tc._restart_client() for _ in range(tmux_control.REMOTE_ATTEMPTS)]
+            return tc, results, sub
+        tc, results, sub = asyncio.run(scenario())
+        self.assertEqual(results, [False, False, True])
+        self.assertEqual((tc.host.name, tc.session), ('local', 'web'))
+        # The callback gets the subscribers, kept off the stream until it
+        # has told them about the move.
+        self.assertEqual(changes, [('fell_back', 'lan-box', [sub])])
+        self.assertEqual(tc.subscribers, [])
+
+    def test_backing_off_fails_fast(self):
+        async def scenario():
+            tc = TmuxControl('dev', self.REMOTE)
+            tc._connect = _Attempts(tc, set())
+            tc._next_attempt = tmux_control.time.monotonic() + 60
+            out = await tc.send_command_list(['list-sessions'])
+            tc._restart_task.cancel()
+            return tc, out
+        tc, out = asyncio.run(scenario())
+        self.assertEqual(out, [''])
+        self.assertEqual(tc._connect.tried, [])
+
+    def test_input_meant_for_the_previous_host_is_dropped(self):
+        async def scenario():
+            tc = TmuxControl()
+            read_fd, write_fd = os.pipe()
+            _attached(tc, write_fd)
+            tc._prefix_key_names = set()
+
+            async def connected():
+                tc.target_gen += 1          # a host switch lands mid-write
+            tc._ensure_connected = connected
+            await tc.write_input('%1', b'ls')
+            os.set_blocking(read_fd, False)
+            try:
+                return os.read(read_fd, 4096)
+            except BlockingIOError:
+                return b''
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+        self.assertEqual(asyncio.run(scenario()), b'')
 
 
 if __name__ == '__main__':

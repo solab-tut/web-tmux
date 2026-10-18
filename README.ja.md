@@ -103,7 +103,7 @@ TMUX_SESSION=my-session ./server.sh
 | **Windows** | クリックで切り替え（ズーム中のウィンドウは自動解除） |
 | **Panes** | アクティブなペインをクリック → ズームのオン／オフ切り替え、別のペインをクリック → そのペインへズーム |
 | **+**（Windows 行） | 現在のセッションに新規ウィンドウを追加 |
-| **+**（Sessions 行） | 新規セッションを作成 |
+| **+**（Sessions 行） | 新規セッションを作成（いま接続中のホストに） |
 | **⇿ / ⇕** | アクティブペインを横分割 / 縦分割 |
 | **Layouts** | クリックで保存済みレイアウトを復帰、🗑 で削除 |
 | **+**（Layouts 行） | 今開いている全セッションを1つの名前にまとめて保存 |
@@ -161,6 +161,53 @@ TMUX_SESSION=my-session ./server.sh
 iOS / iPadOS では、ソフトキーボードの上に鍵・カード・位置情報アイコンの AutoFill バー（入力アクセサリビュー）が出ます。これはパスワード欄に限った表示ではなく、フォーム要素にフォーカスが当たっていれば常に出るもので、xterm.js の隠し `<textarea>` にフォーカスするターミナルも対象になります。**ページ側からこれを消す方法はありません** — 上書きできるのはネイティブの `WKWebView` ホストが持つ `inputAccessoryView` だけで、端末設定にも無効化する項目はありません。`autocomplete="off"` は `static/app.js` で設定済みですが WebKit は無視します。実機（iOS 26）で `<form>` 囲み、`input type` 各種、`contenteditable`、`inputmode` 各種、画面外配置など 12 通りを試しましたが、どれでもバーは出たままでした。
 
 iOS がタブを破棄したあと、Safari はそのタブを履歴ナビゲーションとして復元します。このとき WebKit は、ページの読み込みが完了していて保留中の要求が何も無くても「読み込み中」表示を残し続けます。そこで復元されたタブは、接続が確立した時点で通常のナビゲーションとして自分を読み込み直します（Service Worker がキャッシュから返すのでネットワークは使いません）。`static/app.js` の `RENAVIGATE_RESTORED_TABS = false` にすれば、読み込み表示は残りますが復元されたタブをそのまま使えます。
+
+## 他のホストの tmux（SSH）
+
+web-tmux は、他のマシンで動いている tmux にも接続できます。tailnet に参加していない LAN 内のマシンも、tailnet ノードを `ProxyJump` の踏み台にすれば対象にできます。ブラウザが話す相手はこれまでどおりこのサーバーだけで、サーバーが `ssh <alias> tmux -CC` を実行します。リモートの tmux はローカルと同じようにサイドバーに並び、ウィンドウ、ペイン、スクロールバック、レイアウト保存がそのまま使えます。ブラウザ、このサーバー、ssh 接続のどれが切れても、セッションはリモート側で動き続けます。
+
+**1. 接続方法をサーバーユーザーの `~/.ssh/config` に書く。** 認証は次のどれでも使えます。
+
+- パスフレーズなしの鍵（最も簡単。専用鍵を推奨）
+- ssh-agent に登録した鍵（`server.sh` は、ログインシェルや `.web-tmux.env` に設定した `SSH_AUTH_SOCK` をそのまま渡します）
+- パスフレーズ付きの鍵、またはパスワード（ブラウザで入力します。後述の「サインイン」を参照）
+
+```
+Host gw-home                      # LAN 内の tailnet ノード
+  HostName gw-home.tailnet-name.ts.net
+  User me
+  IdentityFile ~/.ssh/web-tmux_ed25519
+  IdentitiesOnly yes
+
+Host lan-box                      # LAN のみ（tailnet 外）
+  HostName 192.168.1.20
+  User me
+  ProxyJump gw-home
+  IdentityFile ~/.ssh/web-tmux_ed25519
+  IdentitiesOnly yes
+```
+
+**2. 一度手動で接続し**、両方のホップを `known_hosts` に登録します。web-tmux は未知のホスト鍵を受け入れない（`StrictHostKeyChecking=yes`）ため、未登録だと「到達不能」として扱われます。
+
+```bash
+ssh lan-box tmux -V
+```
+
+**3. `.web-tmux.env` にエイリアスを列挙して**再起動します。
+
+```bash
+WEB_TMUX_SSH_HOSTS=lan-box,mac-mini:/opt/homebrew/bin/tmux
+```
+
+使えるのはここに列挙したエイリアスだけです。ブラウザはこの中から選ぶだけで、任意のホストを指定することはできません。`alias:/path` は、非対話の ssh ログインの PATH に tmux が無い場合（macOS の Homebrew など）に tmux のパスを指定します。ブラウザからのサインインには、このマシンに OpenSSH 8.4 以上が必要です。
+
+**使い方。** ホストを設定すると、セッション一覧がホストごとにまとまります。各ホストには状態ドット、そのホストに新規セッションを作る **+**、到達不能なホストを再確認する **↻** が付きます。他ホストのセッションを選ぶと、サーバーの control client がそのホストに移ります。すべてのブラウザが同じ client を見ているので、開いている全ブラウザが一緒に移ります。リモートにいる間、トップバーには `server → alias` と表示されます。接続が切れて再接続できない場合は、ローカルのセッションに戻り、その旨を表示します。レイアウト保存では、応答したすべてのホストのセッションを記録します（応答しないホストは除外し、どのホストを除外したかを表示します）。復元では各セッションを元のホストに再構築します。別ホストへ自動で切り替えることはなく、到達できないホストのセッションは個別に失敗として報告します。
+
+**サインイン。** パスフレーズやパスワードが必要なホストは、一覧に 🔑 が表示されます。🔑 をクリックするか、そのホストの **+** やセッションを選ぶと、操作したブラウザにだけ ssh 自身のプロンプト（`Enter passphrase for key …`、`me@lan-box's password:`）が表示されます。ProxyJump の踏み台でも必要なら、ホップごとに順に聞かれます。入力した文字列は WebSocket から `SSH_ASKPASS` 経由でそのまま ssh に渡され、保存もログ出力もされません。Cancel でサインインを中止できます。サインイン後の共有接続は最後の利用から 8 時間維持されるので、その間は再入力不要です（web-tmux は停止・再起動時に ssh 接続を閉じます。強制終了などで残った接続も、次の起動時に閉じます）。セッション一覧の背景更新がプロンプトを出すことはなく、パスワードが必要なホストは誰かがサインインするまで 🔑 のままです。
+
+**リモート側の要件：** tmux 3.2 以上（3.2/3.3 では prefix キーは tmux のバインドとして扱われず、そのままペインに送られます）、POSIX 系のログインシェル（sh/bash/zsh。fish は不可）、UTF-8 が使える環境。接続時にリモート tmux サーバーのグローバルオプション `window-size latest` と `history-limit 50000` を設定します（ローカルと同じ）。
+
+ホストへの ssh 呼び出しは 1 本の接続を共有します（`ControlMaster`、10 分間維持）。ソケットとホストごとの ssh ログは `~/.local/share/web-tmux/ssh/` に置かれます。
 
 ## Tailscale を使ったリモートアクセス
 
@@ -256,6 +303,7 @@ tailscale serve --https=8765 off
 - 不正なOrigin、ID、メッセージ、レート超過は、端末入力やCookie値を含めず `server.log` に記録します。再接続時にはページが接続状態の短い診断行（`client ...`）も記録します。端末の内容は含みません。不要なら `static/app.js` の `CLIENT_DIAGNOSTICS = false` で止められます。
 - 保存したレイアウトは `~/.local/share/web-tmux/layouts.json` に、モード700のディレクトリ内でモード600のファイルとして書き出されます。作業ディレクトリのパスを含むため機密として扱ってください。ネットワークには出ず、リポジトリにも含まれません。
 - `tailscale serve status` が上記2ポートのtailnet-only公開だけになっていることを維持してください。
+- `WEB_TMUX_SSH_HOSTS` を設定した場合、web-tmux に入れた人（許可済みTailscale ID、または盗まれたセッションCookie）は、列挙した全ホストと途中の踏み台ホストでシェルを得られます。tmux 自体が任意のコマンドを実行できるため `command=` による鍵の制限は効きません。ただし各リモートの `authorized_keys` に `restrict,pty,from="<このサーバーのtailnet IP>"` を付ければ、鍵の他所での利用やフォワーディングを防げます。ssh は agent／X11 フォワーディングを無効にし、設定済みのフォワーディングもすべて解除して実行します。ssh ソケットのディレクトリはモード700です。サインイン画面で入力したパスフレーズやパスワードは、認証済みの WebSocket からモード600のソケットを経て ssh に渡るだけで、ディスクにもログにも残りません。プロンプトに答えられるのはサインインを始めたブラウザだけです。ssh は制御端末なしで、サインイン以外のプロンプトをすべて拒否する askpass 付きで動きます。リモートのエラー文は（短く1行にして）ログに残しますがブラウザには送らず、端末の内容はログに残しません。
 
 ## サードパーティのブラウザアセット
 
@@ -273,11 +321,15 @@ web-tmux/
 ├── server.py             # HTTP + WebSocket サーバー
 ├── web_security.py       # Origin、Host、ID、署名Cookieの検証
 ├── tmux_control.py       # tmux -CC 制御モードラッパー
+├── askpass.py            # ssh のパスフレーズ／パスワードをブラウザで答える仕組み
+├── tmux_hosts.py         # ローカル／ssh ホスト：tmux の argv、ssh マスター、ホスト一覧
 ├── layout_parser.py      # tmux レイアウト文字列パーサー
 ├── layout_store.py       # セッション構成の保存・復元計画・ストア
 ├── test_security.py      # 認証・検証・制限のテスト
 ├── test_server.py        # セッションHTTPハンドラとレイアウト復元のテスト
 ├── test_layout_store.py  # レイアウトの取得・並び順・復元計画・ストアのテスト
+├── test_tmux_control.py  # 制御モードの解析・接続・ホスト切替のテスト
+├── test_tmux_hosts.py    # ssh の argv／クォート、ホスト設定、ホスト一覧のテスト
 ├── pyproject.toml        # Pythonプロジェクトと固定依存関係
 ├── uv.lock               # uv用ロックファイル
 ├── requirements.txt      # venv + pip用固定依存関係

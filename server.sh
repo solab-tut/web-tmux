@@ -50,7 +50,8 @@ stop_recorded_server() {
   pid="$(sed -n '1p' "$PID_FILE" 2>/dev/null || true)"
   if is_web_tmux_pid "$pid"; then
     kill "$pid"
-    for _ in {1..30}; do
+    # The server closes its ssh connections before it exits.
+    for _ in {1..100}; do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done
@@ -79,6 +80,9 @@ do_stop() {
 
 do_start() {
   need_cmd tmux
+  if [ -n "${WEB_TMUX_SSH_HOSTS:-}" ]; then
+    need_cmd ssh
+  fi
   if [ ! -x "$PYTHON" ]; then
     echo "ERROR: .venv is missing; run ./setup.sh first." >&2
     exit 1

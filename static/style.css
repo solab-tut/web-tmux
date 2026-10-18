@@ -537,6 +537,38 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   margin-left: auto;
 }
 
+/* One group per host when ssh hosts are configured. */
+.host-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.host-head.current { color: var(--text-bright); }
+.host-head .side-btn { min-width: 18px; height: 18px; font-size: 11px; padding: 0 4px; }
+.host-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--status-idle);
+}
+.host-up   .host-dot { background: var(--status-ok); }
+.host-down .host-dot { background: var(--status-err); }
+.host-down .host-name { color: var(--text-dim); }
+
+.session-note {
+  padding: 4px 10px;
+  color: var(--status-warn);
+  font-size: 10px;
+}
+
+/* Keystrokes go to another machine: say so where the eye already is. */
+#topbar-host.remote { color: var(--status-warn); }
+
 #layout-empty {
   padding: 4px 10px 8px;
   color: var(--text-dim);
@@ -888,6 +920,17 @@ html.virtual-keyboard-visible #bottombar {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: .04em;
+}
+
+.sheet input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-input);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 16px;   /* below 16px, iOS zooms the page on focus */
 }
 
 .sheet textarea {

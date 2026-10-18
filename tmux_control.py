@@ -12,6 +12,7 @@ Output from panes: `%output` notifications → vis-decoded → base64 → broadc
 """
 import asyncio
 import base64
+import contextlib
 import fcntl
 import json
 import logging
@@ -20,7 +21,12 @@ import pty
 import re
 import struct
 import termios
+import time
+import tty
 from typing import Callable
+
+import tmux_hosts
+from tmux_hosts import LOCAL_HOST, TmuxHost
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +40,30 @@ SNAPSHOT_SCROLLBACK_LINES = 10000
 # The broadcast goes through every client's 1 MiB outbound queue, and JSON
 # escaping can grow non-ASCII text several times over.
 CLIPBOARD_MAX_BYTES = 128 * 1024
+
+# How long a freshly started control client may take to answer its attach.
+# A remote one has to get through ssh (and maybe a ProxyJump hop) first.
+LOCAL_READY_TIMEOUT = 5.0
+REMOTE_READY_TIMEOUT = 20.0
+# Consecutive failed (re)connects to a remote host before falling back to
+# the local session, so a dead host can't leave the browser on a dead view.
+REMOTE_ATTEMPTS = 3
+MAX_RETRY_DELAY = 30.0
+
+# Longest control-protocol line we hold while waiting for its newline. tmux's
+# own lines (a %output chunk, one captured row) are far shorter; a stream
+# that never ends a line — a broken or hostile remote — gets the client
+# reconnected instead of growing the server's memory.
+MAX_CONTROL_LINE = 1024 * 1024
+# And the most one command's response (everything between %begin and %end)
+# may add up to. The biggest real one, a full scrollback capture with
+# colours, is a few MB. Past this the rest of the response is dropped and
+# the command reads as failed (an empty response) — the channel itself stays
+# up, so a legitimate oversized capture doesn't cost the connection.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+# tmux -CC wraps its whole output in a DCS: the first line starts with it.
+_DCS_START = '\x1bP1000p'
 
 _ZSH_EOL_MARK_RE = re.compile(
     br'\x1b\[1m\x1b\[7m[%#]\x1b\[27m\x1b\[1m\x1b\[0m *(\r ?\r)'
@@ -297,10 +327,19 @@ def _tmux_key_from_bytes(data: bytes) -> tuple[str, int] | None:
 
 
 class TmuxControl:
-    def __init__(self, session: str = 'web'):
+    def __init__(self, session: str = 'web', host: TmuxHost = LOCAL_HOST, *,
+                 fallback: tuple[TmuxHost, str] | None = None,
+                 on_target_changed: Callable[[str, str, list], None] | None = None):
         self.session    = session
+        self.host       = host
         self.proc       = None
         self.subscribers: list = []
+        # Bumped whenever the control client moves to another host: pane ids
+        # name different panes there, so work started for the old target
+        # must not land on the new one.
+        self.target_gen = 0
+        self._fallback  = fallback
+        self._on_target_changed = on_target_changed
         self._master_fd: int | None = None
         self._buf: str  = ''
         self._pending: list[asyncio.Future] = []
@@ -308,7 +347,13 @@ class TmuxControl:
         # any later line — the only point that is ordered with %output.
         self._on_end: dict[asyncio.Future, Callable[[], None]] = {}
         self._cur_resp: list[str] = []
+        self._cur_resp_bytes = 0
+        self._resp_overflow = False
         self._in_resp: bool = False
+        self._ready = asyncio.Event()
+        self._failures = 0
+        self._next_attempt = 0.0
+        self._watch_task: asyncio.Task | None = None
         self._restart_lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
         self._decode_remainder: dict[str, str] = {}
@@ -321,72 +366,156 @@ class TmuxControl:
     # ──────────────────────────────────────── lifecycle
 
     async def start(self) -> None:
-        await self._restart_client()
+        if not await self._restart_client():
+            self._schedule_restart()
 
-    async def _restart_client(self) -> None:
+    def _alive(self) -> bool:
+        return (self._master_fd is not None and self.proc is not None
+                and self.proc.returncode is None and self._ready.is_set())
+
+    async def _restart_client(self) -> bool:
+        """(Re)attach to the current target. On repeated failure of a remote
+        host, fall back to the local session. True once attached."""
         async with self._restart_lock:
-            await self._cleanup_client()
-            await self._ensure_session_exists()
-            await self._set_window_size_mode('latest')
-            await self._set_history_limit(50000)
-            await self._attach_control_client()
+            if self._alive():
+                return True
+            if await self._connect():
+                return True
+            if (self.host.is_local or self._fallback is None
+                    or self._failures < REMOTE_ATTEMPTS):
+                return False
+            previous = self.host.name
+            self.host, self.session = self._fallback
+            self.target_gen += 1
+            self._failures, self._next_attempt = 0, 0.0
+            log.warning('host %s unreachable; falling back to the local session', previous)
+            # Pane ids mean other panes on the fallback host: keep everyone
+            # off the stream until the callback has told them about the move.
+            subscribers = self.subscribers[:]
+            self.subscribers.clear()
+            ok = await self._connect()
+            if self._on_target_changed is not None:
+                self._on_target_changed('fell_back', previous, subscribers)
+            else:
+                self.subscribers.extend(subscribers)
+            return ok
+
+    async def switch_target(self, host: TmuxHost, session: str) -> bool:
+        """Move the control client to `session` on `host`. On failure it goes
+        back to where it was and returns False."""
+        if self._restart_task and not self._restart_task.done():
+            self._restart_task.cancel()
+        async with self._restart_lock:
+            previous = (self.host, self.session)
+            self.host, self.session = host, session
+            self.target_gen += 1
+            self._failures, self._next_attempt = 0, 0.0
+            if await self._connect():
+                return True
+            self.host, self.session = previous
+            self.target_gen += 1
+            self._failures, self._next_attempt = 0, 0.0
+            reattached = await self._connect()
+        if not reattached:
+            self._schedule_restart()
+        return False
+
+    async def _connect(self) -> bool:
+        await self._cleanup_client()
+        await self._ensure_session_exists()
+        await self._set_server_options()
+        await self._attach_control_client()
+        if await self._wait_ready():
+            self._failures, self._next_attempt = 0, 0.0
+            return True
+        self._failures += 1
+        self._next_attempt = time.monotonic() + min(MAX_RETRY_DELAY, 2.0 ** self._failures)
+        log.warning('tmux control client for host=%s did not attach (attempt %d)',
+                    self.host.name, self._failures)
+        await self._cleanup_client()
+        return False
+
+    async def _wait_ready(self) -> bool:
+        proc = self.proc
+        if proc is None:
+            return False
+        timeout = LOCAL_READY_TIMEOUT if self.host.is_local else REMOTE_READY_TIMEOUT
+        ready = asyncio.ensure_future(self._ready.wait())
+        exited = asyncio.ensure_future(proc.wait())
+        try:
+            await asyncio.wait({ready, exited}, timeout=timeout,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            ready.cancel()
+            exited.cancel()
+        return self._ready.is_set() and proc.returncode is None
 
     async def _ensure_session_exists(self) -> None:
-        # Ensure session exists
-        chk = await asyncio.create_subprocess_exec(
-            'tmux', 'has-session', '-t', self.session,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await chk.wait()
-        if chk.returncode != 0:
-            new = await asyncio.create_subprocess_exec(
-                'tmux', 'new-session', '-d', '-s', self.session,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await new.wait()
+        # '=' makes the match exact; a bare name would also match a prefix.
+        rc, _, _ = await tmux_hosts.run(self.host, 'has-session', '-t', f'={self.session}')
+        if rc != 0 and rc != tmux_hosts.RC_UNREACHABLE:
+            await tmux_hosts.run(self.host, 'new-session', '-d', '-s', self.session)
 
-    async def _set_window_size_mode(self, mode: str) -> None:
+    async def _set_server_options(self) -> None:
         # Let the active browser client drive the window size via refresh-client -C.
         # Using "smallest" makes a narrow phone/control client shrink the shared
         # tmux window even when the desktop browser is the active viewer.
-        ws = await asyncio.create_subprocess_exec(
-            'tmux', 'set-option', '-g', 'window-size', mode,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await ws.wait()
-
-    async def _set_history_limit(self, limit: int) -> None:
-        proc = await asyncio.create_subprocess_exec(
-            'tmux', 'set-option', '-g', 'history-limit', str(limit),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
+        # One invocation for both: on a remote host each is an ssh round trip.
+        await tmux_hosts.run(self.host,
+                             'set-option', '-g', 'window-size', 'latest', ';',
+                             'set-option', '-g', 'history-limit', '50000')
 
     async def _attach_control_client(self) -> None:
-        # PTY pair: slave is tmux's controlling terminal
+        # PTY pair: slave is tmux's (or ssh's) controlling terminal
         master_fd, slave_fd = pty.openpty()
         _set_winsize(slave_fd, rows=50, cols=220)
+        if not self.host.is_local:
+            # Nothing may echo back before ssh switches the terminal to raw.
+            tty.setraw(slave_fd)
 
-        self.proc = await asyncio.create_subprocess_exec(
-            'tmux', '-CC', 'attach-session', '-t', self.session,
-            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-            close_fds=True,
-        )
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *self.host.control_argv(self.session),
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                close_fds=True,
+                # ssh: askpass that refuses, and no controlling terminal to
+                # prompt on instead (see tmux_hosts.ssh_env).
+                env=tmux_hosts.process_env(self.host),
+                start_new_session=not self.host.is_local,
+            )
+        except OSError as exc:
+            os.close(slave_fd)
+            os.close(master_fd)
+            log.error('could not start the tmux control client: %s', type(exc).__name__)
+            return
         os.close(slave_fd)
+        # Writes must never block the event loop: a stalled network stops
+        # ssh reading, and a full PTY would freeze every browser.
+        os.set_blocking(master_fd, False)
         self._master_fd = master_fd
 
         # Register master_fd as an asyncio readable source
         loop = asyncio.get_event_loop()
         loop.add_reader(master_fd, self._on_readable)
+        self._watch_task = asyncio.ensure_future(self._watch_proc(self.proc))
 
-        log.info('tmux -CC started, session=%s pid=%d', self.session, self.proc.pid)
+        log.info('tmux -CC started, host=%s session=%s pid=%d',
+                 self.host.name, self.session, self.proc.pid)
+
+    async def _watch_proc(self, proc) -> None:
+        # %exit covers tmux leaving on its own; a dropped ssh connection only
+        # shows up as the process going away.
+        await proc.wait()
+        if proc is self.proc and self._ready.is_set():
+            log.info('tmux control client exited rc=%s host=%s', proc.returncode, self.host.name)
+            self._schedule_restart()
 
     async def _cleanup_client(self) -> None:
         loop = asyncio.get_event_loop()
+        self._ready.clear()
+        if self._watch_task is not None and self._watch_task is not asyncio.current_task():
+            self._watch_task.cancel()
+        self._watch_task = None
         if self._master_fd is not None:
             try:
                 loop.remove_reader(self._master_fd)
@@ -412,6 +541,8 @@ class TmuxControl:
 
         self._buf = ''
         self._cur_resp = []
+        self._cur_resp_bytes = 0
+        self._resp_overflow = False
         self._in_resp = False
         self._decode_remainder = {}
         self._prefix_key_names = None
@@ -423,20 +554,40 @@ class TmuxControl:
                 fut.set_result('')
 
     async def _ensure_connected(self) -> None:
-        if self._master_fd is not None and self.proc is not None and self.proc.returncode is None:
+        if self._alive():
             return
-        await self._restart_client()
+        if self._restart_lock.locked():
+            # Someone is already (re)connecting; wait for that instead.
+            async with self._restart_lock:
+                return
+        if time.monotonic() < self._next_attempt:
+            # Backing off from a dead host: fail fast instead of making every
+            # keystroke wait out a connect timeout.
+            self._schedule_restart()
+            return
+        if not await self._restart_client():
+            self._schedule_restart()
 
     def _schedule_restart(self) -> None:
         if self._restart_task and not self._restart_task.done():
             return
-        self._restart_task = asyncio.create_task(self._restart_client())
+        self._restart_task = asyncio.ensure_future(self._restart_loop())
+
+    async def _restart_loop(self) -> None:
+        while True:
+            delay = self._next_attempt - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if await self._restart_client():
+                return
 
     # ──────────────────────────────────────── async I/O
 
     def _on_readable(self) -> None:
         try:
             data = os.read(self._master_fd, 4096)
+        except BlockingIOError:
+            return
         except OSError:
             asyncio.get_event_loop().remove_reader(self._master_fd)
             log.warning('tmux PTY master closed')
@@ -447,17 +598,53 @@ class TmuxControl:
         while '\n' in self._buf:
             line, self._buf = self._buf.split('\n', 1)
             self._handle_line(line.rstrip('\r'))
+        if len(self._buf) > MAX_CONTROL_LINE:
+            log.warning('control client (host=%s) sent a line over %d bytes; reconnecting',
+                        self.host.name, MAX_CONTROL_LINE)
+            self._buf = ''
+            asyncio.ensure_future(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        await self._cleanup_client()
+        self._schedule_restart()
+
+    async def _write(self, data: bytes) -> None:
+        """Write all of `data` without blocking the loop; OSError if the
+        client stops reading for too long."""
+        fd = self._master_fd
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 5.0
+        while data:
+            if fd is None or fd != self._master_fd:
+                raise OSError('control client went away')
+            try:
+                n = os.write(fd, data)
+                data = data[n:]
+                continue
+            except BlockingIOError:
+                pass
+            writable = loop.create_future()
+            loop.add_writer(fd, lambda: writable.done() or writable.set_result(None))
+            try:
+                await asyncio.wait_for(writable, timeout=max(0.0, deadline - loop.time()))
+            except asyncio.TimeoutError:
+                raise OSError('control client is not reading') from None
+            finally:
+                with contextlib.suppress(Exception):
+                    loop.remove_writer(fd)
 
     # ──────────────────────────────────────── commands
 
-    async def send_command(self, cmd: str) -> str:
+    async def send_command(self, cmd: str, *, target_gen: int | None = None) -> str:
         """Send one tmux command, await %begin/%end response."""
-        return (await self.send_command_list([cmd]))[0]
+        return (await self.send_command_list([cmd], target_gen=target_gen))[0]
 
     async def send_command_list(
         self,
         cmds: list[str],
         on_end: Callable[[list[str]], None] | None = None,
+        *,
+        target_gen: int | None = None,
     ) -> list[str]:
         """Send commands as one `a ; b` line and return each one's response.
 
@@ -469,11 +656,16 @@ class TmuxControl:
         on_end, if given, gets the responses synchronously while the last %end
         is handled: anything it broadcasts is ordered exactly after the %output
         that preceded the commands and before the %output that follows them.
+
+        target_gen, if given, drops the commands when the control client has
+        moved to another host since the caller looked at it.
         """
         empty = [''] * len(cmds)
         for attempt in range(2):
             await self._ensure_connected()
-            if self._master_fd is None:
+            if not self._alive():
+                return empty
+            if target_gen is not None and target_gen != self.target_gen:
                 return empty
 
             loop = asyncio.get_event_loop()
@@ -482,13 +674,14 @@ class TmuxControl:
             if on_end is not None:
                 self._on_end[futs[-1]] = lambda futs=futs: on_end([f.result() for f in futs])
             try:
-                os.write(self._master_fd, (' ; '.join(cmds) + '\n').encode('utf-8'))
+                await self._write((' ; '.join(cmds) + '\n').encode('utf-8'))
             except OSError as e:
                 self._drop_pending(futs)
                 log.error('send_command write error: %s', e)
-                if attempt == 0:
-                    await self._restart_client()
+                await self._cleanup_client()
+                if attempt == 0 and await self._restart_client():
                     continue
+                self._schedule_restart()
                 return empty
 
             try:
@@ -497,9 +690,10 @@ class TmuxControl:
                 ))
             except asyncio.TimeoutError:
                 self._drop_pending(futs)
-                if attempt == 0:
-                    await self._restart_client()
+                await self._cleanup_client()
+                if attempt == 0 and await self._restart_client():
                     continue
+                self._schedule_restart()
                 return empty
         return empty
 
@@ -515,6 +709,13 @@ class TmuxControl:
             return self._prefix_key_names
 
         names: set[str] = set()
+        version = tmux_hosts.parse_tmux_version(
+            'tmux ' + (await self.send_command('display-message -p "#{version}"')).strip())
+        if version is not None and version < tmux_hosts.PREFIX_ROUTING_TMUX:
+            # No send-keys -K before 3.4 (an older remote host): the prefix
+            # key then reaches the pane like any other key.
+            self._prefix_key_names = names
+            return names
         for option in ('prefix', 'prefix2'):
             value = (await self.send_command(f'show-options -gv {option}')).strip()
             if value and value != 'None':
@@ -522,7 +723,7 @@ class TmuxControl:
         self._prefix_key_names = names or {'C-b'}
         return self._prefix_key_names
 
-    async def _send_literal_input(self, pane_id: str, data: bytes) -> None:
+    async def _send_literal_input(self, pane_id: str, data: bytes, target_gen: int) -> None:
         if not data:
             return
         chunk_size = 100
@@ -530,19 +731,20 @@ class TmuxControl:
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i + chunk_size]
             hex_args = ' '.join(f'{b:02x}' for b in chunk)
-            await self.send_command(f'send-keys{target} -H {hex_args}')
+            await self.send_command(f'send-keys{target} -H {hex_args}', target_gen=target_gen)
 
-    async def _send_prefix_key(self, data: bytes) -> int:
+    async def _send_prefix_key(self, data: bytes, target_gen: int) -> int:
         key = _tmux_key_from_bytes(data)
         if not key:
             self._prefix_pending = False
             return 0
         key_name, used = key
-        await self.send_command(f'send-keys -K {_tmux_quote(key_name)}')
+        await self.send_command(f'send-keys -K {_tmux_quote(key_name)}', target_gen=target_gen)
         self._prefix_pending = False
         return used
 
-    async def write_input(self, pane_id: str, data: bytes) -> None:
+    async def write_input(self, pane_id: str, data: bytes, *,
+                          target_gen: int | None = None) -> None:
         """Inject input into a pane, preserving tmux prefix key bindings.
 
         Normal input goes directly to the selected pane. When the configured
@@ -552,13 +754,17 @@ class TmuxControl:
         if not data:
             return
 
+        # The pane id came from the browser's view of one host (target_gen);
+        # if the client moves to another host, the same id is someone else's
+        # pane, so every command below is dropped from then on.
+        gen = self.target_gen if target_gen is None else target_gen
         prefix_keys = await self._ensure_prefix_key_names()
         literal_start = 0
         i = 0
         while i < len(data):
             if self._prefix_pending:
-                await self._send_literal_input(pane_id, data[literal_start:i])
-                used = await self._send_prefix_key(data[i:])
+                await self._send_literal_input(pane_id, data[literal_start:i], gen)
+                used = await self._send_prefix_key(data[i:], gen)
                 if used:
                     i += used
                     literal_start = i
@@ -567,8 +773,8 @@ class TmuxControl:
 
             key = _tmux_key_from_bytes(data[i:])
             if key and key[0] in prefix_keys:
-                await self._send_literal_input(pane_id, data[literal_start:i])
-                await self.send_command('switch-client -T prefix')
+                await self._send_literal_input(pane_id, data[literal_start:i], gen)
+                await self.send_command('switch-client -T prefix', target_gen=gen)
                 self._prefix_pending = True
                 i += key[1]
                 literal_start = i
@@ -576,7 +782,7 @@ class TmuxControl:
 
             i += 1
 
-        await self._send_literal_input(pane_id, data[literal_start:])
+        await self._send_literal_input(pane_id, data[literal_start:], gen)
 
     async def snapshot_pane(self, pane_id: str, deliver: Callable[[dict], None]) -> None:
         """Visible screen, cursor and terminal modes of one pane, atomically.
@@ -689,6 +895,7 @@ class TmuxControl:
             panes.append({'id': pid, 'active': active, 'cols': cols, 'rows': rows, 'command': cmd})
 
         return {
+            'host':        self.host.name,
             'session':     self.session,
             'sessions':    sessions,
             'windows':     windows,
@@ -824,13 +1031,20 @@ class TmuxControl:
         return False
 
     def _handle_line(self, line: str) -> None:
+        if line.startswith(_DCS_START):
+            line = line[len(_DCS_START):]
+        if not self._ready.is_set():
+            self._handle_attach_line(line)
+            return
         # ── response demux ──
         if line.startswith('%begin '):
             self._in_resp, self._cur_resp = True, []
+            self._cur_resp_bytes, self._resp_overflow = 0, False
             return
         if line.startswith(('%end ', '%error ')):
             self._in_resp = False
-            result = '\n'.join(self._cur_resp)
+            result = '' if self._resp_overflow else '\n'.join(self._cur_resp)
+            self._cur_resp_bytes, self._resp_overflow = 0, False
             if self._pending:
                 fut = self._pending.pop(0)
                 if not fut.done():
@@ -846,10 +1060,35 @@ class TmuxControl:
         if self._handle_notification_line(line):
             return
         if self._in_resp:
-            self._cur_resp.append(line)
+            self._add_response_line(line)
             return
         if line.startswith('%'):
             log.debug('unhandled control line: %s', line[:200])
+
+    def _add_response_line(self, line: str) -> None:
+        if self._resp_overflow:
+            return
+        self._cur_resp_bytes += len(line) + 1
+        if self._cur_resp_bytes > MAX_RESPONSE_BYTES:
+            log.warning('control client (host=%s): response over %d bytes; dropping it',
+                        self.host.name, MAX_RESPONSE_BYTES)
+            self._resp_overflow = True
+            self._cur_resp = []
+            return
+        self._cur_resp.append(line)
+
+    def _handle_attach_line(self, line: str) -> None:
+        """Lines before the attach is answered. The attach command's own
+        %begin/%end comes first and belongs to no pending command; anything
+        that isn't control protocol is ssh or the remote shell talking."""
+        if line.startswith('%end '):
+            self._ready.set()
+        elif line.startswith('%exit'):
+            pass
+        elif line and not line.startswith('%') and line != '\x1b\\':
+            # Not terminal content: nothing is attached yet.
+            log.warning('control client (host=%s): %s',
+                        self.host.name, tmux_hosts.sanitize(line))
 
     # ──────────────────────────────────────── clipboard
 
@@ -868,27 +1107,15 @@ class TmuxControl:
     async def _forward_paste_buffer(self, name: str, seq: int) -> None:
         # save-buffer gives the exact bytes; show-buffer through the control
         # channel would lose the trailing newline in the %begin/%end framing.
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                'tmux', 'save-buffer', '-b', name, '-',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except OSError as e:
-            log.warning('could not read paste buffer %s: %s', name, e)
+        gen = self.target_gen
+        rc, text, _ = await tmux_hosts.run(self.host, 'save-buffer', '-b', name, '-')
+        # A later copy finished first or is still on its way; it wins. And a
+        # buffer read from a host we have since left is that host's, not ours.
+        if seq != self._clipboard_seq or gen != self.target_gen:
             return
-        try:
-            data, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        except asyncio.TimeoutError:
-            log.warning('reading paste buffer %s timed out', name)
-            proc.kill()
-            await proc.wait()
+        if rc != 0 or not text:
             return
-        # A later copy finished first or is still on its way; it wins.
-        if seq != self._clipboard_seq:
-            return
-        if proc.returncode != 0 or not data:
-            return
+        data = text.encode('utf-8', errors='surrogateescape')
         if len(data) > CLIPBOARD_MAX_BYTES:
             log.info('paste buffer %s is %d bytes, not forwarded to the clipboard', name, len(data))
             return

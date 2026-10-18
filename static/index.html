@@ -175,6 +175,24 @@
       </div>
     </div>
 
+    <!-- ssh asks for a key passphrase or password while signing in to a host. -->
+    <div id="host-auth-sheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-backdrop"></div>
+      <form class="sheet-card" id="host-auth-form" role="dialog" aria-modal="true" aria-labelledby="host-auth-title">
+        <div class="sheet-head">
+          <div id="host-auth-title">Sign in</div>
+          <button id="host-auth-close" class="sheet-close" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="sheet-text" id="host-auth-text"></div>
+        <input id="host-auth-input" type="password" autocomplete="off" autocapitalize="off"
+               autocorrect="off" spellcheck="false" enterkeyhint="go">
+        <div class="sheet-actions">
+          <button id="host-auth-submit" type="submit">Sign in</button>
+          <button id="host-auth-cancel" type="button">Cancel</button>
+        </div>
+      </form>
+    </div>
+
     <!-- Shown when restoring a layout whose session name is already taken. -->
     <div id="layout-conflict-sheet" class="sheet hidden" aria-hidden="true">
       <div class="sheet-backdrop"></div>

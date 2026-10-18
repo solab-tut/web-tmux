@@ -233,6 +233,11 @@ let ws             = null;
 let panes          = {};     // pane_id → { term, fitAddon, el, cached }
 let activePaneId   = null;
 let currentSession = '';     // tmux session currently displayed
+let currentHost    = 'local'; // host the server's control client is on
+// Which host's pane ids the panes on screen are. Echoed on everything aimed
+// at a pane, so the server can drop what was meant for a host it has left.
+let currentGen     = 0;
+let hostsModel     = [];     // [{ host, active, reachable, code, sessions }]
 let currentWinIdx  = 0;      // tmux window index currently displayed
 let currentWinId   = '';     // tmux window id currently displayed, e.g. @42
 let totalCols      = 80;
@@ -405,7 +410,7 @@ function sendPaneInput(data, paneId) {
   if (!targetPaneId) return;
   markClientActive();
   splitUtf8Chunks(data).forEach((chunk) => {
-    ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data: chunk }));
+    ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data: chunk, gen: currentGen }));
   });
 }
 
@@ -632,7 +637,7 @@ function scheduleSnapshotRefresh(paneIds) {
       _pendingSnapshotPanes.add(paneId);
       armSnapshotWatchdog(paneId);
       _snapshotsInFlight.set(paneId, (_snapshotsInFlight.get(paneId) || 0) + 1);
-      ws.send(JSON.stringify({ type: 'get_snapshot', pane: paneId }));
+      ws.send(JSON.stringify({ type: 'get_snapshot', pane: paneId, gen: currentGen }));
     });
   }, delay);
 }
@@ -1118,6 +1123,11 @@ function handleMsg(msg) {
     case 'layout_error':    onLayoutError(msg);    break;
     case 'restore_result':  onRestoreResult(msg);  break;
     case 'clipboard':       onClipboard(msg);      break;
+    case 'hosts':           onHosts(msg);          break;
+    case 'host_error':      onHostError(msg);      break;
+    case 'save_result':     onSaveResult(msg);     break;
+    case 'host_auth_prompt': onHostAuthPrompt(msg); break;
+    case 'host_auth_closed': onHostAuthClosed(msg); break;
   }
 }
 
@@ -1126,7 +1136,7 @@ function onState(msg) {
     currentSession = msg.session;
     document.getElementById('session-name').textContent = msg.session;
   }
-  if (msg.sessions) renderSessionList(msg.sessions);
+  if (msg.sessions) updateSessions(msg);
   if (msg.windows) {
     renderWindowList(msg.windows);
     updateCurrentWindow(msg.windows);
@@ -1171,7 +1181,9 @@ function onInit(msg) {
   resetResizeCache();
   currentSession = msg.session || '';
   document.getElementById('session-name').textContent = msg.session;
-  renderSessionList(msg.sessions);
+  _sessionNote = '';
+  dropHostAuthPrompts();   // a reconnect means the server gave up on them
+  updateSessions(msg);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
   updateCurrentWindow(msg.windows);
@@ -1186,7 +1198,7 @@ function onWindowSwitched(msg) {
     currentSession = msg.session;
     document.getElementById('session-name').textContent = msg.session;
   }
-  renderSessionList(msg.sessions);
+  updateSessions(msg);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
   updateCurrentWindow(msg.windows);
@@ -1338,13 +1350,13 @@ function onWindowsChanged(msg) {
   // tmux control notifications only include the target/name, not the full
   // sidebar model, so ask the server for a fresh windows/panes snapshot.
   scheduleStateRefresh();
-  if (msg.sessions) renderSessionList(msg.sessions);
+  if (msg.sessions) updateSessions(msg);
   if (msg.windows) renderWindowList(msg.windows);
 }
 
 function onSessionsChanged(msg) {
   scheduleStateRefresh();
-  if (msg.sessions) renderSessionList(msg.sessions);
+  if (msg.sessions) updateSessions(msg);
 }
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
@@ -1620,7 +1632,8 @@ function requestInitialHistory(paneId) {
   // Sent before the pane's first get_snapshot, and the server handles a
   // connection's messages strictly in order, so the history reply always
   // arrives first and the snapshot lands on top of it.
-  ws.send(JSON.stringify({ type: 'get_history', pane: paneId, lines: INITIAL_HISTORY_LINES }));
+  ws.send(JSON.stringify({ type: 'get_history', pane: paneId, lines: INITIAL_HISTORY_LINES,
+                           gen: currentGen }));
 }
 
 function destroyPane(paneId) {
@@ -1661,7 +1674,7 @@ function selectPane(paneId, opts) {
   setActivePaneVisual(paneId);
   focusActivePane({ retries: 2 });
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const payload = { type: 'select_pane', pane: paneId };
+    const payload = { type: 'select_pane', pane: paneId, gen: currentGen };
     if (options.forceZoom)  payload.force_zoom  = true;
     if (options.toggleZoom) payload.toggle_zoom = true;
     ws.send(JSON.stringify(payload));
@@ -1781,62 +1794,185 @@ function renderWindowList(windows) {
     });
 }
 
-function renderSessionList(sessions) {
+// ─── Hosts & sessions ─────────────────────────────────────────────────────────
+// The server's one control client is on one host at a time (`currentHost`);
+// the list shows every configured host's sessions, and picking a session on
+// another host moves the control client — and every open browser — there.
+
+let _sessionNote = '';
+let _sessionNoteTimer = null;
+
+function sessionKey(host, name) {
+  return host + '\0' + name;
+}
+
+// A view message carries the active host's sessions, plus `hosts` from a
+// server that knows about hosts. An older one sends only `sessions`.
+function updateSessions(msg) {
+  if (msg.host) currentHost = msg.host;
+  if (Number.isInteger(msg.gen)) currentGen = msg.gen;
+  if (Array.isArray(msg.hosts) && msg.hosts.length) {
+    hostsModel = msg.hosts;
+  } else if (msg.sessions) {
+    const others = hostsModel.filter((h) => h.host !== currentHost);
+    hostsModel = [{ host: currentHost, active: true, reachable: true, code: '', sessions: msg.sessions },
+                  ...others];
+  }
+  updateHostLabel();
+  renderSessionList();
+}
+
+function onHosts(msg) {
+  if (!Array.isArray(msg.hosts)) return;
+  hostsModel = msg.hosts;
+  renderSessionList();
+}
+
+const HOST_ERRORS = {
+  unreachable:      'is unreachable',
+  auth_required:    'needs a password or key passphrase',
+  auth_failed:      'did not accept the password or passphrase',
+  auth_cancelled:   'sign-in cancelled',
+  unsupported_tmux: 'has no tmux, or one older than 3.2',
+  session_gone:     'no longer has that session',
+  switch_failed:    'could not be attached',
+  fell_back:        'was lost — back on this machine',
+  busy:             'is busy; try again in a moment',
+  error:            'answered with an error',
+};
+
+function onHostError(msg) {
+  showSessionNote(`${msg.host} ${HOST_ERRORS[msg.code] || 'failed'}`);
+}
+
+function showSessionNote(text) {
+  _sessionNote = text;
+  clearTimeout(_sessionNoteTimer);
+  _sessionNoteTimer = setTimeout(() => { _sessionNote = ''; renderSessionList(); }, 6000);
+  renderSessionList();
+}
+
+function updateHostLabel() {
+  const remote = currentHost && currentHost !== 'local';
+  const label = document.getElementById('topbar-host');
+  label.textContent = remote ? `${_host} → ${currentHost}` : _host;
+  label.classList.toggle('remote', !!remote);
+  document.title = (remote ? currentHost : _host) + ' - web-tmux';
+}
+
+function renderSessionList() {
   const list = document.getElementById('session-list');
   list.innerHTML = '';
-  [...(sessions || [])]
-    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
-    .forEach((s) => {
-    const div = document.createElement('div');
-    div.className = 'session-item' + (s.active ? ' active' : '');
-    div.dataset.sessionName = s.name;
-    if (_editingSessionName === s.name) {
-      div.classList.add('editing');
-      div.appendChild(buildInlineEditor({
-        kind: 'session',
-        value: s.name,
-        label: s.name,
-        onSave: (name) => renameSession(s.name, name),
-        onCancel: () => {
-          _editingSessionName = '';
-          renderSessionList(sessions);
-        },
-      }));
-    } else if (_confirmDeleteSession === s.name) {
-      div.classList.add('confirming');
-      div.appendChild(buildInlineConfirm({
-        label: `Kill session "${s.name}"?`,
-        onConfirm: () => {
-          _confirmDeleteSession = '';
-          killSession(s.name);
-        },
-        onCancel: () => {
-          _confirmDeleteSession = '';
-          renderSessionList(sessions);
-        },
-      }));
-    } else {
-      div.tabIndex = 0;
-      div.innerHTML = `<span class="session-name">${escHtml(`(${s.windows}) ${s.name}`)}</span>`;
-      div.title = s.attached ? 'attached' : 'detached';
-      div.appendChild(buildDeleteButton(`Kill session ${s.name}`, () => {
-        _editingSessionName = '';
-        _confirmDeleteSession = s.name;
-        renderSessionList(sessions);
-      }));
-      div.appendChild(buildRenameButton(`Rename session ${s.name}`, () => {
-        _confirmDeleteSession = '';
-        _editingSessionName = s.name;
-        renderSessionList(sessions);
-      }));
-      div.addEventListener('click', () => {
-        selectSession(s.name);
-        if (isMobileWidth()) setSidebarOpen(false);
-        focusActivePane();
-      });
-    }
-    list.appendChild(div);
+  if (_sessionNote) {
+    const note = document.createElement('div');
+    note.className = 'session-note';
+    note.textContent = _sessionNote;
+    list.appendChild(note);
+  }
+  // With no ssh hosts configured the list looks exactly as it always has.
+  const grouped = hostsModel.length > 1 || hostsModel.some((h) => h.host !== 'local');
+  hostsModel.forEach((h) => {
+    if (grouped) list.appendChild(buildHostHeader(h));
+    if (h.reachable === false) return;
+    [...(h.sessions || [])]
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
+      .forEach((s) => list.appendChild(buildSessionItem(h.host, s)));
+  });
+}
+
+function buildHostHeader(h) {
+  const div = document.createElement('div');
+  const state = h.reachable === false ? 'down' : (h.reachable ? 'up' : 'unknown');
+  div.className = `host-head host-${state}` + (h.host === currentHost ? ' current' : '');
+  const label = h.host === 'local' ? _host : h.host;
+  div.innerHTML =
+    `<span class="host-dot" aria-hidden="true"></span>` +
+    `<span class="host-name">${escHtml(label)}</span>`;
+  div.title = h.reachable === false ? `${label} ${HOST_ERRORS[h.code] || 'is unavailable'}` : label;
+  if (h.reachable === false && h.code === 'auth_required') {
+    const key = document.createElement('button');
+    key.type = 'button';
+    key.className = 'side-btn';
+    key.textContent = '🔑';
+    key.title = `Sign in to ${label}`;
+    key.addEventListener('click', () => connectHost(h.host));
+    div.appendChild(key);
+  } else if (h.reachable === false) {
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'side-btn';
+    retry.textContent = '↻';
+    retry.title = `Retry ${label}`;
+    retry.addEventListener('click', () => wsSendType('refresh_hosts'));
+    div.appendChild(retry);
+  } else {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'side-btn';
+    add.textContent = '+';
+    add.title = `New session on ${label}`;
+    add.addEventListener('click', () => {
+      newSession(h.host);
+      focusActivePane();
     });
+    div.appendChild(add);
+  }
+  return div;
+}
+
+function buildSessionItem(host, s) {
+  const key = sessionKey(host, s.name);
+  const isActive = host === currentHost && s.name === currentSession;
+  const div = document.createElement('div');
+  div.className = 'session-item' + (isActive ? ' active' : '');
+  div.dataset.sessionName = s.name;
+  div.dataset.sessionHost = host;
+  if (_editingSessionName === key) {
+    div.classList.add('editing');
+    div.appendChild(buildInlineEditor({
+      kind: 'session',
+      value: s.name,
+      label: s.name,
+      onSave: (name) => renameSession(host, s.name, name),
+      onCancel: () => {
+        _editingSessionName = '';
+        renderSessionList();
+      },
+    }));
+  } else if (_confirmDeleteSession === key) {
+    div.classList.add('confirming');
+    div.appendChild(buildInlineConfirm({
+      label: `Kill session "${s.name}"?`,
+      onConfirm: () => {
+        _confirmDeleteSession = '';
+        killSession(host, s.name);
+      },
+      onCancel: () => {
+        _confirmDeleteSession = '';
+        renderSessionList();
+      },
+    }));
+  } else {
+    div.tabIndex = 0;
+    div.innerHTML = `<span class="session-name">${escHtml(`(${s.windows}) ${s.name}`)}</span>`;
+    div.title = s.attached ? 'attached' : 'detached';
+    div.appendChild(buildDeleteButton(`Kill session ${s.name}`, () => {
+      _editingSessionName = '';
+      _confirmDeleteSession = key;
+      renderSessionList();
+    }));
+    div.appendChild(buildRenameButton(`Rename session ${s.name}`, () => {
+      _confirmDeleteSession = '';
+      _editingSessionName = key;
+      renderSessionList();
+    }));
+    div.addEventListener('click', () => {
+      selectSession(host, s.name);
+      if (isMobileWidth()) setSidebarOpen(false);
+      focusActivePane();
+    });
+  }
+  return div;
 }
 
 function renderPaneList(panesInfo, activePane) {
@@ -1864,7 +2000,7 @@ function renderPaneList(panesInfo, activePane) {
 function switchWindow(idx) {
   markClientActive();
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'select_window', window: idx }));
+    ws.send(JSON.stringify({ type: 'select_window', window: idx, host: currentHost }));
   }
 }
 
@@ -1873,22 +2009,89 @@ function renameWindow(idx, name) {
   if (!nextName || !ws || ws.readyState !== WebSocket.OPEN) return;
   _editingWindowIndex = null;
   markClientActive();
-  ws.send(JSON.stringify({ type: 'rename_window', window: idx, name: nextName }));
+  ws.send(JSON.stringify({ type: 'rename_window', window: idx, name: nextName, host: currentHost }));
 }
 
-function selectSession(name) {
+function selectSession(host, name) {
   markClientActive();
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'select_session', session: name }));
+    if (host !== currentHost) showSessionNote(`Connecting to ${host}…`);
+    ws.send(JSON.stringify({ type: 'select_session', session: name, host }));
   }
 }
 
-function renameSession(currentName, nextName) {
+function connectHost(host) {
+  markClientActive();
+  showSessionNote(`Signing in to ${host}…`);
+  wsSendType('connect_host', { host });
+}
+
+// ─── Host sign-in ─────────────────────────────────────────────────────────────
+// ssh's own prompts ("Enter passphrase for key …", "me@box's password:"),
+// one at a time, only on the browser that asked to connect. The answer goes
+// straight back over the WebSocket and is not kept here either.
+
+let _authPrompts = [];   // [{ id, host, prompt }], the first one is on screen
+
+function onHostAuthPrompt(msg) {
+  if (typeof msg.id !== 'string') return;
+  _authPrompts.push({ id: msg.id, host: String(msg.host || ''), prompt: String(msg.prompt || '') });
+  if (_authPrompts.length === 1) showHostAuthPrompt();
+}
+
+function onHostAuthClosed(msg) {
+  const wasShown = _authPrompts.length && _authPrompts[0].id === msg.id;
+  _authPrompts = _authPrompts.filter((p) => p.id !== msg.id);
+  if (wasShown) showHostAuthPrompt();
+}
+
+function showHostAuthPrompt() {
+  const sheet = document.getElementById('host-auth-sheet');
+  const input = document.getElementById('host-auth-input');
+  input.value = '';
+  const current = _authPrompts[0];
+  if (!current) {
+    sheet.classList.add('hidden');
+    sheet.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  document.getElementById('host-auth-title').textContent = `Sign in to ${current.host}`;
+  document.getElementById('host-auth-text').textContent = current.prompt || 'Password:';
+  sheet.classList.remove('hidden');
+  sheet.setAttribute('aria-hidden', 'false');
+  setTimeout(() => input.focus(), 0);
+}
+
+function answerHostAuth(cancel) {
+  const current = _authPrompts.shift();
+  const input = document.getElementById('host-auth-input');
+  const answer = input.value;
+  input.value = '';
+  if (current) {
+    wsSend('host_auth_answer', cancel ? { id: current.id, cancel: true }
+                                      : { id: current.id, answer });
+  }
+  showHostAuthPrompt();
+  if (!_authPrompts.length) focusActivePane();
+}
+
+function dropHostAuthPrompts() {
+  _authPrompts = [];
+  showHostAuthPrompt();
+}
+
+function newSession(host) {
+  markClientActive();
+  if (host !== currentHost) showSessionNote(`Connecting to ${host}…`);
+  wsSendType('new_session', { host });
+}
+
+function renameSession(host, currentName, nextName) {
   const trimmed = (nextName || '').trim();
   if (!trimmed || !ws || ws.readyState !== WebSocket.OPEN) return;
   _editingSessionName = '';
   markClientActive();
-  ws.send(JSON.stringify({ type: 'rename_session', session: currentName, name: trimmed }));
+  ws.send(JSON.stringify({ type: 'rename_session', session: currentName, name: trimmed, host }));
 }
 
 function buildRenameButton(label, onClick) {
@@ -1933,12 +2136,12 @@ function buildDeleteButton(label, onClick) {
   return button;
 }
 
-function killSession(name) {
-  ws.send(JSON.stringify({ type: 'kill_session', session: name }));
+function killSession(host, name) {
+  ws.send(JSON.stringify({ type: 'kill_session', session: name, host }));
 }
 
 function killWindow(idx) {
-  ws.send(JSON.stringify({ type: 'kill_window', window: idx }));
+  ws.send(JSON.stringify({ type: 'kill_window', window: idx, host: currentHost }));
 }
 
 function buildInlineConfirm({ label, confirmText = 'delete', onConfirm, onCancel }) {
@@ -2037,7 +2240,9 @@ function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
 function layoutMeta(slot) {
   const when = slot.saved_at ? slot.saved_at.slice(5, 16).replace('T', ' ') : '';
   const sessions = `${slot.sessions} session${slot.sessions === 1 ? '' : 's'}`;
-  return `${sessions} · ${slot.windows}w/${slot.panes}p${when ? ' · ' + when : ''}`;
+  const remotes = (slot.hosts || []).filter((h) => h !== 'local');
+  const hosts = remotes.length ? ` · +${remotes.join(', ')}` : '';
+  return `${sessions}${hosts} · ${slot.windows}w/${slot.panes}p${when ? ' · ' + when : ''}`;
 }
 
 function renderLayoutList() {
@@ -2159,6 +2364,17 @@ function onLayoutConflict(msg) {
   setLayoutConflictOpen(true);
 }
 
+function restoredLabel(s) {
+  return s.host && s.host !== 'local' ? `${s.host}:${s.session}` : s.session;
+}
+
+const RESTORE_REASONS = {
+  unreachable:         'unreachable',
+  auth_required:       'not signed in',
+  unsupported_tmux:    'no usable tmux',
+  host_not_configured: 'host not configured',
+};
+
 function onRestoreResult(msg) {
   const sessions = msg.sessions || [];
   const restored = sessions.filter((s) => s.status === 'restored');
@@ -2166,9 +2382,18 @@ function onRestoreResult(msg) {
   const failed = sessions.filter((s) => s.status === 'failed');
   if (!skipped.length && !failed.length) return;   // full success stays quiet
   const details = [];
-  if (skipped.length) details.push(`skipped: ${skipped.map((s) => s.session).join(', ')}`);
-  if (failed.length) details.push(`failed: ${failed.map((s) => s.session).join(', ')}`);
+  if (skipped.length) details.push(`skipped: ${skipped.map(restoredLabel).join(', ')}`);
+  if (failed.length) {
+    details.push(`failed: ${failed.map((s) =>
+      restoredLabel(s) + (RESTORE_REASONS[s.reason] ? ` (${RESTORE_REASONS[s.reason]})` : '')
+    ).join(', ')}`);
+  }
   showLayoutNote(`Restored ${restored.length}/${sessions.length} — ${details.join(' — ')}`);
+}
+
+function onSaveResult(msg) {
+  const skipped = msg.skipped_hosts || [];
+  if (skipped.length) showLayoutNote(`Saved without ${skipped.join(', ')} (unreachable)`);
 }
 
 function onLayoutError(msg) {
@@ -2272,7 +2497,7 @@ function moveSidebarFocus(list, delta) {
 function activateSidebarItem(item) {
   if (!item || item.classList.contains('editing')) return;
   if (item.classList.contains('session-item')) {
-    selectSession(item.dataset.sessionName || '');
+    selectSession(item.dataset.sessionHost || currentHost, item.dataset.sessionName || '');
   } else if (item.classList.contains('window-item')) {
     switchWindow(Number(item.dataset.windowIndex));
   } else if (item.classList.contains('pane-item')) {
@@ -2325,11 +2550,11 @@ function wsSend(type, extra) {
 }
 
 document.getElementById('btn-new-window').addEventListener('click', () => {
-  wsSendType('new_window');
+  wsSendType('new_window', { host: currentHost });
   focusActivePane();
 });
 document.getElementById('btn-new-session').addEventListener('click', () => {
-  wsSendType('new_session');
+  newSession(currentHost);
   focusActivePane();
 });
 document.getElementById('btn-save-layout').addEventListener('click', () => {
@@ -2357,12 +2582,25 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   closeLayoutConflict();
 }, true);   // capture, so xterm doesn't swallow it first
+document.getElementById('host-auth-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  answerHostAuth(false);
+});
+document.getElementById('host-auth-cancel').addEventListener('click', () => answerHostAuth(true));
+document.getElementById('host-auth-close').addEventListener('click', () => answerHostAuth(true));
+document.querySelector('#host-auth-sheet .sheet-backdrop')
+  .addEventListener('click', () => answerHostAuth(true));
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !_authPrompts.length) return;
+  ev.preventDefault();
+  answerHostAuth(true);
+}, true);
 document.getElementById('btn-split-h').addEventListener('click', () => {
-  wsSendType('split_window', { direction: 'h', pane: activePaneId || '' });
+  wsSendType('split_window', { direction: 'h', pane: activePaneId || '', gen: currentGen });
   focusActivePane();
 });
 document.getElementById('btn-split-v').addEventListener('click', () => {
-  wsSendType('split_window', { direction: 'v', pane: activePaneId || '' });
+  wsSendType('split_window', { direction: 'v', pane: activePaneId || '', gen: currentGen });
   focusActivePane();
 });
 
@@ -2895,8 +3133,7 @@ HistoryOverlay.init({
 });
 
 const _host = location.hostname.split('.')[0];
-document.title = _host + ' - web-tmux';
-document.getElementById('topbar-host').textContent = _host;
+updateHostLabel();
 
 initTheme();
 initFontSize();

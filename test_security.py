@@ -78,7 +78,7 @@ class MessageValidationTest(unittest.TestCase):
     def setUp(self):
         self.targets = patch.multiple(
             server,
-            _allowed_sessions={'safe'},
+            _allowed_sessions={'local': {'safe'}},
             _allowed_windows={1},
             _allowed_panes={'%1'},
         )
@@ -89,7 +89,7 @@ class MessageValidationTest(unittest.TestCase):
 
     def test_valid_input(self):
         msg = server._validated_message(
-            json.dumps({'type': 'input', 'pane': '%1', 'data': 'hello'})
+            json.dumps({'type': 'input', 'pane': '%1', 'data': 'hello', 'gen': 0})
         )
         self.assertEqual(msg['pane'], '%1')
 
@@ -119,6 +119,7 @@ class MessageValidationTest(unittest.TestCase):
                 'type': 'input',
                 'pane': '%1',
                 'data': 'x' * (server.MAX_INPUT_BYTES + 1),
+                'gen': 0,
             }))
         with self.assertRaises(server.PolicyViolation):
             server._validated_message(json.dumps({

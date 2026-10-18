@@ -5,8 +5,9 @@ you saved, its window names, split layouts, and each pane's working
 directory. Running commands and screen contents are not captured — restoring
 gives you the same sessions and frames back, with fresh shells in them.
 
-A snapshot covers *all* sessions that were open at save time, each restored
-under its own original name. This is meant for "bring my sessions back after
+A snapshot covers *all* sessions that were open at save time, on every host
+that answered (this machine and the ssh hosts in WEB_TMUX_SSH_HOSTS), each
+restored on its own host under its own original name. This is meant for "bring my sessions back after
 a reboot", not for stashing one particular layout.
 
 Everything here is pure except load_store/save_store, so the interesting parts
@@ -20,11 +21,17 @@ from collections import namedtuple
 
 from layout_parser import parse_layout
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+LOCAL_HOST = 'local'
+# Mirrors tmux_hosts.ALIAS_RE; kept here so this module stays dependency-free.
+HOST_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$')
 
 MAX_SLOTS                 = 20
 MAX_SLOT_NAME             = 64
-MAX_SESSIONS_PER_SNAPSHOT = 16
+MAX_SESSIONS_PER_HOST     = 16
+MAX_HOSTS_PER_SNAPSHOT    = 8
+MAX_SESSIONS_PER_SNAPSHOT = 64
 MAX_WINDOWS               = 32     # per session
 MAX_PANES_PER_WINDOW      = 16
 MAX_TOTAL_PANES           = 128    # per session
@@ -71,14 +78,15 @@ def load_store() -> dict:
 
     A version-1 (single-session) store is foreign here — it is not migrated,
     just read back as empty. This is a pre-release format change, not an
-    upgrade path users depend on.
+    upgrade path users depend on. A version-2 store predates remote hosts:
+    every session in it was on this machine.
     """
     try:
         with open(store_path(), encoding='utf-8') as fh:
             raw = json.load(fh)
     except (OSError, ValueError):
         return empty_store()
-    if not isinstance(raw, dict) or raw.get('version') != SCHEMA_VERSION:
+    if not isinstance(raw, dict) or raw.get('version') not in (2, SCHEMA_VERSION):
         return empty_store()
     slots = raw.get('slots')
     if not isinstance(slots, dict):
@@ -87,9 +95,19 @@ def load_store() -> dict:
     for name, snap in slots.items():
         if not isinstance(name, str) or not _clean_slot_name(name):
             continue
+        if raw['version'] == 2:
+            _migrate_v2(snap)
         if validate_snapshot(snap) and snap.get('name') == name:
             kept[name] = snap
     return {'version': SCHEMA_VERSION, 'slots': kept}
+
+
+def _migrate_v2(snap) -> None:
+    if not isinstance(snap, dict) or not isinstance(snap.get('sessions'), list):
+        return
+    for session_snap in snap['sessions']:
+        if isinstance(session_snap, dict):
+            session_snap.setdefault('host', LOCAL_HOST)
 
 
 def save_store(store: dict) -> None:
@@ -132,6 +150,7 @@ def slot_summaries(store: dict) -> list[dict]:
     for snap in store['slots'].values():
         out.append({
             'name':     snap['name'],
+            'hosts':    list(dict.fromkeys(s['host'] for s in snap['sessions'])),
             'sessions': len(snap['sessions']),
             'windows':  sum(len(s['windows']) for s in snap['sessions']),
             'panes':    sum(len(w['panes']) for s in snap['sessions'] for w in s['windows']),
@@ -141,9 +160,29 @@ def slot_summaries(store: dict) -> list[dict]:
     return out
 
 
-def conflicting_sessions(snap: dict, live) -> list[str]:
-    """Names in `snap` that are already running, in the snapshot's own order."""
-    return [s['session'] for s in snap['sessions'] if s['session'] in live]
+def conflicting_sessions(snap: dict, live_by_host: dict) -> list[str]:
+    """Sessions in `snap` that are already running on their host, in the
+    snapshot's own order, as display labels ('name', or 'host:name' for a
+    remote host). A host missing from `live_by_host` has no conflicts."""
+    return [session_label(s) for s in snap['sessions']
+            if s['session'] in live_by_host.get(s['host'], ())]
+
+
+def session_label(session_snap: dict) -> str:
+    host = session_snap['host']
+    return session_snap['session'] if host == LOCAL_HOST else f'{host}:{session_snap["session"]}'
+
+
+def group_by_host(snap: dict) -> list[tuple[str, list[dict]]]:
+    """[(host, its sessions)], hosts and sessions in the snapshot's order."""
+    groups: dict[str, list[dict]] = {}
+    for session_snap in snap['sessions']:
+        groups.setdefault(session_snap['host'], []).append(session_snap)
+    return list(groups.items())
+
+
+def valid_host(value) -> bool:
+    return isinstance(value, str) and (value == LOCAL_HOST or bool(HOST_RE.match(value)))
 
 
 # ────────────────────────────────────────────────────────────────────── capture
@@ -250,16 +289,19 @@ def order_panes(layout_str: str, panes_by_num: dict) -> tuple[list[dict], str]:
 
 
 def parse_session_snapshot(session: str, win_raw: str, pane_raw: str, *,
-                           attached: bool, isdir=os.path.isdir,
+                           attached: bool, host: str = LOCAL_HOST,
+                           isdir=os.path.isdir,
                            home: str | None = None) -> dict | None:
     """Build one session's shape from its `list-windows`/`list-panes` output.
 
     Returns None when the session is unreadable or too big to store. The
     result has no `name`/`saved_at` — those belong to the snapshot that wraps
-    it (see build_snapshot).
+    it (see build_snapshot). For a remote host the caller passes an `isdir`
+    that only checks the path's shape: whether it still exists there is
+    checked at restore time, on that host.
     """
     session = _clean_session_name(session)
-    if not session:
+    if not session or not valid_host(host):
         return None
     if home is None:
         home = os.path.expanduser('~')
@@ -306,6 +348,7 @@ def parse_session_snapshot(session: str, win_raw: str, pane_raw: str, *,
             width, height = win['width'], win['height']
 
     return {
+        'host':          host,
         'session':       session,
         'attached':      bool(attached),
         'width':         _clamp(width, MIN_COLS, MAX_COLS),
@@ -320,21 +363,33 @@ def build_snapshot(name: str, sessions: list[dict], *, now: str) -> dict | None:
     """Wrap already-captured per-session shapes into one named snapshot.
 
     None when the name is invalid, there are no sessions (or too many), two
-    sessions share a name, or the combined pane count is too big to restore
-    in reasonable time.
+    sessions on one host share a name, or the combined pane count is too big
+    to restore in reasonable time.
     """
     name = _clean_slot_name(name)
     if not name:
         return None
-    if not sessions or len(sessions) > MAX_SESSIONS_PER_SNAPSHOT:
-        return None
-    names = [s['session'] for s in sessions]
-    if len(names) != len(set(names)):
+    if not _sessions_fit(sessions):
         return None
     total_panes = sum(len(w['panes']) for s in sessions for w in s['windows'])
     if total_panes > MAX_PANES_PER_SNAPSHOT:
         return None
     return {'name': name, 'saved_at': now, 'sessions': sessions}
+
+
+def _sessions_fit(sessions) -> bool:
+    """Count limits, and (host, session) unique — the same name on two hosts
+    is two different sessions."""
+    if not sessions or len(sessions) > MAX_SESSIONS_PER_SNAPSHOT:
+        return False
+    keys = [(s['host'], s['session']) for s in sessions]
+    if len(keys) != len(set(keys)):
+        return False
+    per_host: dict[str, int] = {}
+    for host, _ in keys:
+        per_host[host] = per_host.get(host, 0) + 1
+    return (len(per_host) <= MAX_HOSTS_PER_SNAPSHOT
+            and max(per_host.values()) <= MAX_SESSIONS_PER_HOST)
 
 
 def _clamp(value: int, low: int, high: int) -> int:
@@ -353,20 +408,15 @@ def validate_snapshot(snap) -> bool:
     if not isinstance(sessions, list) or not sessions or len(sessions) > MAX_SESSIONS_PER_SNAPSHOT:
         return False
 
-    seen_names = set()
     total_panes = 0
     for session_snap in sessions:
         if not _validate_session(session_snap):
             return False
-        session_name = session_snap['session']
-        if session_name in seen_names:
-            return False
-        seen_names.add(session_name)
         total_panes += sum(len(w['panes']) for w in session_snap['windows'])
 
     if total_panes > MAX_PANES_PER_SNAPSHOT:
         return False
-    return True
+    return _sessions_fit(sessions)
 
 
 def _validate_session(snap) -> bool:
@@ -374,6 +424,8 @@ def _validate_session(snap) -> bool:
     if not isinstance(snap, dict):
         return False
     if not _clean_session_name(snap.get('session')):
+        return False
+    if not valid_host(snap.get('host')):
         return False
     if not isinstance(snap.get('attached'), bool):
         return False
@@ -423,6 +475,25 @@ def _validate_session(snap) -> bool:
 # snapshot's `sessions` list). server.py calls these once per session and
 # handles cross-session bookkeeping (name reservations, partial failure,
 # which session gets focus) itself — see _restore_snapshot there.
+
+def cwd_fallback(argv: list[str], existing, home: str) -> list[str]:
+    """A directory saved weeks ago may be gone by now, and -c on a missing
+    path fails the whole command: swap in `home`. The trailing -c is the one
+    build_restore_steps put there. `existing` is the set of saved cwds found
+    on the target host."""
+    if '-c' not in argv:
+        return argv
+    i = len(argv) - 1 - argv[::-1].index('-c')
+    if i + 1 >= len(argv) or argv[i + 1] in existing:
+        return argv
+    argv = list(argv)
+    argv[i + 1] = home
+    return argv
+
+
+def snapshot_cwds(sessions: list[dict]) -> list[str]:
+    return list(dict.fromkeys(p['cwd'] for s in sessions for w in s['windows'] for p in w['panes']))
+
 
 def unique_session_name(base: str, taken) -> str:
     """base, else base-2, base-3, … — the name used when restoring alongside."""
