@@ -103,7 +103,11 @@ TMUX_SESSION=my-session ./server.sh
 | **Windows** | Click to switch (zoomed windows unzoom automatically) |
 | **Panes** | Click active pane → toggle zoom on/off; click another pane → zoom to it |
 | **+** (windows row) | New window in current session |
-| **+** (sessions row) | New session (on the host you are on) |
+| **+** (sessions row) | New session (without ssh hosts; with them, use each host row's **+**) |
+| **Host rows** (ssh hosts configured) | Click to fold / unfold that host's sessions |
+
+Windows and Panes belong to the current session, so they sit together in one
+framed block headed `host › session`.
 | **⇿ / ⇕** | Split active pane horizontally / vertically |
 | **Layouts** | Click to restore a saved layout; 🗑 to delete it |
 | **+** (layouts row) | Save every currently open session under one named layout |

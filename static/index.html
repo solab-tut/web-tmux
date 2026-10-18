@@ -80,20 +80,28 @@
           </div>
           <div id="session-list"></div>
         </div>
-        <div class="side-section">
-          <div class="side-head">
-            <span>windows</span>
-            <button class="side-btn" id="btn-new-window" title="new window">+</button>
+        <!-- The current session's contents, kept apart from the session list. -->
+        <div id="current-block">
+          <div id="current-head">
+            <span id="current-host"></span>
+            <span class="current-sep" aria-hidden="true">›</span>
+            <span id="current-session"></span>
           </div>
-          <div id="window-list"></div>
-        </div>
-        <div class="side-section">
-          <div class="side-head">
-            <span>panes</span>
-            <button class="side-btn" id="btn-split-h" title="split horizontally">⇿</button>
-            <button class="side-btn" id="btn-split-v" title="split vertically">⇕</button>
+          <div class="side-section">
+            <div class="side-head">
+              <span>windows</span>
+              <button class="side-btn" id="btn-new-window" title="new window">+</button>
+            </div>
+            <div id="window-list"></div>
           </div>
-          <div id="pane-list"></div>
+          <div class="side-section">
+            <div class="side-head">
+              <span>panes</span>
+              <button class="side-btn" id="btn-split-h" title="split horizontally">⇿</button>
+              <button class="side-btn" id="btn-split-v" title="split vertically">⇕</button>
+            </div>
+            <div id="pane-list"></div>
+          </div>
         </div>
         <div class="side-section side-footer">
           <div class="side-head">

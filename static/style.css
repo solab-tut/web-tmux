@@ -444,6 +444,48 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   overflow-y: auto;
 }
 
+/* Sessions step in under their host header, past its chevron. */
+#session-list.grouped .session-item { padding-left: 24px; }
+
+/* Windows and panes of the current session: one framed block, headed by
+   where it is, so it doesn't read as a continuation of the session list. */
+#current-block {
+  flex: 0 0 auto;
+  margin: 20px 6px 8px;     /* about a line clear of the session list */
+  border: 1px solid var(--border-mid);
+  border-top: 2px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg-base);
+  overflow: hidden;
+}
+#current-block .side-section:last-child { border-bottom: 0; }
+#current-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 7px 10px 5px;
+  font-size: 12px;
+  color: var(--text-bright);
+  border-bottom: 1px solid var(--border-sub);
+  white-space: nowrap;
+  overflow: hidden;
+}
+#current-host {
+  font-size: 13px;
+  font-weight: 700;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.current-sep { color: var(--text-faint); flex: 0 0 auto; }
+#current-session {
+  color: var(--text);
+  font-size: 11px;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .session-item,
 .layout-item {
   padding: 8px 10px;
@@ -528,6 +570,8 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Smaller than the bold host name above it. */
+.session-name { font-size: 11px; }
 
 /* Window/pane counts and the save date, muted next to the slot name. */
 .layout-meta {
@@ -542,8 +586,9 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px 2px;
-  font-size: 10px;
+  padding: 8px 10px 3px;
+  font-size: 14px;
+  font-weight: 700;
   color: var(--text-faint);
 }
 .host-head.current { color: var(--text-bright); }
@@ -559,6 +604,19 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 .host-up   .host-dot { background: var(--status-ok); }
 .host-down .host-dot { background: var(--status-err); }
 .host-down .host-name { color: var(--text-dim); }
+.host-head[role="button"] { cursor: pointer; }
+.host-head[role="button"]:hover { color: var(--text-bright); }
+.host-chevron {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  transform: rotate(90deg);
+  transition: transform 0.12s;
+}
+.host-head.collapsed .host-chevron { transform: none; }
+/* An unreachable host has nothing to fold, but keeps the column aligned. */
+.host-down .host-chevron { visibility: hidden; }
+.host-count { color: var(--text-dim); flex: 0 0 auto; font-size: 11px; font-weight: 400; }
 
 .session-note {
   padding: 4px 10px;
@@ -1028,6 +1086,8 @@ html.virtual-keyboard-visible #bottombar {
     padding: 0 5px;
     font-size: 11px;
   }
+
+  .host-head { font-size: 12px; }
 
   .session-item,
   .window-item,

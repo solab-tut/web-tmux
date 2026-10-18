@@ -757,6 +757,7 @@ function updateCurrentWindow(windows) {
   if (!activeWin) return;
   currentWinIdx = activeWin.index;
   currentWinId = activeWin.id || '';
+  updateCurrentBlock();
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
@@ -1802,6 +1803,27 @@ function renderWindowList(windows) {
 let _sessionNote = '';
 let _sessionNoteTimer = null;
 
+// Hosts whose session list is folded away, remembered per browser.
+const COLLAPSED_HOSTS_STORAGE_KEY = 'web-tmux-collapsed-hosts';
+const _collapsedHosts = loadCollapsedHosts();
+
+function loadCollapsedHosts() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSED_HOSTS_STORAGE_KEY));
+    return new Set(Array.isArray(saved) ? saved.filter((h) => typeof h === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function toggleHostCollapsed(host) {
+  if (!_collapsedHosts.delete(host)) _collapsedHosts.add(host);
+  try {
+    localStorage.setItem(COLLAPSED_HOSTS_STORAGE_KEY, JSON.stringify([..._collapsedHosts]));
+  } catch { /* private mode: still folds, just not remembered */ }
+  renderSessionList();
+}
+
 function sessionKey(host, name) {
   return host + '\0' + name;
 }
@@ -1852,11 +1874,20 @@ function showSessionNote(text) {
   renderSessionList();
 }
 
+// The windows and panes block belongs to one host's one session; say which,
+// since the session list above it can be long.
+function updateCurrentBlock() {
+  const host = !currentHost || currentHost === 'local' ? _host : currentHost;
+  document.getElementById('current-host').textContent = host;
+  document.getElementById('current-session').textContent = currentSession;
+}
+
 function updateHostLabel() {
   const remote = currentHost && currentHost !== 'local';
   const label = document.getElementById('topbar-host');
   label.textContent = remote ? `${_host} → ${currentHost}` : _host;
   label.classList.toggle('remote', !!remote);
+  updateCurrentBlock();
   document.title = (remote ? currentHost : _host) + ' - web-tmux';
 }
 
@@ -1871,9 +1902,13 @@ function renderSessionList() {
   }
   // With no ssh hosts configured the list looks exactly as it always has.
   const grouped = hostsModel.length > 1 || hostsModel.some((h) => h.host !== 'local');
+  // Each host header has its own "+", so the section-wide one would only
+  // repeat the current host's.
+  document.getElementById('btn-new-session').hidden = grouped;
+  list.classList.toggle('grouped', grouped);
   hostsModel.forEach((h) => {
     if (grouped) list.appendChild(buildHostHeader(h));
-    if (h.reachable === false) return;
+    if (h.reachable === false || (grouped && _collapsedHosts.has(h.host))) return;
     [...(h.sessions || [])]
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
       .forEach((s) => list.appendChild(buildSessionItem(h.host, s)));
@@ -1884,11 +1919,35 @@ function buildHostHeader(h) {
   const div = document.createElement('div');
   const state = h.reachable === false ? 'down' : (h.reachable ? 'up' : 'unknown');
   div.className = `host-head host-${state}` + (h.host === currentHost ? ' current' : '');
+  div.dataset.host = h.host;
   const label = h.host === 'local' ? _host : h.host;
+  const collapsed = _collapsedHosts.has(h.host);
+  const count = (h.sessions || []).length;
   div.innerHTML =
+    `<svg class="host-chevron" viewBox="0 0 8 8" aria-hidden="true">` +
+    `<path d="M2.5 1.5L5.5 4L2.5 6.5" fill="none" stroke="currentColor" stroke-width="1.2"` +
+    ` stroke-linecap="round" stroke-linejoin="round"/></svg>` +
     `<span class="host-dot" aria-hidden="true"></span>` +
-    `<span class="host-name">${escHtml(label)}</span>`;
+    `<span class="host-name">${escHtml(label)}</span>` +
+    (collapsed && count ? `<span class="host-count">${count}</span>` : '');
   div.title = h.reachable === false ? `${label} ${HOST_ERRORS[h.code] || 'is unavailable'}` : label;
+  if (h.reachable !== false) {
+    // The whole row folds the host's sessions; its own button keeps its job.
+    div.classList.toggle('collapsed', collapsed);
+    div.setAttribute('role', 'button');
+    div.tabIndex = 0;
+    div.setAttribute('aria-expanded', String(!collapsed));
+    div.addEventListener('click', (ev) => {
+      if (!ev.target.closest('.side-btn')) toggleHostCollapsed(h.host);
+    });
+    div.addEventListener('keydown', (ev) => {
+      if (ev.target !== div || (ev.key !== 'Enter' && ev.key !== ' ')) return;
+      ev.preventDefault();
+      toggleHostCollapsed(h.host);
+      // The list was rebuilt, so hand focus to the new copy of this header.
+      document.querySelector(`#session-list .host-head[data-host="${CSS.escape(h.host)}"]`)?.focus();
+    });
+  }
   if (h.reachable === false && h.code === 'auth_required') {
     const key = document.createElement('button');
     key.type = 'button';
