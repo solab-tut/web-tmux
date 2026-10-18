@@ -485,10 +485,23 @@ def _read_tail(path: str, size: int = 4096) -> str:
 MASTER_EXIT_TIMEOUT = 2.0
 
 
+async def stop_master(host: TmuxHost) -> None:
+    """Close `host`'s shared connection, and with it every ssh session riding
+    on it (the control client, in-flight commands)."""
+    if host.is_local:
+        return
+    entry = _masters.get(host.name)
+    if entry is not None and not entry[0].done():
+        # A start in flight would bring the connection straight back.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(entry[0]), MASTER_TIMEOUT)
+    await run_argv(host.master_ctl_argv('exit'), timeout=MASTER_EXIT_TIMEOUT)
+    _masters.pop(host.name, None)
+
+
 async def stop_masters(hosts: Iterable[TmuxHost]) -> None:
-    """Close every host's shared connection, and with it every ssh session
-    riding on it (the control client, in-flight commands). In parallel and
-    quick: this runs while the server is being asked to stop."""
+    """Close every host's shared connection. In parallel and quick: this runs
+    while the server is being asked to stop."""
     remote = [h for h in hosts if not h.is_local]
     await asyncio.gather(*(run_argv(h.master_ctl_argv('exit'), timeout=MASTER_EXIT_TIMEOUT)
                            for h in remote))
@@ -506,7 +519,7 @@ SESSION_FMT = '#{session_name}\t#{session_windows}\t#{session_attached}'
 @dataclass
 class HostStatus:
     reachable: bool | None = None      # None: not checked yet
-    code: str = ''                     # why it isn't usable: unreachable/auth_required/unsupported_tmux/error
+    code: str = ''                     # why it isn't usable: unreachable/auth_required/unsupported_tmux/error/disconnected
     version: tuple[int, int] | None = None
     sessions: list[dict] = field(default_factory=list)
     checked_at: float = 0.0
@@ -533,6 +546,9 @@ class HostDirectory:
 
     snapshot() never waits. refresh() is single-flight per host, and hosts
     are refreshed in parallel, so one host timing out delays nobody else.
+
+    A host someone disconnected stays 'disconnected', with nothing checked
+    and no ssh started for it, until connect() is called for it.
     """
 
     def __init__(self, hosts: Iterable[TmuxHost], *,
@@ -545,6 +561,7 @@ class HostDirectory:
         self._master = master
         self._clock = clock
         self._inflight: dict[str, asyncio.Task] = {}
+        self._disconnected: set[str] = set()
 
     def snapshot(self) -> list[dict]:
         out = []
@@ -562,7 +579,18 @@ class HostDirectory:
         st = self.status.get(name)
         return {s['name'] for s in st.sessions} if st else set()
 
+    def disconnect(self, name: str) -> None:
+        self._disconnected.add(name)
+        self._mark(name, reachable=False, code='disconnected')
+
+    def connect(self, name: str) -> None:
+        if name in self._disconnected:
+            self._disconnected.discard(name)
+            self.status[name].failures = 0
+
     def _due(self, name: str) -> bool:
+        if name in self._disconnected:
+            return False
         st = self.status[name]
         if st.reachable is None:
             return True
@@ -593,6 +621,8 @@ class HostDirectory:
         """
         if host.is_local:
             return ''
+        if host.name in self._disconnected:
+            return 'disconnected'
         code = await self._master(host)
         if code:
             self._mark(host.name, reachable=False, code=code)
@@ -633,6 +663,8 @@ class HostDirectory:
 
     def _mark(self, name: str, *, reachable: bool, code: str,
               sessions: list[dict] | None = None) -> None:
+        if name in self._disconnected and code != 'disconnected':
+            return   # a check that was already under way when it was disconnected
         st = self.status.setdefault(name, HostStatus())
         before = (st.reachable, st.code, st.sessions)
         st.reachable = reachable

@@ -505,6 +505,7 @@ _MESSAGE_FIELDS = {
     'select_window': ({'type', 'window', 'host'}, {'window'}),
     'refresh_hosts': ({'type'}, set()),
     'connect_host': ({'type', 'host'}, {'host'}),
+    'disconnect_host': ({'type', 'host'}, {'host'}),
     'host_auth_answer': ({'type', 'id', 'answer', 'cancel'}, {'id'}),
     'list_layouts': ({'type'}, set()),
     'save_layout': ({'type', 'name', 'overwrite'}, {'name'}),
@@ -568,7 +569,7 @@ def _validated_message(raw: str | bytes) -> dict:
             raise PolicyViolation('invalid session rename')
     elif msg_type == 'new_window':
         _msg_host(msg)
-    elif msg_type == 'connect_host':
+    elif msg_type in {'connect_host', 'disconnect_host'}:
         if _msg_host(msg) == LOCAL:
             raise PolicyViolation('unknown host')
     elif msg_type == 'host_auth_answer':
@@ -1045,6 +1046,30 @@ async def _switch_host(websocket, host_name: str, session: str, *, create: bool 
     _refresh_hosts_soon()
 
 
+async def _disconnect_host(websocket, host_name: str) -> None:
+    """Close the shared ssh connection to `host_name` and keep it closed
+    until someone connects again. If the control client is there, every
+    browser goes back to the local session first."""
+    if _host_lock.locked() or _layout_lock.locked():
+        await _send_host_error(websocket, host_name, 'busy')
+        return
+    async with _host_lock:
+        if tmux.host.name == host_name:
+            subscribers = tmux.subscribers[:]
+            tmux.subscribers.clear()
+            try:
+                ok = await tmux.switch_target(LOCAL_HOST, SESSION)
+                await _resend_view(subscribers)
+            finally:
+                _resubscribe(subscribers)
+            if not ok:
+                await _send_host_error(websocket, host_name, 'switch_failed')
+                return
+        DIRECTORY.disconnect(host_name)
+        await tmux_hosts.stop_master(HOSTS[host_name])
+    log.info('disconnected from host %s', host_name)
+
+
 async def _resend_view(clients: list) -> None:
     """Queue a fresh `init` to `clients`, ahead of any output they get next."""
     state = await tmux.get_initial_state()
@@ -1119,6 +1144,7 @@ async def _sign_in(client, host_name: str) -> str:
             cancelled = True
         return answer
 
+    DIRECTORY.connect(host_name)
     code = await tmux_hosts.ensure_master(HOSTS[host_name], ask=ask)
     if code == 'auth_required':
         code = 'auth_cancelled' if cancelled else 'auth_failed'
@@ -1326,6 +1352,9 @@ async def _handle_msg(websocket, msg: dict) -> None:
 
     elif t == 'connect_host':
         _start_sign_in(websocket, msg['host'])
+
+    elif t == 'disconnect_host':
+        await _disconnect_host(websocket, msg['host'])
 
     elif t == 'host_auth_answer':
         # Never logged: this is a password or a key passphrase.

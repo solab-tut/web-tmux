@@ -258,6 +258,14 @@ left behind.
 Background refreshes of the session list never ask anyone: a host that
 needs a password just shows 🔑 until someone signs in.
 
+**Disconnecting.** A connected remote host also has a **⏻** button. It
+closes the shared ssh connection to that host; if the control client is on
+that host, every browser is first moved back to the local session. The tmux
+sessions on the host keep running. A disconnected host shows a grey dot and
+is not checked in the background until someone presses its **⏻** again to
+connect (asking for a passphrase or password if needed). The disconnect lasts
+until web-tmux restarts.
+
 **Remote requirements:** tmux 3.2 or newer (with 3.2/3.3 the prefix key is
 passed through to the pane instead of triggering tmux bindings), a POSIX
 login shell (sh/bash/zsh; not fish), and a UTF-8 capable system. Attaching

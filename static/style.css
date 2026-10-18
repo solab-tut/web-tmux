@@ -607,7 +607,9 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 .host-up   .host-dot { background: var(--status-ok); }
 .host-down .host-dot { background: var(--status-err); }
-.host-down .host-name { color: var(--text-dim); }
+.host-down .host-name,
+.host-off  .host-name { color: var(--text-dim); }
+.host-power svg { width: 11px; height: 11px; display: block; }
 .host-head[role="button"] { cursor: pointer; }
 .host-head[role="button"]:hover { color: var(--text-bright); }
 .host-chevron {
@@ -619,7 +621,8 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 .host-head.collapsed .host-chevron { transform: none; }
 /* An unreachable host has nothing to fold, but keeps the column aligned. */
-.host-down .host-chevron { visibility: hidden; }
+.host-down .host-chevron,
+.host-off  .host-chevron { visibility: hidden; }
 .host-count { color: var(--text-dim); flex: 0 0 auto; font-size: 11px; font-weight: 400; }
 
 .session-note {

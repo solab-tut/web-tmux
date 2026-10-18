@@ -1861,6 +1861,7 @@ const HOST_ERRORS = {
   fell_back:        'was lost — back on this machine',
   busy:             'is busy; try again in a moment',
   error:            'answered with an error',
+  disconnected:     'is disconnected',
 };
 
 function onHostError(msg) {
@@ -1917,7 +1918,8 @@ function renderSessionList() {
 
 function buildHostHeader(h) {
   const div = document.createElement('div');
-  const state = h.reachable === false ? 'down' : (h.reachable ? 'up' : 'unknown');
+  const state = h.code === 'disconnected' ? 'off'
+    : h.reachable === false ? 'down' : (h.reachable ? 'up' : 'unknown');
   div.className = `host-head host-${state}` + (h.host === currentHost ? ' current' : '');
   div.dataset.host = h.host;
   const label = h.host === 'local' ? _host : h.host;
@@ -1948,7 +1950,10 @@ function buildHostHeader(h) {
       document.querySelector(`#session-list .host-head[data-host="${CSS.escape(h.host)}"]`)?.focus();
     });
   }
-  if (h.reachable === false && h.code === 'auth_required') {
+  if (h.code === 'disconnected') {
+    div.appendChild(buildPowerButton(`Connect to ${label}`,
+      () => connectHost(h.host, `Connecting to ${label}…`)));
+  } else if (h.reachable === false && h.code === 'auth_required') {
     const key = document.createElement('button');
     key.type = 'button';
     key.className = 'side-btn';
@@ -1974,9 +1979,28 @@ function buildHostHeader(h) {
       newSession(h.host);
       focusActivePane();
     });
+    if (h.host !== 'local') {
+      div.appendChild(buildPowerButton(`Disconnect from ${label}`, () => disconnectHost(h.host)));
+    }
     div.appendChild(add);
   }
   return div;
+}
+
+function buildPowerButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'side-btn host-power';
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.innerHTML =
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"` +
+    ` stroke-linecap="round" aria-hidden="true">` +
+    `<path d="M8 2.5v5"/>` +
+    `<path d="M11.5 4.5a5 5 0 11-7 0"/>` +
+    `</svg>`;
+  button.addEventListener('click', onClick);
+  return button;
 }
 
 function buildSessionItem(host, s) {
@@ -2079,10 +2103,16 @@ function selectSession(host, name) {
   }
 }
 
-function connectHost(host) {
+function connectHost(host, note = `Signing in to ${host}…`) {
   markClientActive();
-  showSessionNote(`Signing in to ${host}…`);
+  showSessionNote(note);
   wsSendType('connect_host', { host });
+}
+
+function disconnectHost(host) {
+  markClientActive();
+  showSessionNote(`Disconnecting from ${host}…`);
+  wsSendType('disconnect_host', { host });
 }
 
 // ─── Host sign-in ─────────────────────────────────────────────────────────────

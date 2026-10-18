@@ -384,6 +384,12 @@ class _FakeDirectory:
     def sessions(self, name):
         return set()
 
+    def disconnect(self, name):
+        self.codes[name] = 'disconnected'
+
+    def connect(self, name):
+        self.codes.pop(name, None)
+
 
 class MultiHostRestoreTest(RestoreSnapshotTest):
     """The same stubs, with a second (ssh) host configured."""
@@ -600,6 +606,72 @@ class SwitchHostTest(unittest.TestCase):
         self.switch(me)
 
         self.assertEqual(self.tmux.subscribers, [me])
+
+
+class DisconnectHostTest(SwitchHostTest):
+    def setUp(self):
+        super().setUp()
+        self.stopped = []
+
+        async def stop_master(host):
+            self.stopped.append(host.name)
+        patcher = patch.object(server.tmux_hosts, 'stop_master', stop_master)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def disconnect(self, client):
+        asyncio.run(server._disconnect_host(client, 'lan-box'))
+
+    def test_other_host_is_closed_without_moving_anyone(self):
+        me = _Client()
+        self.tmux.subscribers.append(me)
+
+        self.disconnect(me)
+
+        self.assertIsNone(self.tmux.during_switch)
+        self.assertEqual(me.queued, [])
+        self.assertEqual(self.stopped, ['lan-box'])
+        self.assertEqual(self.directory.codes, {'lan-box': 'disconnected'})
+
+    def test_active_host_sends_everyone_back_to_the_local_session_first(self):
+        me, other = _Client(), _Client()
+        self.tmux.host, self.tmux.session = REMOTE, 'dev'
+        self.tmux.subscribers += [me, other]
+
+        self.disconnect(me)
+
+        self.assertEqual(self.tmux.during_switch, [])
+        self.assertEqual((self.tmux.host.name, self.tmux.session), ('local', server.SESSION))
+        for client in (me, other):
+            self.assertEqual([m['type'] for m in client.queued], ['init'])
+            self.assertEqual(client.queued[0]['host'], 'local')
+        self.assertEqual(self.tmux.subscribers, [me, other])
+        self.assertEqual(self.stopped, ['lan-box'])
+
+    def test_failed_move_keeps_the_connection(self):
+        self.tmux.ok = False
+        self.tmux.host = REMOTE
+        me = _Client()
+
+        self.disconnect(me)
+
+        self.assertEqual(me.sent, [{'type': 'host_error', 'host': 'lan-box', 'code': 'switch_failed'}])
+        self.assertEqual(self.stopped, [])
+        self.assertEqual(self.directory.codes, {})
+
+    def test_connecting_again_lifts_the_disconnect(self):
+        self.directory.codes['lan-box'] = 'disconnected'
+
+        async def ensure_master(host, ask=None):
+            return self.directory.codes.get(host.name, '')
+        with patch.object(server.tmux_hosts, 'ensure_master', ensure_master):
+            code = asyncio.run(server._sign_in(_Client(), 'lan-box'))
+        self.assertEqual(code, '')
+
+    def test_only_remote_hosts_can_be_disconnected(self):
+        with self.assertRaises(server.PolicyViolation):
+            server._validated_message(server.json.dumps({'type': 'disconnect_host', 'host': 'local'}))
+        server._validated_message(server.json.dumps({'type': 'disconnect_host', 'host': 'lan-box'}))
 
 
 class StaleViewTest(unittest.TestCase):

@@ -267,6 +267,39 @@ class HostDirectoryTest(unittest.TestCase):
         asyncio.run(d.refresh('a', force=True))
         self.assertEqual(self.changes, 2)
 
+    def test_disconnected_host_is_left_alone_until_connected(self):
+        self.answers = {'a': (0, 'dev\t1\t0\n', '')}
+        d = self.directory()
+        asyncio.run(d.refresh('a'))
+        d.disconnect('a')
+        self.calls.clear()
+        self.clock.now += 3600
+        self.assertFalse(d._due('a'))
+        asyncio.run(d.refresh_all(force=True))
+        self.assertNotIn('a', [name for name, _ in self.calls])
+        self.assertEqual(asyncio.run(d.preflight(self.hosts[1])), 'disconnected')
+        snap = {h['host']: h for h in d.snapshot()}
+        self.assertEqual((snap['a']['reachable'], snap['a']['code'], snap['a']['sessions']),
+                         (False, 'disconnected', []))
+        self.assertEqual(d.sessions('a'), set())
+
+        d.connect('a')
+        asyncio.run(d.refresh('a', force=True))
+        self.assertTrue(d.status['a'].reachable)
+        self.assertEqual(d.sessions('a'), {'dev'})
+
+    def test_check_under_way_does_not_undo_a_disconnect(self):
+        self.delays = {'a': 0.05}
+        d = self.directory()
+
+        async def scenario():
+            task = asyncio.ensure_future(d.refresh('a'))
+            await asyncio.sleep(0.01)
+            d.disconnect('a')
+            await task
+        asyncio.run(scenario())
+        self.assertEqual(d.status['a'].code, 'disconnected')
+
 
 class AuthFailureTest(unittest.TestCase):
     def test_tells_credentials_from_network(self):
@@ -418,6 +451,17 @@ exit 255
 
         self.assertFalse(os.path.exists(self.up))
         self.assertNotIn('box', tmux_hosts._masters)
+
+    def test_stop_master_closes_that_host_only(self):
+        code, _ = self.run_sign_in(['s3cret'])
+        self.assertEqual(code, '')
+
+        asyncio.run(tmux_hosts.stop_master(self.host))
+
+        self.assertFalse(os.path.exists(self.up))
+        self.assertNotIn('box', tmux_hosts._masters)
+        self.assertEqual(asyncio.run(tmux_hosts.run_argv(self.host.master_ctl_argv('check'),
+                                                         timeout=5))[0], 255)
 
     def test_helper_without_a_token_refuses(self):
         import askpass
