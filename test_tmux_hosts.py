@@ -98,6 +98,11 @@ class HostsFromEnvTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.parse(value)
 
+    def test_local_tmux_does_not_inherit_our_settings(self):
+        env = tmux_hosts.tmux_env({'WEB_TMUX_STATE_DIR': '/dev-state', 'WEB_TMUX_SSH_HOSTS': 'a',
+                                   'HOME': '/home/me', 'PATH': '/bin'})
+        self.assertEqual(env, {'HOME': '/home/me', 'PATH': '/bin'})
+
     def test_socket_dir_must_fit_a_unix_socket_path(self):
         with self.assertRaises(ValueError):
             tmux_hosts.hosts_from_env({'WEB_TMUX_SSH_HOSTS': 'a'}, directory='/' + 'x' * 80)

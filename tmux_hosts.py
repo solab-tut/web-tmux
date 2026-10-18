@@ -227,8 +227,20 @@ def ssh_env(token: str = '') -> dict[str, str] | None:
     return {**os.environ, **_broker.env(token)}
 
 
+def tmux_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment for a local tmux: ours, minus web-tmux's own settings.
+
+    The tmux command that finds no server running starts one, and that
+    server keeps the environment as its global one for every shell it
+    starts. A web-tmux started from such a shell would then pick up the
+    settings of whichever web-tmux happened to start tmux — a dev
+    worktree's WEB_TMUX_STATE_DIR, say, and with it another layout store."""
+    environ = os.environ if environ is None else environ
+    return {k: v for k, v in environ.items() if not k.startswith('WEB_TMUX_')}
+
+
 def process_env(host: TmuxHost) -> dict[str, str] | None:
-    return None if host.is_local else ssh_env()
+    return tmux_env() if host.is_local else ssh_env()
 
 
 # ───────────────────────────────────────────────────────────── pure helpers

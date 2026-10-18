@@ -1493,6 +1493,7 @@ async def main() -> None:
         tmux_hosts.configure_askpass(ASKPASS)
     if len(HOSTS) > 1:
         log.info('ssh hosts: %s', ', '.join(name for name in HOSTS if name != LOCAL))
+    log.info('layouts: %s', layout_store.store_path())
     tmux = TmuxControl(session=SESSION, host=LOCAL_HOST,
                        fallback=(LOCAL_HOST, SESSION), on_target_changed=_on_target_changed)
     await tmux.start()
