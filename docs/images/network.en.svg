@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="880" viewBox="0 0 1500 880" role="img" aria-labelledby="title desc">
+  <title id="title">web-tmux network architecture</title>
+  <desc id="desc">A browser on a remote Tailscale device accesses web-tmux on a Tailscale-connected server inside a private LAN protected by a firewall. web-tmux controls tmux on the server itself through a local PTY, and tmux on other LAN hosts over SSH. Only the server joins Tailscale inside the LAN.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+    <marker id="cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#22d3ee"/></marker>
+    <marker id="green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#34d399"/></marker>
+    <style>
+      text{font-family:'Noto Sans CJK JP','Noto Sans JP',sans-serif;fill:#e2e8f0}
+      .title{font-size:34px;font-weight:700}.heading{font-size:24px;font-weight:700}.body{font-size:20px}.small{font-size:17px}.muted{fill:#94a3b8}.cyan{fill:#67e8f9}.green{fill:#6ee7b7}.rose{fill:#fda4af}.mono{font-family:'Noto Sans Mono CJK JP',monospace}
+    </style>
+  </defs>
+  <rect width="1500" height="880" fill="#020617"/>
+  <rect width="1500" height="880" fill="url(#grid)"/>
+  <text x="54" y="65" class="title">web-tmux | Remote tmux access to a private LAN</text>
+  <text x="56" y="103" class="body muted">Tailscale → web-tmux → tmux on the server / tmux on LAN hosts</text>
+
+  <!-- The LAN security boundary and the logical overlay are separate. -->
+  <rect x="535" y="151" width="911" height="563" rx="24" fill="#0d1324" stroke="#fb7185" stroke-width="2" stroke-dasharray="10 7"/>
+  <rect x="563" y="172" width="251" height="40" rx="20" fill="#401c2d"/>
+  <text x="588" y="200" class="body rose">Behind the firewall</text>
+  <text x="1415" y="200" text-anchor="end" class="heading">Private LAN</text>
+  <text x="1415" y="230" text-anchor="end" class="small muted">No direct external access to LAN hosts</text>
+
+  <rect x="48" y="270" width="961" height="311" rx="24" fill="#083344" fill-opacity="0.22" stroke="#22d3ee" stroke-width="2" stroke-dasharray="6 7"/>
+  <text x="74" y="304" class="body cyan">Tailscale network (encrypted tunnel)</text>
+
+  <!-- Links behind nodes. -->
+  <path d="M375 424H609" fill="none" stroke="#22d3ee" stroke-width="4" marker-start="url(#cyan)" marker-end="url(#cyan)"/>
+  <path d="M928 490H979V424H1041V354H1118" fill="none" stroke="#34d399" stroke-width="3" marker-start="url(#green)" marker-end="url(#green)"/>
+  <path d="M1041 424V579H1118" fill="none" stroke="#34d399" stroke-width="3" marker-end="url(#green)"/>
+  <rect x="407" y="356" width="168" height="38" rx="12" fill="#071b2a"/>
+  <text x="491" y="382" text-anchor="middle" class="body cyan">① Web access</text>
+  <text x="491" y="472" text-anchor="middle" class="small cyan">HTTPS / WebSocket</text>
+
+  <!-- Remote client. -->
+  <rect x="78" y="335" width="295" height="206" rx="16" fill="#0f172a"/>
+  <rect x="78" y="335" width="295" height="206" rx="16" fill="#083344" fill-opacity="0.4" stroke="#22d3ee" stroke-width="2"/>
+  <text x="103" y="374" class="heading">Remote device</text>
+  <rect x="104" y="394" width="243" height="79" rx="8" fill="#020617" stroke="#334155"/>
+  <path d="M104 417H347" stroke="#334155"/>
+  <circle cx="118" cy="406" r="3" fill="#fb7185"/><circle cx="130" cy="406" r="3" fill="#fbbf24"/><circle cx="142" cy="406" r="3" fill="#34d399"/>
+  <text x="225" y="452" text-anchor="middle" class="body">Browser</text>
+  <text x="103" y="511" class="small cyan">Tailscale member</text>
+  <text x="80" y="628" class="small muted">Access from outside the LAN</text>
+
+  <!-- Exactly one Tailscale host inside the LAN. -->
+  <rect x="611" y="332" width="339" height="370" rx="16" fill="#0f172a" stroke="#64748b" stroke-width="2"/>
+  <text x="636" y="373" class="heading">Server host</text>
+  <rect x="635" y="390" width="291" height="39" rx="8" fill="#083344" stroke="#22d3ee"/>
+  <text x="780" y="417" text-anchor="middle" class="body cyan">Tailscale + Serve</text>
+  <rect x="635" y="447" width="291" height="85" rx="10" fill="#062d27" stroke="#34d399" stroke-width="2"/>
+  <text x="780" y="490" text-anchor="middle" class="heading green">web-tmux</text>
+  <text x="780" y="518" text-anchor="middle" class="small">Local access + SSH</text>
+  <path d="M665 536V586" fill="none" stroke="#34d399" stroke-width="3" marker-start="url(#green)" marker-end="url(#green)"/>
+  <text x="687" y="568" class="small green">Local PTY</text>
+  <rect x="635" y="590" width="291" height="61" rx="9" fill="#020617" stroke="#34d399" stroke-width="2"/>
+  <text x="652" y="616" class="small green mono">$ tmux</text>
+  <text x="652" y="640" class="small">tmux on the server itself</text>
+  <text x="780" y="682" text-anchor="middle" class="small cyan">Only Tailscale node in this LAN</text>
+
+  <!-- LAN terminals, no Tailscale membership. -->
+  <rect x="1121" y="275" width="293" height="171" rx="16" fill="#0f172a" stroke="#34d399" stroke-width="2"/>
+  <text x="1145" y="312" class="heading">LAN host A</text>
+  <rect x="1145" y="331" width="245" height="90" rx="8" fill="#020617" stroke="#334155"/>
+  <text x="1161" y="359" class="small green mono">$ tmux</text>
+  <path d="M1267 369V407M1157 389H1378" stroke="#334155"/>
+  <text x="1161" y="380" class="small muted mono">&gt;_</text>
+  <text x="1280" y="402" class="small muted mono">&gt;_</text>
+
+  <rect x="1121" y="500" width="293" height="171" rx="16" fill="#0f172a" stroke="#34d399" stroke-width="2"/>
+  <text x="1145" y="537" class="heading">LAN host B</text>
+  <rect x="1145" y="556" width="245" height="90" rx="8" fill="#020617" stroke="#334155"/>
+  <text x="1161" y="584" class="small green mono">$ tmux</text>
+  <path d="M1267 594V632M1157 614H1378" stroke="#334155"/>
+  <text x="1161" y="605" class="small muted mono">&gt;_</text>
+  <text x="1280" y="627" class="small muted mono">&gt;_</text>
+  <rect x="970" y="449" width="224" height="34" rx="10" fill="#0d1324"/>
+  <text x="1082" y="473" text-anchor="middle" class="small green">② SSH to LAN hosts</text>
+
+  <!-- Legend and operational explanation outside boundaries. -->
+  <path d="M58 759H112" stroke="#22d3ee" stroke-width="4"/>
+  <text x="127" y="766" class="small">Traffic over Tailscale</text>
+  <path d="M391 759H445" stroke="#34d399" stroke-width="4"/>
+  <text x="460" y="766" class="small">tmux access (PTY / SSH)</text>
+  <path d="M727 759H781" stroke="#fb7185" stroke-width="2" stroke-dasharray="8 5"/>
+  <text x="796" y="766" class="small">Firewall boundary</text>
+  <text x="57" y="816" class="body">③ Control tmux on the server itself and on LAN hosts from the same web interface</text>
+  <text x="57" y="850" class="small muted">Other LAN hosts do not need Tailscale. The web-tmux server connects to them over SSH.</text>
+</svg>

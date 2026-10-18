@@ -8,6 +8,18 @@ A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and 
 Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 ```
 
+## Network architecture
+
+![web-tmux network architecture: a browser connects over Tailscale to web-tmux, which controls tmux on the server itself through a local PTY and on other LAN hosts over SSH](docs/images/network.en.svg)
+
+This example places the web-tmux server inside a private LAN protected by a firewall:
+
+1. A browser on a Tailscale-connected device accesses web-tmux through **Tailscale Serve** (HTTPS / WebSocket).
+2. web-tmux controls **tmux on the server itself** through a local PTY, or connects to **tmux on other LAN hosts** over SSH.
+3. Only the server needs to join Tailscale inside the LAN. The other LAN hosts do not need Tailscale, and the browser connects only to web-tmux rather than directly to those hosts.
+
+See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configuration.
+
 ## Features
 
 - Sidebar showing sessions, windows, and panes with live updates
