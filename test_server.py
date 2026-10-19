@@ -715,6 +715,39 @@ class UnknownPaneTest(unittest.TestCase):
                     server._validated_message(server.json.dumps(msg))
 
 
+class ResizeMasterTest(unittest.TestCase):
+    """Only someone using a browser makes it the one that sizes the window."""
+
+    def setUp(self):
+        self.tmux = _SwitchingTmux()
+        patcher = patch.multiple(server, tmux=self.tmux, _allowed_panes={'%0'},
+                                 _resize_master=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def type(self, client, data):
+        msg = server._validated_message(server.json.dumps(
+            {'type': 'input', 'pane': '%0', 'data': data, 'gen': 0}))
+        asyncio.run(server._handle_msg(client, msg))
+
+    def test_typing_takes_the_window_size(self):
+        client = _Client()
+        self.type(client, 'ls\r')
+        self.assertIs(server._resize_master, client)
+
+    def test_query_replies_and_focus_reports_do_not(self):
+        # What xterm 5.3 sends by itself, which every open browser sends alike.
+        replies = ('\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[0n', '\x1b[12;40R',
+                   '\x1b[?2026;2$y', '\x1b[8;24;80t', '\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\',
+                   '\x1bP1$r0m\x1b\\', '\x1b[>0;276;0c\x1b[?2026;2$y', '\x1b[I', '\x1b[O')
+        for data in replies:
+            with self.subTest(data=data):
+                self.type(_Client(), data)
+                self.assertIsNone(server._resize_master)
+        # They still reach the pane: the application asked for them.
+        self.assertEqual(len(self.tmux.inputs), len(replies))
+
+
 class StaleViewTest(unittest.TestCase):
     """Pane ids from a view of the host we've left must not reach the new one."""
 

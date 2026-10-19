@@ -1173,6 +1173,13 @@ async def _run_on_host(host_name: str, *args: str) -> None:
 
 _PANE_MESSAGES = {'input', 'split_window', 'get_snapshot', 'get_history', 'select_pane'}
 
+# Input a browser's xterm sends on its own (isAutomaticInput in app.js): query
+# replies and focus reports. Every browser showing the pane replies to the
+# same query, so this says nothing about which device the user is on.
+_AUTOMATIC_INPUT_RE = re.compile(
+    r'(?:\x1b\[[0-9;?>]*\$?[Rcnty]|\x1b\][0-9]+;[^\x07\x1b]*(?:\x1b\\|\x07)'
+    r'|\x1bP[01]\$r[^\x1b]*\x1b\\|\x1b\[[IO])+')
+
 
 async def _known_pane(pane: str) -> bool:
     """Whether `pane` is in the current window, re-reading the window once
@@ -1203,9 +1210,10 @@ async def _handle_msg(websocket, msg: dict) -> None:
         return
 
     if t == 'input':
-        _resize_master = websocket
         pane = _pane_id(msg.get('pane'))
         data = msg.get('data', '')
+        if not _AUTOMATIC_INPUT_RE.fullmatch(data):
+            _resize_master = websocket
         if pane and data:
             # Also dropped if a switch lands while this is being written.
             await tmux.write_input(pane, data.encode('utf-8'), target_gen=msg['gen'])

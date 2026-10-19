@@ -429,7 +429,7 @@ function sendPaneInput(data, paneId) {
   if (!data || !ws || ws.readyState !== WebSocket.OPEN) return;
   const targetPaneId = paneId || activePaneId || Object.keys(panes)[0];
   if (!targetPaneId) return;
-  markClientActive();
+  if (!isAutomaticInput(data)) markClientActive();
   splitUtf8Chunks(data).forEach((chunk) => {
     ws.send(JSON.stringify({ type: 'input', pane: targetPaneId, data: chunk, gen: currentGen }));
   });
@@ -493,7 +493,7 @@ function handleTerminalInput(data, paneId) {
   // scrollback they are reading.
   // Focus reports (\x1b[I / \x1b[O) are not typing either: pressing the
   // overlay's text to select it blurs the terminal.
-  if (!isTerminalResponseSequence(data) && !/^(?:\x1b\[[IO])+$/.test(data)) HistoryOverlay.close();
+  if (!isAutomaticInput(data)) HistoryOverlay.close();
 
   if (_heldClientPrefix) {
     if (_heldClientPrefixTimer) {
@@ -610,8 +610,20 @@ function isMouseReportingSequence(data) {
   return c === 0x4d || c === 0x3c; // X10 mouse 'M' or SGR mouse '<'
 }
 
+// Every reply xterm 5.3 sends to an application's query: DA1/DA2, DSR/CPR,
+// DECRQM ($y), window reports (t), colour reports (OSC) and DECRQSS (DCS $r).
+// A modified F3 (\x1b[1;2R) reads the same as a CPR; nothing else typed does.
 function isTerminalResponseSequence(data) {
-  return /^(?:\x1b\[[0-9;?]*(?:R|c|n)|\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07))+$/.test(data || '');
+  return /^(?:\x1b\[[0-9;?>]*\$?[Rcnty]|\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07)|\x1bP[01]\$r[^\x1b]*\x1b\\)+$/
+    .test(data || '');
+}
+
+// What xterm sends on its own rather than because someone is using this tab:
+// query replies, and focus reports (\x1b[I / \x1b[O). Every browser showing
+// the pane replies to the same query, so none of this may claim the window
+// size for the device it came from.
+function isAutomaticInput(data) {
+  return isTerminalResponseSequence(data) || /^(?:\x1b\[[IO])+$/.test(data || '');
 }
 
 function createInputDeduper() {
