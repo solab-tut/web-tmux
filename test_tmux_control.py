@@ -349,6 +349,26 @@ class ResponseSizeLimitTest(unittest.TestCase):
         self.assertFalse(tc._resp_overflow)
 
 
+class UnsolicitedResponseTest(unittest.TestCase):
+    def test_a_key_bindings_own_block_answers_no_pending_command(self):
+        # tmux 3.6, prefix c through send-keys -K: the binding's new-window
+        # gets a %begin/%end of its own, flagged 0, after send-keys' answer.
+        async def scenario():
+            tc = _attached(TmuxControl())
+            loop = asyncio.get_running_loop()
+            send_keys, display = loop.create_future(), loop.create_future()
+            tc._pending += [send_keys, display]
+            for line in ('%begin 5 284 1', '%end 5 284 1',
+                         '%begin 5 286 0', 'output of the bound command', '%end 5 286 0',
+                         '%begin 5 291 1', 'hello', '%end 5 291 1'):
+                tc._handle_line(line)
+            return send_keys.result(), display.result(), tc._pending
+        send_keys, display, pending = asyncio.run(scenario())
+        self.assertEqual(send_keys, '')
+        self.assertEqual(display, 'hello')
+        self.assertEqual(pending, [])
+
+
 class _Attempts:
     """Stands in for _connect: succeeds per host as told."""
 

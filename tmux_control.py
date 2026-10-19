@@ -324,6 +324,7 @@ class TmuxControl:
         self._resp_overflow = False
         self._in_resp: bool = False
         self._resp_guard = ''   # "<time> <number> <flags>" of the open %begin
+        self._resp_ours = True  # the open block answers a command we sent
         self._ready = asyncio.Event()
         self._failures = 0
         self._next_attempt = 0.0
@@ -518,6 +519,7 @@ class TmuxControl:
         self._cur_resp_bytes = 0
         self._resp_overflow = False
         self._in_resp = False
+        self._resp_ours = True
         self._decode_remainder = {}
         self._prefix_key_names = None
         self._prefix_pending = False
@@ -1021,13 +1023,19 @@ class TmuxControl:
         elif line.startswith('%begin '):
             self._in_resp, self._cur_resp = True, []
             self._resp_guard = line.split(' ', 1)[1]
+            # Flags 0: a command tmux ran for this client on its own — a key
+            # binding fired by send-keys -K, a hook — not a line we wrote.
+            # Nothing is waiting for it; pairing it with the next pending
+            # command would hand every later response to the wrong caller.
+            self._resp_ours = self._resp_guard.rsplit(' ', 1)[-1] != '0'
             self._cur_resp_bytes, self._resp_overflow = 0, False
             return
         if line.startswith(('%end ', '%error ')):
             self._in_resp = False
+            ours, self._resp_ours = self._resp_ours, True
             result = '' if self._resp_overflow else '\n'.join(self._cur_resp)
             self._cur_resp_bytes, self._resp_overflow = 0, False
-            if self._pending:
+            if self._pending and ours:
                 fut = self._pending.pop(0)
                 if not fut.done():
                     fut.set_result(result)
@@ -1045,7 +1053,7 @@ class TmuxControl:
             log.debug('unhandled control line: %s', line[:200])
 
     def _add_response_line(self, line: str) -> None:
-        if self._resp_overflow:
+        if self._resp_overflow or not self._resp_ours:
             return
         self._cur_resp_bytes += len(line) + 1
         if self._cur_resp_bytes > MAX_RESPONSE_BYTES:
