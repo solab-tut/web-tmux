@@ -100,10 +100,11 @@ TMUX_SESSION=my-session ./server.sh
 ```bash
 ./server.sh        # start (or restart if already running)
 ./server.sh start  # same as above
+./server.sh restart # explicitly restart
 ./server.sh stop   # stop without restarting
 ```
 
-`server.sh` only stops its own process after the PID file, working directory, and command line have been verified. If the PID belongs to another process or ports 8765/8766 are occupied, startup aborts without killing anything.
+`server.sh` only stops processes verified to be this checkout's server. On Linux, it can recover a missing or stale PID file by checking the process owner, working directory, and arguments in `/proc`. An unrelated PID is left alone; if another checkout or application occupies ports 8765/8766, startup aborts without killing it.
 
 ## Usage
 
