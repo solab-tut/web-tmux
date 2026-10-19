@@ -1223,7 +1223,10 @@ function onInit(msg) {
   updateCurrentWindow(msg.windows);
   applyLayout(msg.panes, msg.layout_panes, msg.layout, msg.active_pane);
   scheduleSnapshotRefresh((msg.panes || []).map((p) => p.id));
-  wsSendType('list_layouts');   // also refreshes the list after a reconnect
+  // Also refreshes the list after a reconnect. A plain send: every open tab
+  // gets this init (reconnects, host switches), hidden ones included, and
+  // none of them is being used because of it.
+  wsSend('list_layouts');
 }
 
 function onWindowSwitched(msg) {
