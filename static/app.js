@@ -1951,7 +1951,7 @@ function buildHostHeader(h) {
     });
   }
   if (h.code === 'disconnected') {
-    div.appendChild(buildPowerButton(`Connect to ${label}`,
+    div.appendChild(buildLinkButton(`Connect to ${label}`, true,
       () => connectHost(h.host, `Connecting to ${label}…`)));
   } else if (h.reachable === false && h.code === 'auth_required') {
     const key = document.createElement('button');
@@ -1980,24 +1980,30 @@ function buildHostHeader(h) {
       focusActivePane();
     });
     if (h.host !== 'local') {
-      div.appendChild(buildPowerButton(`Disconnect from ${label}`, () => disconnectHost(h.host)));
+      div.appendChild(buildLinkButton(`Disconnect from ${label}`, false,
+        () => disconnectHost(h.host)));
     }
     div.appendChild(add);
   }
   return div;
 }
 
-function buildPowerButton(label, onClick) {
+// The icon shows what pressing it does: a whole link connects, a broken
+// one disconnects.
+function buildLinkButton(label, connect, onClick) {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'side-btn host-power';
+  button.className = 'side-btn host-link';
   button.setAttribute('aria-label', label);
   button.title = label;
   button.innerHTML =
     `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"` +
-    ` stroke-linecap="round" aria-hidden="true">` +
-    `<path d="M8 2.5v5"/>` +
-    `<path d="M11.5 4.5a5 5 0 11-7 0"/>` +
+    ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M8.5 4.5l1-1a2.83 2.83 0 014 4l-1 1"/>` +
+    `<path d="M7.5 11.5l-1 1a2.83 2.83 0 01-4-4l1-1"/>` +
+    (connect
+      ? `<path d="M6 10l4-4"/>`
+      : `<path d="M5.5 1.5v2M1.5 5.5h2M10.5 14.5v-2M14.5 10.5h-2"/>`) +
     `</svg>`;
   button.addEventListener('click', onClick);
   return button;
