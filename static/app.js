@@ -3162,9 +3162,11 @@ function runViewportRefit() {
   if (!p) return;
 
   const wasFocused = p.term.textarea && document.activeElement === p.term.textarea;
-  try { p.fitAddon.fit(); } catch (_) {}
-  pinToBottom(p);
-  maybeSendResize(p.term.cols, p.term.rows);
+  // The usual layout paths, not fit(): fit() sizes xterm to its element, a
+  // column wider than the tmux pane once the touch margin is taken off, and
+  // in a split the active pane's size is not the window's.
+  if (_currentLayoutPanes.length > 1) scheduleLayout(_currentLayoutPanes, _currentLayoutStr);
+  else fitSinglePane(activePaneId);
   if (wasFocused && Date.now() - _lastTouchScrollAt >= MOBILE_TOUCH_SCROLL_IDLE_MS) {
     requestAnimationFrame(() => {
       try { p.term.focus(); } catch (_) {}
