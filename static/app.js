@@ -296,11 +296,32 @@ let _lastViewportSize = { width: 0, height: 0 };
 let _lastTouchScrollAt = 0;
 const MOBILE_TMUX_COL_SAFETY_MARGIN = 1;
 
+let _reclaimTriedFor = '';   // the foreign window size markClientActive last resent ours over
+
 function markClientActive() {
   _clientActive = true;
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'client_active' }));
   }
+  // Another tab or device has resized tmux since our last resize, and this
+  // one is being used again without a focus event (a second device that was
+  // already showing): its size wins again. Once per foreign size — a plain
+  // `tmux attach` client keeps the window under window-size latest, and
+  // retrying on every keystroke would redraw the pane on every keystroke.
+  const size = layoutWindowSize(_currentLayoutStr);
+  if (size && _lastResize.cols && !holdsWindowSize(size) && size.key !== _reclaimTriedFor) {
+    _reclaimTriedFor = size.key;
+    refitCurrentLayout();
+  }
+}
+
+function layoutWindowSize(layoutStr) {
+  const m = (layoutStr || '').match(/^[^,]*,(\d+)x(\d+),/);
+  return m ? { cols: +m[1], rows: +m[2], key: `${m[1]}x${m[2]}` } : null;
+}
+
+function holdsWindowSize(size) {
+  return size.cols === _lastResize.cols && size.rows === _lastResize.rows;
 }
 
 function refitCurrentLayout() {
@@ -1304,6 +1325,8 @@ function onLayoutChange(msg) {
 
   const lp = parseLayout(msg.layout);
   if (lp.length === 0) return;
+  const size = layoutWindowSize(msg.layout);
+  if (size && holdsWindowSize(size)) _reclaimTriedFor = '';   // ours again: retry next time it is lost
   _currentLayoutStr   = msg.layout;
   _currentLayoutPanes = lp;
 
