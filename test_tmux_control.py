@@ -137,6 +137,21 @@ class SnapshotOrderingTest(unittest.TestCase):
         self.assertEqual(snap['wrap_flag'], 0)
         self.assertEqual(snap['cursor_flag'], 0)
 
+    def test_captured_rows_are_taken_as_they_are_not_vis_decoded(self):
+        # Command output is raw: a backslash on screen is a backslash, and
+        # ESC/TAB arrive as the bytes themselves.
+        _, events = self._run([
+            '%begin 1 1 1', '0|0|80|24|0|0|23|0|1|0|0|0|1', '%end 1 1 1',
+            '%begin 1 2 1',
+            'printf("hi\\n"); C:\\new \\033 \\\\',
+            '\x1b[1mbold\x1b[0m\tcol',
+            '%end 1 2 1',
+        ])
+        self.assertEqual(
+            events[0][1]['data'],
+            b'printf("hi\\n"); C:\\new \\033 \\\\\n\x1b[1mbold\x1b[0m\tcol',
+        )
+
     def test_missing_pane_delivers_nothing(self):
         _, events = self._run([
             "%begin 1 1 1", "can't find pane: %1", '%error 1 1 1',

@@ -107,44 +107,17 @@ _TMUX_CONTROL_KEYS = {
 }
 
 
-def _decode_output(s: str) -> bytes:
-    """Decode tmux vis(3)-encoded string.
+def _response_bytes(s: str) -> bytes:
+    """A command's output as the pane's own bytes.
 
-    tmux encodes control characters using C/octal escapes:
-      \\n  → 0x0a   \\r  → 0x0d   \\t  → 0x09
-      \\\\  → 0x5c
-      \\NNN → byte with octal value NNN  (e.g. \\033 = ESC = 0x1b)
-    All other bytes pass through as latin-1.
+    Unlike %output, the lines between %begin and %end are not vis(3)-encoded:
+    a captured row reaches us with its ESC and TAB bytes as they are, and a
+    backslash on screen is just a backslash. Decoding it as %output would turn
+    a visible `\\n` (C source, printf formats, Windows paths) into a real line
+    break and shift every row below it. _on_readable read the bytes as
+    latin-1, so encoding back gives them unchanged.
     """
-    out: list[bytes] = []
-    i = 0
-    while i < len(s):
-        if s[i] == '\\' and i + 1 < len(s):
-            nxt = s[i + 1]
-            if nxt == 'n':
-                out.append(b'\n');  i += 2
-            elif nxt == 'r':
-                out.append(b'\r');  i += 2
-            elif nxt == 't':
-                out.append(b'\t');  i += 2
-            elif nxt == '\\':
-                out.append(b'\\'); i += 2
-            elif nxt in '01234567':
-                # Octal escape \NNN (1–3 octal digits)
-                j = i + 1
-                oct_s = ''
-                while j < len(s) and len(oct_s) < 3 and s[j] in '01234567':
-                    oct_s += s[j]
-                    j += 1
-                out.append(bytes([int(oct_s, 8) & 0xff]))
-                i = j
-            else:
-                out.append(s[i].encode('latin-1', errors='replace'))
-                i += 1
-        else:
-            out.append(s[i].encode('latin-1', errors='replace'))
-            i += 1
-    return b''.join(out)
+    return s.encode('latin-1', errors='replace')
 
 
 def _decode_output_stream(s: str, remainder: str = '') -> tuple[bytes, str]:
@@ -801,9 +774,8 @@ class TmuxControl:
         """
         def on_end(responses: list[str]) -> None:
             state_raw, screen_raw = responses
-            # Response content uses the same vis(3) encoding as %output data.
             screen = _strip_terminal_response_sequences(
-                _strip_zsh_eol_marks(_decode_output(screen_raw))
+                _strip_zsh_eol_marks(_response_bytes(screen_raw))
             )
             state = _parse_pane_state(state_raw)
             if state['pane_cols'] <= 0 or state['pane_rows'] <= 0:
@@ -825,7 +797,7 @@ class TmuxControl:
         raw = await self.send_command(
             f'capture-pane -t {pane_id} -p -e -N -S -{lines} -E -1'
         )
-        return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_decode_output(raw)))
+        return _strip_terminal_response_sequences(_strip_zsh_eol_marks(_response_bytes(raw)))
 
     async def get_initial_state(self) -> dict:
         sess_raw = await self.send_command(
