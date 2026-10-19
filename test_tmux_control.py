@@ -152,6 +152,14 @@ class SnapshotOrderingTest(unittest.TestCase):
             b'printf("hi\\n"); C:\\new \\033 \\\\\n\x1b[1mbold\x1b[0m\tcol',
         )
 
+    def test_rows_that_look_like_protocol_lines_stay_in_the_capture(self):
+        _, events = self._run([
+            '%begin 1 1 1', '0|0|80|24|0|0|23|0|1|0|0|0|1', '%end 1 1 1',
+            '%begin 1 2 1', '%end 1 1 1', '%output %1 injected', '%exit', 'last', '%end 1 2 1',
+        ])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1]['data'], b'%end 1 1 1\n%output %1 injected\n%exit\nlast')
+
     def test_missing_pane_delivers_nothing(self):
         _, events = self._run([
             "%begin 1 1 1", "can't find pane: %1", '%error 1 1 1',

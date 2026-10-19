@@ -323,6 +323,7 @@ class TmuxControl:
         self._cur_resp_bytes = 0
         self._resp_overflow = False
         self._in_resp: bool = False
+        self._resp_guard = ''   # "<time> <number> <flags>" of the open %begin
         self._ready = asyncio.Event()
         self._failures = 0
         self._next_attempt = 0.0
@@ -1009,8 +1010,17 @@ class TmuxControl:
             self._handle_attach_line(line)
             return
         # ── response demux ──
-        if line.startswith('%begin '):
+        if self._in_resp:
+            # Every line of a block is command output, whatever it starts with:
+            # a captured row can read "%end ..." or "%output ...". Only the
+            # guard line repeating the %begin's arguments closes it.
+            if not (line.startswith(('%end ', '%error '))
+                    and line.split(' ', 1)[1] == self._resp_guard):
+                self._add_response_line(line)
+                return
+        elif line.startswith('%begin '):
             self._in_resp, self._cur_resp = True, []
+            self._resp_guard = line.split(' ', 1)[1]
             self._cur_resp_bytes, self._resp_overflow = 0, False
             return
         if line.startswith(('%end ', '%error ')):
@@ -1030,9 +1040,6 @@ class TmuxControl:
             self._cur_resp = []
             return
         if self._handle_notification_line(line):
-            return
-        if self._in_resp:
-            self._add_response_line(line)
             return
         if line.startswith('%'):
             log.debug('unhandled control line: %s', line[:200])
