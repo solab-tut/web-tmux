@@ -1230,6 +1230,12 @@ function onSnapshot(msg) {
   }
   const p = panes[paneId];
   if (!p) return;
+  // The capture is laid out for the pane's size at that instant; drawn into
+  // any other size its rows wrap or clip.
+  if (validResize(msg.pane_cols, msg.pane_rows)
+      && (p.term.cols !== msg.pane_cols || p.term.rows !== msg.pane_rows)) {
+    try { p.term.resize(msg.pane_cols, msg.pane_rows); } catch (_) {}
+  }
   const frame = buildSnapshotFrame(msg, p.term);
   p.term.write(held.length ? concatBytes([...held, frame]) : frame, () => {
     pinToBottom(p);
@@ -1264,6 +1270,20 @@ function onOutput(msg) {
     maybeRefreshAfterAltScreenExit(msg.pane, data);
     if (msg.pane === activePaneId) HistoryOverlay.noteOutput();
   }
+}
+
+// tmux has already resized these panes, and every byte it sends from here on
+// is formatted for the new size, so xterm takes it now. Placing the pane
+// elements waits for a frame, and a hidden tab runs no frames at all: a
+// snapshot drawn into the old size and resized afterwards leaves the cursor on
+// the wrong row, and every later line lands there too.
+function syncTermSizes(layoutPanes) {
+  (layoutPanes || []).forEach(({ id, cols, rows }) => {
+    const p = panes['%' + id];
+    if (p && validResize(cols, rows) && (p.term.cols !== cols || p.term.rows !== rows)) {
+      try { p.term.resize(cols, rows); } catch (_) {}
+    }
+  });
 }
 
 function onLayoutChange(msg) {
@@ -1305,6 +1325,7 @@ function onLayoutChange(msg) {
       newIds.push(pid);
     }
   });
+  syncTermSizes(lp);
 
   // Reposition — debounced to avoid rapid flickering
   if (lp.length === 1) {
@@ -1376,6 +1397,7 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
     }
   } else {
     lp.forEach(({ id, cols, rows }) => ensurePane('%' + id, cols, rows));
+    syncTermSizes(lp);
   }
 
   const fallbackActivePane =
@@ -1473,6 +1495,9 @@ function positionPanes(layoutPanes, layoutStr) {
       if (!p) return;
       if (p.term.cols !== lCols || p.term.rows !== lRows) {
         try { p.term.resize(lCols, lRows); } catch (_) {}
+        // xterm reflows its screen its own way; take tmux's instead.
+        markSnapshotPending([pid]);
+        scheduleSnapshotRefresh([pid]);
       }
     });
 
@@ -1531,6 +1556,9 @@ function fitSinglePane(paneId) {
   if (tmuxSize && validResize(tmuxSize.cols, tmuxSize.rows)
       && (p.term.cols !== tmuxSize.cols || p.term.rows !== tmuxSize.rows)) {
     try { p.term.resize(tmuxSize.cols, tmuxSize.rows); } catch (_) {}
+    // xterm reflows its screen its own way; take tmux's instead.
+    markSnapshotPending([paneId]);
+    scheduleSnapshotRefresh([paneId]);
   }
   pinToBottom(p);
 }
