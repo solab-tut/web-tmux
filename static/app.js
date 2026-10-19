@@ -2894,7 +2894,9 @@ function buildSnapshotFrame(msg, term) {
 
   const rows = splitCaptureRows(b64ToUint8(msg.data || ''));
   for (let i = 0; i < paneRows; i++) {
-    parts.push(asciiBytes(`\x1b[${i + 1};1H`));
+    // Clear the row first: tmux 3.6 captures TABs as TABs, and a TAB only
+    // moves the cursor, so whatever xterm had under its gap would stay.
+    parts.push(asciiBytes(`\x1b[${i + 1};1H\x1b[2K`));
     if (i < rows.length) parts.push(rows[i]);
     parts.push(asciiBytes('\x1b[K'));   // clear to end of line, no scroll
   }
