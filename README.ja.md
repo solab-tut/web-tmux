@@ -10,13 +10,13 @@ Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
 
 ## ネットワーク構成
 
-![web-tmuxのネットワーク構成：Tailscale経由でブラウザから接続し、サーバー自身のtmuxはローカルPTY、LAN内の別端末のtmuxはSSHで操作](docs/images/network.ja.svg)
+![web-tmuxのネットワーク構成：Tailscale経由でブラウザから接続し、サーバー自身のtmuxはローカルPTY、LAN内の別端末や外部サーバーのtmuxはSSHで操作](docs/images/network.ja.svg)
 
 ファイアウォールで保護された閉じたLAN内に、web-tmuxサーバーを配置する構成例です。
 
 1. Tailscaleに参加している操作端末のブラウザから、**Tailscale Serve** 経由（HTTPS / WebSocket）でweb-tmuxにアクセスします。
-2. web-tmuxから、**サーバーホスト自身のtmux** はローカルPTY経由で、**LAN内の別端末のtmux** はSSH経由で操作できます。
-3. LAN内でTailscaleに参加するのはサーバーホスト1台のみです。ほかのLAN内端末へのTailscale導入は不要で、ブラウザは各端末に直接接続せず、web-tmuxだけに接続します。
+2. web-tmuxから、**サーバーホスト自身のtmux** はローカルPTY経由で、**LAN内の別端末のtmux** やファイアウォールの外にある **外部のSSHサーバー**（VPSなど）のtmuxはSSH経由で操作できます。
+3. LAN内でTailscaleに参加するのはサーバーホスト1台のみです。ほかのLAN内端末や外部サーバーへのTailscale導入は不要で、ブラウザは各端末に直接接続せず、web-tmuxだけに接続します。
 
 SSH接続先の設定は[他のホストの tmux（SSH）](#他のホストの-tmuxssh)を参照してください。
 

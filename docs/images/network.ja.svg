@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="880" viewBox="0 0 1500 880" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1120" viewBox="0 0 1500 1120" role="img" aria-labelledby="title desc">
   <title id="title">web-tmux ネットワーク構成</title>
-  <desc id="desc">外部のTailscale参加端末のブラウザから、ファイアウォール内の閉じたLANにあるTailscale参加ホストのweb-tmuxへアクセスする。web-tmuxはサーバーホスト自身のtmuxをローカルのPTY経由で操作でき、LAN内の各端末のtmuxもSSH経由で操作できる。LAN内でTailscaleに参加するのはサーバーホスト1台のみ。</desc>
+  <desc id="desc">外部のTailscale参加端末のブラウザから、ファイアウォール内の閉じたLANにあるTailscale参加ホストのweb-tmuxへアクセスする。web-tmuxはサーバーホスト自身のtmuxをローカルのPTY経由で操作でき、LAN内の各端末のtmuxもSSH経由で操作できる。ファイアウォールの外にある外部のSSHサーバーのtmuxも、インターネット経由のSSHで操作できる。LAN内でTailscaleに参加するのはサーバーホスト1台のみ。</desc>
   <defs>
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
     <marker id="cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#22d3ee"/></marker>
@@ -10,10 +10,10 @@
       .title{font-size:34px;font-weight:700}.heading{font-size:24px;font-weight:700}.body{font-size:20px}.small{font-size:17px}.muted{fill:#94a3b8}.cyan{fill:#67e8f9}.green{fill:#6ee7b7}.rose{fill:#fda4af}.mono{font-family:'Noto Sans Mono CJK JP',monospace}
     </style>
   </defs>
-  <rect width="1500" height="880" fill="#020617"/>
-  <rect width="1500" height="880" fill="url(#grid)"/>
+  <rect width="1500" height="1120" fill="#020617"/>
+  <rect width="1500" height="1120" fill="url(#grid)"/>
   <text x="54" y="65" class="title">web-tmux｜閉じたLANのtmuxを、外から操作</text>
-  <text x="56" y="103" class="body muted">Tailscale → web-tmux → サーバー自身のtmux ／ LAN内端末のtmux</text>
+  <text x="56" y="103" class="body muted">Tailscale → web-tmux → サーバー自身 ／ LAN内端末 ／ 外部SSHサーバーのtmux</text>
 
   <!-- The LAN security boundary and the logical overlay are separate. -->
   <rect x="535" y="151" width="911" height="563" rx="24" fill="#0d1324" stroke="#fb7185" stroke-width="2" stroke-dasharray="10 7"/>
@@ -78,13 +78,26 @@
   <rect x="970" y="449" width="224" height="34" rx="10" fill="#0d1324"/>
   <text x="1082" y="473" text-anchor="middle" class="small green">② LAN内へSSH接続</text>
 
+  <!-- A server outside the LAN, reached over the internet. -->
+  <path d="M1041 579V857H1118" fill="none" stroke="#34d399" stroke-width="3" marker-end="url(#green)"/>
+  <text x="1022" y="790" text-anchor="end" class="small green">② 外部へSSH接続</text>
+  <text x="1022" y="815" text-anchor="end" class="small muted">ファイアウォールの外向きに接続</text>
+  <rect x="1121" y="772" width="293" height="171" rx="16" fill="#0f172a" stroke="#34d399" stroke-width="2"/>
+  <text x="1145" y="809" class="heading">外部のSSHサーバー</text>
+  <rect x="1145" y="828" width="245" height="90" rx="8" fill="#020617" stroke="#334155"/>
+  <text x="1161" y="856" class="small green mono">$ tmux</text>
+  <path d="M1267 866V904M1157 886H1378" stroke="#334155"/>
+  <text x="1161" y="877" class="small muted mono">&gt;_</text>
+  <text x="1280" y="899" class="small muted mono">&gt;_</text>
+  <text x="1123" y="970" class="small muted">インターネット経由（VPSなど）</text>
+
   <!-- Legend and operational explanation outside boundaries. -->
-  <path d="M58 759H112" stroke="#22d3ee" stroke-width="4"/>
-  <text x="127" y="766" class="small">Tailscale経由の通信</text>
-  <path d="M391 759H445" stroke="#34d399" stroke-width="4"/>
-  <text x="460" y="766" class="small">tmux操作（PTY / SSH）</text>
-  <path d="M727 759H781" stroke="#fb7185" stroke-width="2" stroke-dasharray="8 5"/>
-  <text x="796" y="766" class="small">ファイアウォールの境界</text>
-  <text x="57" y="816" class="body">③ サーバー自身・LAN内端末、どちらのtmuxも同じWeb画面から操作</text>
-  <text x="57" y="850" class="small muted">LAN内端末へのTailscale導入は不要。端末への接続はweb-tmuxサーバーが担う構成。</text>
+  <path d="M58 999H112" stroke="#22d3ee" stroke-width="4"/>
+  <text x="127" y="1006" class="small">Tailscale経由の通信</text>
+  <path d="M391 999H445" stroke="#34d399" stroke-width="4"/>
+  <text x="460" y="1006" class="small">tmux操作（PTY / SSH）</text>
+  <path d="M727 999H781" stroke="#fb7185" stroke-width="2" stroke-dasharray="8 5"/>
+  <text x="796" y="1006" class="small">ファイアウォールの境界</text>
+  <text x="57" y="1056" class="body">③ サーバー自身・LAN内端末・外部サーバー、どのtmuxも同じWeb画面から操作</text>
+  <text x="57" y="1090" class="small muted">LAN内端末・外部サーバーへのTailscale導入は不要。各ホストへの接続はweb-tmuxサーバーがSSHで担う構成。</text>
 </svg>
