@@ -80,6 +80,9 @@ _CPR_RE = re.compile(br'\x1b\[\d+;\d+R')
 # text like ^[]11;rgb:2e2e/3434/4040^[\.
 _OSC_RESPONSE_RE = re.compile(br'\x1b\]\d+;[^\x07\x1b]*(?:\x1b\\|\x07)')
 _TERMINAL_RESPONSE_CSI_RE = re.compile(br'\x1b\[[0-9;?]*[Rcn]')
+# The longest unfinished sequence held back in case it turns out to be one of
+# those replies, which run to a few dozen bytes.
+_MAX_HELD_REPLY = 4096
 
 _TMUX_ESCAPED_KEYS: tuple[tuple[bytes, str], ...] = (
     (b'\x1b[A', 'Up'),
@@ -207,6 +210,13 @@ def _strip_terminal_response_sequences_stream(data: bytes, remainder: bytes = b'
     i = 0
     n = len(src)
 
+    def hold(esc: int) -> tuple[bytes, bytes]:
+        # A tail longer than any reply can't be one: pass it on, so a stream
+        # that never finishes its sequence can't make us keep it all.
+        if n - esc > _MAX_HELD_REPLY:
+            return bytes(out) + src[esc:], b''
+        return bytes(out), src[esc:]
+
     while i < n:
         esc = src.find(b'\x1b', i)
         if esc < 0:
@@ -215,7 +225,7 @@ def _strip_terminal_response_sequences_stream(data: bytes, remainder: bytes = b'
 
         out.extend(src[i:esc])
         if esc + 1 >= n:
-            return bytes(out), src[esc:]
+            return hold(esc)
 
         kind = src[esc + 1]
 
@@ -224,7 +234,7 @@ def _strip_terminal_response_sequences_stream(data: bytes, remainder: bytes = b'
             while j < n and 0x30 <= src[j] <= 0x3f:
                 j += 1
             if j >= n:
-                return bytes(out), src[esc:]
+                return hold(esc)
 
             final = src[j]
             if 0x40 <= final <= 0x7e:
@@ -241,17 +251,20 @@ def _strip_terminal_response_sequences_stream(data: bytes, remainder: bytes = b'
             continue
 
         if kind == ord(']'):
+            # A terminal ends an OSC at BEL or at the next ESC, whatever
+            # follows it (ESC \ is ST proper). Looking only for BEL and ST
+            # held every later byte of the pane, colours and all, until one
+            # turned up.
             bel = src.find(b'\x07', esc + 2)
-            st = src.find(b'\x1b\\', esc + 2)
-            if bel < 0 and st < 0:
-                return bytes(out), src[esc:]
-
-            if bel < 0:
-                end = st + 2
-            elif st < 0:
+            nxt = src.find(b'\x1b', esc + 2)
+            if nxt >= 0 and (bel < 0 or nxt < bel):
+                if nxt + 1 >= n:
+                    return hold(esc)   # maybe the ESC of a split ST
+                end = nxt + 2 if src[nxt + 1] == 0x5c else nxt
+            elif bel >= 0:
                 end = bel + 1
             else:
-                end = min(bel + 1, st + 2)
+                return hold(esc)
 
             seq = src[esc:end]
             if _OSC_RESPONSE_RE.fullmatch(seq):
@@ -520,7 +533,10 @@ class TmuxControl:
         self._resp_overflow = False
         self._in_resp = False
         self._resp_ours = True
+        # Pane ids are reused by the next server (or host): a partial
+        # sequence from this one must not be glued onto that pane's output.
         self._decode_remainder = {}
+        self._response_remainder = {}
         self._prefix_key_names = None
         self._prefix_pending = False
         self._on_end.clear()

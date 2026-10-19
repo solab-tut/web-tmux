@@ -47,6 +47,33 @@ class TerminalResponseFilterTest(unittest.TestCase):
             b'ab',
         )
 
+    def test_unterminated_osc_ends_at_the_next_escape(self):
+        # As in a terminal: the OSC is over at the next ESC, and what follows
+        # is shown, not held until some BEL turns up.
+        chunks = [b'hello \x1b]0;broken', b'\r\nline2\r\n', b'\x1b[31mred\x1b[0m\r\n']
+        out, rem = b'', b''
+        for chunk in chunks:
+            data, rem = _strip_terminal_response_sequences_stream(chunk, rem)
+            out += data
+        self.assertEqual(out, b''.join(chunks))
+        self.assertEqual(rem, b'')
+
+    def test_strips_osc_response_with_st_split_between_its_bytes(self):
+        first, rem = _strip_terminal_response_sequences_stream(b'a\x1b]11;rgb:2e2e/3434/4040\x1b')
+        self.assertEqual((first, rem), (b'a', b'\x1b]11;rgb:2e2e/3434/4040\x1b'))
+        second, rem = _strip_terminal_response_sequences_stream(b'\\b', rem)
+        self.assertEqual((second, rem), (b'b', b''))
+
+    def test_an_unfinished_sequence_longer_than_any_reply_is_not_held(self):
+        data = b'\x1b]0;' + b'x' * (tmux_control._MAX_HELD_REPLY + 1)
+        self.assertEqual(_strip_terminal_response_sequences_stream(data), (data, b''))
+
+    def test_a_reconnect_drops_partial_sequences(self):
+        tc = TmuxControl()
+        tc._response_remainder = {'%1': b'\x1b]11;rgb:'}
+        asyncio.run(tc._cleanup_client())
+        self.assertEqual(tc._response_remainder, {})
+
     def test_preserves_display_color_sequence(self):
         self.assertEqual(
             _strip_terminal_response_sequences(b'a\x1b[31mred\x1b[0mb'),
