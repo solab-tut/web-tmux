@@ -497,6 +497,7 @@ class _SwitchingTmux:
         self.commands = []
         self.target_gen = 0
         self.inputs = []
+        self.panes = []          # what get_initial_state finds in the window
 
     async def switch_target(self, host, session):
         self.during_switch = list(self.subscribers)
@@ -515,7 +516,8 @@ class _SwitchingTmux:
     async def get_initial_state(self):
         return {'host': self.host.name, 'session': self.session,
                 'sessions': [{'name': self.session, 'windows': 1, 'attached': True, 'active': True}],
-                'windows': [], 'panes': [], 'active_pane': '', 'layout': ''}
+                'windows': [], 'panes': [{'id': pane} for pane in self.panes],
+                'active_pane': '', 'layout': ''}
 
 
 class SwitchHostTest(unittest.TestCase):
@@ -672,6 +674,45 @@ class DisconnectHostTest(SwitchHostTest):
         with self.assertRaises(server.PolicyViolation):
             server._validated_message(server.json.dumps({'type': 'disconnect_host', 'host': 'local'}))
         server._validated_message(server.json.dumps({'type': 'disconnect_host', 'host': 'lan-box'}))
+
+
+class UnknownPaneTest(unittest.TestCase):
+    """A pane the server hasn't listed yet is looked up, not a violation."""
+
+    def setUp(self):
+        self.tmux = _SwitchingTmux()
+        patcher = patch.multiple(server, tmux=self.tmux, _allowed_panes={'%0'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def handle(self, **msg):
+        msg = server._validated_message(server.json.dumps(msg))
+        asyncio.run(server._handle_msg(_Client(), msg))
+
+    def test_a_pane_split_off_a_moment_ago_is_accepted(self):
+        self.tmux.panes = ['%0', '%1']
+        self.handle(type='input', pane='%1', data='ls\r', gen=0)
+        self.assertEqual(self.tmux.inputs, [('%1', b'ls\r', 0)])
+        self.assertEqual(server._allowed_panes, {'%0', '%1'})
+
+    def test_a_pane_outside_the_window_is_dropped_without_closing(self):
+        self.tmux.panes = ['%0']
+        for msg in ({'type': 'input', 'pane': '%7', 'data': 'x', 'gen': 0},
+                    {'type': 'get_snapshot', 'pane': '%7'},
+                    {'type': 'select_pane', 'pane': '%7'},
+                    {'type': 'split_window', 'direction': 'h', 'pane': '%7'}):
+            with self.subTest(msg=msg['type']):
+                self.handle(**msg)
+        self.assertEqual(self.tmux.inputs, [])
+        self.assertEqual(self.tmux.commands, [])
+
+    def test_malformed_pane_ids_are_still_violations(self):
+        for msg in ({'type': 'input', 'pane': '%1; kill-server', 'data': 'x', 'gen': 0},
+                    {'type': 'get_snapshot', 'pane': 'x'},
+                    {'type': 'split_window', 'direction': 'h', 'pane': '%%'}):
+            with self.subTest(msg=msg['type']):
+                with self.assertRaises(server.PolicyViolation):
+                    server._validated_message(server.json.dumps(msg))
 
 
 class StaleViewTest(unittest.TestCase):
@@ -938,7 +979,7 @@ class SnapshotDeliveryTest(unittest.TestCase):
 
         client = Client()
         tmux = type('Tmux', (), {'snapshot_pane': staticmethod(fake_snapshot)})()
-        with patch.object(server, 'tmux', tmux):
+        with patch.multiple(server, tmux=tmux, _allowed_panes={'%3'}):
             asyncio.run(server._handle_msg(client, {'type': 'get_snapshot', 'pane': '%3'}))
         self.assertEqual(client.sent, [])
         self.assertEqual(len(client.queued), 1)

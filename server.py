@@ -537,7 +537,9 @@ def _validated_message(raw: str | bytes) -> dict:
 
     if msg_type == 'input':
         pane, data = _pane_id(msg['pane']), msg['data']
-        if not pane or pane not in _allowed_panes or not isinstance(data, str) or not data:
+        # Whether the pane is in the current window is checked when the
+        # message is handled (_known_pane): a browser can be a moment behind.
+        if not pane or not isinstance(data, str) or not data:
             raise PolicyViolation('invalid input target or data')
         if len(data.encode('utf-8')) > MAX_INPUT_BYTES:
             raise PolicyViolation('input is too large')
@@ -594,13 +596,10 @@ def _validated_message(raw: str | bytes) -> dict:
     elif msg_type == 'split_window':
         if not isinstance(msg['direction'], str) or msg['direction'] not in {'h', 'v'}:
             raise PolicyViolation('invalid split direction')
-        if 'pane' in msg and msg['pane'] not in ('', None):
-            pane = _pane_id(msg['pane'])
-            if not pane or pane not in _allowed_panes:
-                raise PolicyViolation('unknown pane')
+        if 'pane' in msg and msg['pane'] not in ('', None) and not _pane_id(msg['pane']):
+            raise PolicyViolation('unknown pane')
     elif msg_type in {'get_snapshot', 'get_history', 'select_pane'}:
-        pane = _pane_id(msg['pane'])
-        if not pane or pane not in _allowed_panes:
+        if not _pane_id(msg['pane']):
             raise PolicyViolation('unknown pane')
         if msg_type == 'get_history' and 'lines' in msg:
             lines = msg['lines']
@@ -1175,12 +1174,33 @@ async def _run_on_host(host_name: str, *args: str) -> None:
 _PANE_MESSAGES = {'input', 'split_window', 'get_snapshot', 'get_history', 'select_pane'}
 
 
+async def _known_pane(pane: str) -> bool:
+    """Whether `pane` is in the current window, re-reading the window once
+    before saying no.
+
+    The allowed set is only refreshed when someone asks for the view, so it
+    lags behind tmux: a pane split off a moment ago is asked for (history,
+    snapshot, keystrokes) before any get_state, and another browser may still
+    be on the window this one just left. Neither is a policy violation —
+    closing the socket for it made every split reconnect the browser — so the
+    message is simply dropped if the pane really is elsewhere.
+    """
+    if pane in _allowed_panes:
+        return True
+    state = await tmux.get_initial_state()
+    if state['panes']:   # nothing came back: tmux is not answering, keep the old set
+        _update_allowed_targets(state)
+    return pane in _allowed_panes
+
+
 async def _handle_msg(websocket, msg: dict) -> None:
     global _resize_master, _last_size
     t = msg.get('type')
 
     if t in _PANE_MESSAGES and _stale_view(msg):
         return   # aimed at a pane of the host we just left
+    if t in _PANE_MESSAGES and msg.get('pane') and not await _known_pane(_pane_id(msg['pane'])):
+        return
 
     if t == 'input':
         _resize_master = websocket
