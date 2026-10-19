@@ -105,7 +105,10 @@ stop_recorded_server() {
       pids+=("$pid")
     fi
   done < <(find_checkout_server_pids)
-  for pid in "${pids[@]}"; do
+  # ${pids[@]+...}: bash before 4.4 (macOS's /bin/bash is 3.2) treats an
+  # empty array as unset under `set -u`, and there it is always empty when
+  # no server is running, since find_checkout_server_pids needs /proc.
+  for pid in ${pids[@]+"${pids[@]}"}; do
     # Recheck immediately before signalling in case it exited during discovery.
     is_web_tmux_pid "$pid" || continue
     if ! kill "$pid" 2>/dev/null && pid_is_running "$pid"; then
