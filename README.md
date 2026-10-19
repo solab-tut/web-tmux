@@ -300,7 +300,7 @@ WEB_TMUX_ALLOWED_ORIGINS=https://<machine>.<tailnet>.ts.net:8766
 WEB_TMUX_TAILSCALE_USERS=you@example.com
 ```
 
-`server.sh` refuses to load `.web-tmux.env` unless its mode is exactly 600. The server also fails closed when the origin list is empty or a remote origin has no allowed Tailscale login. Do not add localhost or `127.0.0.1`: browser access is intended to go through Tailscale Serve only.
+`server.sh` refuses to load `.web-tmux.env` unless its mode is exactly 600. It takes `WEB_TMUX_*` settings from that file only and ignores any in the shell's environment, so a setting exported for another checkout cannot leak into this server. The server also fails closed when the origin list is empty or a remote origin has no allowed Tailscale login. Do not add localhost or `127.0.0.1`: browser access is intended to go through Tailscale Serve only.
 
 | Variable | Meaning |
 |----------|---------|
@@ -413,7 +413,7 @@ web-tmux/
 
 Saved layouts live outside the repository, in
 `~/.local/share/web-tmux/layouts.json` (override the directory with
-`WEB_TMUX_STATE_DIR`).
+`WEB_TMUX_STATE_DIR` in `.web-tmux.env`).
 
 ## Tests
 

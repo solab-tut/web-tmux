@@ -250,7 +250,7 @@ WEB_TMUX_ALLOWED_ORIGINS=https://<machine>.<tailnet>.ts.net:8766
 WEB_TMUX_TAILSCALE_USERS=you@example.com
 ```
 
-`server.sh` は権限が正確に600でない場合、`.web-tmux.env` を読み込まず起動を中止します。Originが空の場合や、リモートOriginに対するTailscaleログイン名がない場合も起動を拒否します。localhostや `127.0.0.1` は追加せず、ブラウザからはTailscale Serve経由だけで利用してください。
+`server.sh` は権限が正確に600でない場合、`.web-tmux.env` を読み込まず起動を中止します。`WEB_TMUX_*` の設定はこのファイルからだけ読み、シェルの環境変数にあるものは無視するので、別のチェックアウト用に export した設定が混ざることはありません。Originが空の場合や、リモートOriginに対するTailscaleログイン名がない場合も起動を拒否します。localhostや `127.0.0.1` は追加せず、ブラウザからはTailscale Serve経由だけで利用してください。
 
 | 設定名 | 内容 |
 |--------|------|
@@ -362,7 +362,7 @@ web-tmux/
 ```
 
 保存したレイアウトはリポジトリの外、`~/.local/share/web-tmux/layouts.json` に置かれます
-（保存先は `WEB_TMUX_STATE_DIR` で変更できます）。
+（保存先は `.web-tmux.env` の `WEB_TMUX_STATE_DIR` で変更できます）。
 
 ## テスト
 

@@ -9,6 +9,14 @@ PID_FILE="server.pid"
 PYTHON=".venv/bin/python"
 CONFIG_FILE=".web-tmux.env"
 
+# Settings come from this checkout's .web-tmux.env only. A WEB_TMUX_*
+# variable in the calling shell may belong to another checkout — a dev
+# worktree's WEB_TMUX_STATE_DIR, left behind in a tmux pane's environment,
+# say — and would point this server at that checkout's layouts.
+for var in $(compgen -e); do
+  if [[ "$var" == WEB_TMUX_* ]]; then unset "$var"; fi
+done
+
 if [ -f "$CONFIG_FILE" ]; then
   if stat -c '%a' "$CONFIG_FILE" >/dev/null 2>&1; then
     CONFIG_MODE="$(stat -c '%a' "$CONFIG_FILE")"
