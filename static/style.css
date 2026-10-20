@@ -1145,3 +1145,12 @@ html.virtual-keyboard-visible #bottombar {
     outline: 1px solid var(--accent-a4);
   }
 }
+
+/* Below 16px, iOS zooms the page when the rename field takes focus, and the
+   zoomed visual viewport then shrinks #app (see applyViewportFix). */
+@media (pointer: coarse) {
+  .item-inline-input {
+    height: 26px;
+    font-size: 16px;
+  }
+}

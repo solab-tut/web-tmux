@@ -1217,6 +1217,7 @@ function onInit(msg) {
   document.getElementById('session-name').textContent = msg.session;
   _sessionNote = '';
   dropHostAuthPrompts();   // a reconnect means the server gave up on them
+  _editingWindowIndex = null;   // its window belonged to the old session
   updateSessions(msg);
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
@@ -1447,7 +1448,7 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
   if (fallbackActivePane) {
     setActivePaneVisual(fallbackActivePane);
     activePaneId = fallbackActivePane;
-    if (!sheetIsOpen()) panes[fallbackActivePane]?.term.focus();
+    if (!fieldOwnsKeyboard()) panes[fallbackActivePane]?.term.focus();
   }
 
   // Now position; fit() will see the active pane at its real container size.
@@ -1748,11 +1749,13 @@ function selectPane(paneId, opts) {
   }
 }
 
-// A sheet (sign-in, paste, layout conflict) owns the keyboard while it is up.
-// On iPhone, tapping its field raises the soft keyboard, which resizes the
-// pane, and the layout events that follow would hand focus back to xterm.
-function sheetIsOpen() {
-  return !!document.querySelector('.sheet:not(.hidden)');
+// A sheet (sign-in, paste, layout conflict) or a rename field owns the
+// keyboard while it is up. On iPhone, tapping its field raises the soft
+// keyboard, which resizes the pane, and the layout events that follow would
+// hand focus back to xterm.
+function fieldOwnsKeyboard() {
+  if (document.querySelector('.sheet:not(.hidden)')) return true;
+  return !!document.activeElement?.classList.contains('item-inline-input');
 }
 
 function focusActivePane(opts) {
@@ -1762,7 +1765,7 @@ function focusActivePane(opts) {
 
   const focusOnce = (remaining) => {
     if (document.visibilityState === 'hidden') return;
-    if (sheetIsOpen()) return;
+    if (fieldOwnsKeyboard()) return;
     if (usesTouchInterface() && Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) return;
 
     let paneId = activePaneId;
@@ -1808,8 +1811,12 @@ function setActivePaneVisual(paneId) {
 
 // ─── Window list ──────────────────────────────────────────────────────────────
 
+let _windowListLatest = [];
+
 function renderWindowList(windows) {
+  _windowListLatest = windows;
   const list = document.getElementById('window-list');
+  if (keepInlineEditor(list, `window:${_editingWindowIndex}`)) return;
   list.innerHTML = '';
   [...(windows || [])]
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
@@ -1820,13 +1827,14 @@ function renderWindowList(windows) {
     if (_editingWindowIndex === w.index) {
       div.classList.add('editing');
       div.appendChild(buildInlineEditor({
+        key: `window:${w.index}`,
         kind: 'window',
         value: w.name,
         label: `window ${w.index}`,
         onSave: (name) => renameWindow(w.index, name),
         onCancel: () => {
           _editingWindowIndex = null;
-          renderWindowList(windows);
+          renderWindowList(_windowListLatest);
         },
       }));
     } else if (_confirmDeleteWindow === w.index) {
@@ -1839,7 +1847,7 @@ function renderWindowList(windows) {
         },
         onCancel: () => {
           _confirmDeleteWindow = null;
-          renderWindowList(windows);
+          renderWindowList(_windowListLatest);
         },
       }));
     } else {
@@ -1851,13 +1859,13 @@ function renderWindowList(windows) {
         div.appendChild(buildDeleteButton(`Close window ${w.index}`, () => {
           _editingWindowIndex = null;
           _confirmDeleteWindow = w.index;
-          renderWindowList(windows);
+          renderWindowList(_windowListLatest);
         }));
       }
       div.appendChild(buildRenameButton(`Rename window ${w.index}`, () => {
         _confirmDeleteWindow = null;
         _editingWindowIndex = w.index;
-        renderWindowList(windows);
+        renderWindowList(_windowListLatest);
       }));
       div.addEventListener('click', () => {
         switchWindow(w.index);
@@ -1867,6 +1875,7 @@ function renderWindowList(windows) {
     }
     list.appendChild(div);
     });
+  focusInlineEditor(list);
 }
 
 // ─── Hosts & sessions ─────────────────────────────────────────────────────────
@@ -1968,6 +1977,7 @@ function updateHostLabel() {
 
 function renderSessionList() {
   const list = document.getElementById('session-list');
+  if (keepInlineEditor(list, `session:${_editingSessionName}`)) return;
   list.innerHTML = '';
   if (_sessionNote) {
     const note = document.createElement('div');
@@ -1988,6 +1998,7 @@ function renderSessionList() {
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
       .forEach((s) => list.appendChild(buildSessionItem(h.host, s)));
   });
+  focusInlineEditor(list);
 }
 
 function buildHostHeader(h) {
@@ -2093,6 +2104,7 @@ function buildSessionItem(host, s) {
   if (_editingSessionName === key) {
     div.classList.add('editing');
     div.appendChild(buildInlineEditor({
+      key: `session:${key}`,
       kind: 'session',
       value: s.name,
       label: s.name,
@@ -2346,9 +2358,26 @@ function buildInlineConfirm({ label, confirmText = 'delete', onConfirm, onCancel
   return div;
 }
 
-function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
+// While a rename is open, a list refresh would rebuild the field: the draft is
+// lost, and on iPhone the new field cannot take focus without a tap, so the
+// keyboard drops. Leave the list as it is until the rename ends.
+function keepInlineEditor(list, key) {
+  return list.querySelector('.item-inline-editor')?.dataset.key === key;
+}
+
+// Called while the rename button's tap is still being handled, so iOS raises
+// the keyboard; a focus from a later frame would only place the caret.
+function focusInlineEditor(list) {
+  const input = list.querySelector('.item-inline-input');
+  if (!input) return;
+  input.focus();
+  input.select();
+}
+
+function buildInlineEditor({ key, kind, value, label, onSave, onCancel }) {
   const editor = document.createElement('div');
   editor.className = 'item-inline-editor';
+  editor.dataset.key = key;
 
   const input = document.createElement('input');
   input.type = 'text';
@@ -2370,10 +2399,14 @@ function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
     ev.preventDefault();
     ev.stopPropagation();
   };
-  [editor, input, save, cancel].forEach((el) => {
+  [editor, save, cancel].forEach((el) => {
     el.addEventListener('mousedown', stop);
     el.addEventListener('click', (ev) => ev.stopPropagation());
   });
+  // Not cancelled here: mousedown is what moves focus (and the caret) into
+  // the field, and a tap on iPhone gets no keyboard without it.
+  input.addEventListener('mousedown', (ev) => ev.stopPropagation());
+  input.addEventListener('click', (ev) => ev.stopPropagation());
 
   input.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') {
@@ -2391,12 +2424,6 @@ function buildInlineEditor({ kind, value, label, onSave, onCancel }) {
   editor.appendChild(input);
   editor.appendChild(save);
   editor.appendChild(cancel);
-
-  requestAnimationFrame(() => {
-    input.focus();
-    input.select();
-  });
-
   return editor;
 }
 
