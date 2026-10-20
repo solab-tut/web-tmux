@@ -257,6 +257,22 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
    its sidebar icon, waiting for you over finished. */
 #hamburger.agent-alert-done,
 #hamburger.agent-alert-approval { border-width: 2px; }
+#hamburger { position: relative; }
+/* An agent at work: a turning arc on the corner, over the border. */
+.hamburger-busy {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
+  padding: 1px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  display: flex;
+  pointer-events: none;
+}
+.hamburger-busy svg { width: 100%; height: 100%; display: block; animation: agent-spin 1.1s linear infinite; }
 #hamburger.agent-alert-done { color: var(--status-ok); border-color: var(--status-ok); }
 #hamburger.agent-alert-approval {
   color: var(--status-warn);
@@ -628,6 +644,7 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 @media (prefers-reduced-motion: reduce) {
   .agent-icon,
   .agent-icon svg,
+  .hamburger-busy svg,
   #hamburger { animation: none; }
 }
 

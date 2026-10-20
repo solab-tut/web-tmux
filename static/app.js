@@ -1965,15 +1965,30 @@ const _faviconHref = document.querySelector('link[rel="icon"]')?.getAttribute('h
 let _agentAlertKey = '0/0';   // approval/done counts last shown
 
 function applyAgentAlert(entries) {
-  const counts = { approval: 0, done: 0 };
+  const counts = { approval: 0, done: 0, thinking: 0 };
   entries.forEach((e) => { if (e.state in counts) counts[e.state] += 1; });
   const top = counts.approval ? 'approval' : (counts.done ? 'done' : '');
   const button = document.getElementById('hamburger');
   button.classList.toggle('agent-alert-approval', top === 'approval');
   button.classList.toggle('agent-alert-done', top === 'done');
+  // The sidebar's turning arc, in the corner while anything works. Kept, not
+  // rebuilt, so the spin runs on smoothly from one update to the next.
+  let busy = button.querySelector('.hamburger-busy');
+  if (counts.thinking && !busy) {
+    busy = document.createElement('span');
+    busy.className = 'hamburger-busy agent-thinking';
+    busy.setAttribute('aria-hidden', 'true');
+    busy.innerHTML =
+      `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"` +
+      ` stroke-linecap="round" stroke-linejoin="round">${AGENT_STATE_ICONS.thinking}</svg>`;
+    button.appendChild(busy);
+  } else if (!counts.thinking) {
+    busy?.remove();
+  }
   const words = [];
   if (counts.approval) words.push(`${counts.approval} waiting for you`);
   if (counts.done) words.push(`${counts.done} finished`);
+  if (counts.thinking) words.push(`${counts.thinking} working`);
   button.setAttribute('aria-label', 'toggle sidebar' + (words.length ? ` (agents: ${words.join(', ')})` : ''));
   button.title = words.length ? `Agents: ${words.join(', ')}` : '';
 
