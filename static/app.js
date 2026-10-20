@@ -1952,6 +1952,50 @@ function applyAgentStatus() {
   applyAgentIcons('session-list', '.session-item', (item) =>
     item.dataset.sessionHost !== currentHost ? []
       : entries.filter((e) => e.session === item.dataset.sessionName));
+  applyAgentAlert(entries);
+}
+
+// Agents that want a look — waiting for you, or finished off screen — show
+// outside the sidebar too: on the hamburger, which a phone's closed drawer
+// leaves as the only thing in sight, and in the tab's title and icon, which
+// a desktop sees from another tab.
+const AGENT_ALERT_MARKS = { approval: '⚠', done: '✓' };
+const AGENT_ALERT_COLORS = { approval: '%23c8952c', done: '%2344aa44' };
+const _faviconHref = document.querySelector('link[rel="icon"]')?.getAttribute('href') || '';
+let _agentAlertKey = '0/0';   // approval/done counts last shown
+
+function applyAgentAlert(entries) {
+  const counts = { approval: 0, done: 0 };
+  entries.forEach((e) => { if (e.state in counts) counts[e.state] += 1; });
+  const top = counts.approval ? 'approval' : (counts.done ? 'done' : '');
+  const button = document.getElementById('hamburger');
+  button.classList.toggle('agent-alert-approval', top === 'approval');
+  button.classList.toggle('agent-alert-done', top === 'done');
+  const words = [];
+  if (counts.approval) words.push(`${counts.approval} waiting for you`);
+  if (counts.done) words.push(`${counts.done} finished`);
+  button.setAttribute('aria-label', 'toggle sidebar' + (words.length ? ` (agents: ${words.join(', ')})` : ''));
+  button.title = words.length ? `Agents: ${words.join(', ')}` : '';
+
+  const key = `${counts.approval}/${counts.done}`;
+  if (key === _agentAlertKey) return;
+  _agentAlertKey = key;
+  updateTitle();
+  const icon = document.querySelector('link[rel="icon"]');
+  if (icon && _faviconHref) {
+    // A dot in the top-right corner of the usual icon.
+    icon.setAttribute('href', !top ? _faviconHref : _faviconHref.replace(/%3C\/svg%3E$/,
+      `%3Ccircle cx='23' cy='9' r='8.5' fill='${AGENT_ALERT_COLORS[top]}'` +
+      ` stroke='%231e1e1e' stroke-width='2'/%3E%3C/svg%3E`));
+  }
+}
+
+function agentAlertPrefix() {
+  const [approval, done] = _agentAlertKey.split('/').map(Number);
+  const parts = [];
+  if (approval) parts.push(`${AGENT_ALERT_MARKS.approval}${approval}`);
+  if (done) parts.push(`${AGENT_ALERT_MARKS.done}${done}`);
+  return parts.length ? parts.join(' ') + ' ' : '';
 }
 
 // Rows without an agent keep an empty slot while any row of the list has an
@@ -2097,7 +2141,12 @@ function updateHostLabel() {
   label.textContent = remote ? `${_host} → ${currentHost}` : _host;
   label.classList.toggle('remote', !!remote);
   updateCurrentBlock();
-  document.title = (remote ? currentHost : _host) + ' - web-tmux';
+  updateTitle();
+}
+
+function updateTitle() {
+  const remote = currentHost && currentHost !== 'local';
+  document.title = agentAlertPrefix() + (remote ? currentHost : _host) + ' - web-tmux';
 }
 
 function renderSessionList() {

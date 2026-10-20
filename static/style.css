@@ -253,6 +253,16 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 #hamburger:hover  { background: var(--bg-hover); color: var(--text-bright); }
 #hamburger:active { background: var(--bg-active); }
+/* An agent somewhere wants a look (app.js applyAgentAlert): the colours of
+   its sidebar icon, waiting for you over finished. */
+#hamburger.agent-alert-done,
+#hamburger.agent-alert-approval { border-width: 2px; }
+#hamburger.agent-alert-done { color: var(--status-ok); border-color: var(--status-ok); }
+#hamburger.agent-alert-approval {
+  color: var(--status-warn);
+  border-color: var(--status-warn);
+  animation: agent-pulse 0.9s ease-in-out infinite;
+}
 
 #topbar-host {
   color: var(--text-muted);
@@ -617,7 +627,8 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-icon,
-  .agent-icon svg { animation: none; }
+  .agent-icon svg,
+  #hamburger { animation: none; }
 }
 
 /* One group per host when ssh hosts are configured. */
