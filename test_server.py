@@ -1117,6 +1117,17 @@ class FileViewerTest(unittest.TestCase):
         self.assertFalse(reply['truncated'])
         self.assertFalse(reply['binary'])
 
+    def test_parent_after_symlink_is_resolved_by_the_host(self):
+        target = os.path.join(self.tmp, 'target')
+        os.makedirs(os.path.join(target, 'child'))
+        os.symlink(os.path.join(target, 'child'), os.path.join(self.dir, 'alias'))
+        with open(os.path.join(target, 'README.md'), 'wb') as fh:
+            fh.write(b'from symlink target')
+        path = os.path.join(self.dir, 'alias', '..', 'README.md')
+        reply = self.ask(type='read_file', path=path)
+        self.assertEqual(reply['type'], 'file_content')
+        self.assertEqual(base64.b64decode(reply['data']), b'from symlink target')
+
     def test_binary_file_is_flagged_not_sent(self):
         reply = self.ask(type='read_file', path=os.path.join(self.dir, 'bin'))
         self.assertTrue(reply['binary'])

@@ -1225,7 +1225,7 @@ function onInit(msg) {
   // Another host's files, or a reply the old socket took with it.
   if (_files.open) {
     if (_files.host !== currentHost) closeFileViewer();
-    else if (_files.pending) reloadFileView();
+    else if (_files.pending) sendFileRequest(_files.pending);
     else if (_mdImages.inFlight) {
       _mdImages.queue.unshift(_mdImages.inFlight.path);
       _mdImages.inFlight = null;
@@ -3410,6 +3410,9 @@ function onFileContent(msg) {
   if (onMdImageReply(msg)) return;
   if (!fileReplyWanted(msg)) return;
   _files.pending = null;
+  // A fresh file response starts a new document, even at the same path.
+  // Keep cached images only for local redraws (for example, toggling Raw).
+  resetMdImages('');
   const dir = parentPath(msg.path);
   if (dir !== _files.dir) {
     _files.dir = dir;      // reached through a link: Back lists its folder
@@ -3571,7 +3574,8 @@ function documentPath(href, filePath) {
   let path;
   try { path = decodeURIComponent(target); } catch (_) { path = target; }
   if (!path.startsWith('/')) path = joinPath(parentPath(filePath), path);
-  return normalizePath(path);
+  // Let the host resolve . and .. after following any symlinks.
+  return path;
 }
 
 // Links to the same host's files open in the viewer; everything else in a
@@ -3707,16 +3711,6 @@ function onMdImageReply(msg) {
   return true;
 }
 
-function normalizePath(path) {
-  const out = [];
-  path.split('/').forEach((part) => {
-    if (!part || part === '.') return;
-    if (part === '..') out.pop();
-    else out.push(part);
-  });
-  return `/${out.join('/')}`;
-}
-
 function renderImageFile(body, file) {
   const wrap = document.createElement('div');
   wrap.className = 'file-image-wrap' + (_files.fit ? ' fit' : '');
@@ -3822,11 +3816,14 @@ function renderFileView() {
 document.getElementById('files-toggle').addEventListener('click', () => openFileViewer());
 document.getElementById('file-close').addEventListener('click', closeFileViewer);
 document.querySelector('#file-sheet .sheet-backdrop').addEventListener('click', closeFileViewer);
-document.getElementById('file-back').addEventListener('click', () => {
+function backToFileDir() {
+  _files.pending = null;
+  _files.reqId = -1;   // ignore a file response arriving after Back
   _files.file = null;
   if (_files.entries) renderFileView();
   else requestFileDir(_files.dir);
-});
+}
+document.getElementById('file-back').addEventListener('click', backToFileDir);
 document.getElementById('file-reload').addEventListener('click', reloadFileView);
 document.getElementById('file-hidden').addEventListener('click', () => {
   _files.showHidden = !_files.showHidden;
