@@ -291,15 +291,17 @@ def sanitize(text: str, limit: int = 200) -> str:
 
 # ──────────────────────────────────────────────────────────────── running
 
-RC_TOO_LARGE = 1   # output went over CAPTURE_LIMIT; the process was stopped
+RC_TOO_LARGE = 1   # output went over the limit; the process was stopped
 
 
 async def run_argv(argv: list[str], *, timeout: float, stdin: bytes | None = None,
-                   env: dict[str, str] | None = None) -> tuple[int, str, str]:
+                   env: dict[str, str] | None = None,
+                   limit: int = CAPTURE_LIMIT) -> tuple[int, str, str]:
     """(rc, stdout, stderr). A timeout or a missing binary reads as rc 255.
 
-    Output is bounded while it is read, not after: stdout past CAPTURE_LIMIT
-    stops the process (rc RC_TOO_LARGE, no output), and
+    Output is bounded while it is read, not after: stdout past `limit`
+    (CAPTURE_LIMIT unless the caller needs more) stops the process
+    (rc RC_TOO_LARGE, no output), and
     stderr past STDERR_LIMIT is read and thrown away. A remote host — or a
     huge paste buffer — can't make the server hold more than that.
 
@@ -334,7 +336,7 @@ async def run_argv(argv: list[str], *, timeout: float, stdin: bytes | None = Non
             proc.stdin.close()
 
     async def collect() -> tuple[bytes, bool]:
-        out = await _read_capped(proc.stdout, CAPTURE_LIMIT)
+        out = await _read_capped(proc.stdout, limit)
         if out is None:
             stop()
             return b'', True
@@ -354,7 +356,7 @@ async def run_argv(argv: list[str], *, timeout: float, stdin: bytes | None = Non
             await proc.wait()
         return RC_UNREACHABLE, '', 'timeout'
     if too_large:
-        log.warning('%s produced more than %d bytes of output; stopped it', argv[0], CAPTURE_LIMIT)
+        log.warning('%s produced more than %d bytes of output; stopped it', argv[0], limit)
         return RC_TOO_LARGE, '', 'output too large'
     return (
         proc.returncode or 0,
@@ -388,9 +390,11 @@ async def run(host: TmuxHost, *args: str, timeout: float | None = None,
                           env=process_env(host))
 
 
-async def run_shell(host: TmuxHost, script: str, stdin: bytes) -> tuple[int, str, str]:
-    return await run_argv(host.shell_argv(script), timeout=host.timeout, stdin=stdin,
-                          env=process_env(host))
+async def run_shell(host: TmuxHost, script: str, stdin: bytes, *,
+                    limit: int = CAPTURE_LIMIT, timeout: float | None = None,
+                    ) -> tuple[int, str, str]:
+    return await run_argv(host.shell_argv(script), timeout=timeout or host.timeout, stdin=stdin,
+                          env=process_env(host), limit=limit)
 
 
 # host name -> (the task starting its master, whether that start may ask)

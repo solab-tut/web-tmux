@@ -514,7 +514,8 @@ _MESSAGE_FIELDS = {
     # `id` is echoed back: the browser only listens for its latest request.
     # list_dir with no `path` starts from `pane`'s cwd, or from $HOME.
     'list_dir': ({'type', 'id', 'host', 'path', 'pane', 'gen'}, {'host'}),
-    'read_file': ({'type', 'id', 'host', 'path'}, {'host', 'path'}),
+    # `image` reads the whole file, up to IMAGE_READ_LIMIT, for an <img>.
+    'read_file': ({'type', 'id', 'host', 'path', 'image'}, {'host', 'path'}),
 }
 
 _RESTORE_MODES = {'auto', 'replace', 'duplicate', 'skip'}
@@ -632,6 +633,8 @@ def _validated_message(raw: str | bytes) -> dict:
             raise PolicyViolation('invalid path')
         if 'pane' in msg and not _pane_id(msg['pane']):
             raise PolicyViolation('unknown pane')
+        if 'image' in msg and not isinstance(msg['image'], bool):
+            raise PolicyViolation('invalid image flag')
     return msg
 
 
@@ -1535,6 +1538,11 @@ async def _handle_msg(websocket, msg: dict) -> None:
 # ──────────────────────────────────────────── file viewer
 
 FILE_READ_LIMIT = 200 * 1024    # stays under tmux_hosts.CAPTURE_LIMIT with the size line
+# Images go whole or not at all: a cut-off one shows nothing useful. This
+# much goes out in one frame, ahead of the pane output queued behind it, so
+# it is kept to what a screenshot or a plot needs.
+IMAGE_READ_LIMIT = 4 * 1024 * 1024
+IMAGE_READ_TIMEOUT = 30.0       # 4 MiB over a slow ssh link outlasts host.timeout
 MAX_DIR_ENTRIES = 2000
 MAX_FILE_PATH_BYTES = 4096
 _BINARY_SNIFF_BYTES = 8192
@@ -1548,6 +1556,7 @@ _FILE_ERRORS = {
     12: 'permission_denied',
     13: 'is_directory',
     14: 'not_regular',
+    15: 'too_large',
     tmux_hosts.RC_TOO_LARGE: 'too_large',
 }
 
@@ -1579,6 +1588,53 @@ _READ_FILE = (
     's=$(wc -c < "$p") || exit 12; printf "%s\\n" $s; '
     f'exec head -c {FILE_READ_LIMIT} < "$p"'
 )
+
+# The same checks, then the size on one line and the whole file, or exit 15
+# after the size line if the file is over IMAGE_READ_LIMIT. $((s)) drops the
+# padding BSD wc puts in front of the number.
+_READ_IMAGE = (
+    'IFS= read -r p; '
+    '[ -e "$p" ] || exit 10; [ -d "$p" ] && exit 13; [ -f "$p" ] || exit 14; '
+    '[ -r "$p" ] || exit 12; '
+    's=$(wc -c < "$p") || exit 12; s=$((s)); printf "%s\\n" "$s"; '
+    f'[ "$s" -le {IMAGE_READ_LIMIT} ] || exit 15; '
+    f'exec head -c {IMAGE_READ_LIMIT} < "$p"'
+)
+
+# What a browser will draw in an <img>, told by content, not by name.
+_IMAGE_MAGIC = (
+    (b'\x89PNG\r\n\x1a\n', 'image/png'),
+    (b'\xff\xd8\xff', 'image/jpeg'),
+    (b'GIF87a', 'image/gif'),
+    (b'GIF89a', 'image/gif'),
+)
+_BMP_HEADER_SIZES = {12, 40, 52, 56, 64, 108, 124}
+# An optional BOM, XML declaration, comments and DOCTYPE, then <svg.
+_SVG_START_RE = re.compile(
+    rb'(?:\xef\xbb\xbf)?\s*(?:<\?xml[^>]*>\s*)?(?:<!--.*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]',
+    re.S | re.I)
+
+
+def _image_type(data: bytes) -> str:
+    """The MIME type of the image in `data`, or '' if it isn't one we show."""
+    for magic, mime in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    if data[4:8] == b'ftyp':
+        # AVIF's major brand may be the generic mif1, with avif among the
+        # compatible brands. HEIC shares the box but most browsers can't draw it.
+        box = int.from_bytes(data[:4], 'big')
+        brands = {data[8:12]} | {data[i:i + 4] for i in range(16, min(box, 64), 4)}
+        return 'image/avif' if brands & {b'avif', b'avis'} else ''
+    if data[:2] == b'BM' and int.from_bytes(data[14:18], 'little') in _BMP_HEADER_SIZES:
+        return 'image/bmp'
+    if data[:4] == b'\0\0\1\0' and data[4:6] != b'\0\0':
+        return 'image/x-icon'
+    if _SVG_START_RE.match(data[:4096]):
+        return 'image/svg+xml'
+    return ''
 
 
 def _file_path(value) -> str:
@@ -1633,6 +1689,32 @@ async def _read_file(host: TmuxHost, path: str) -> tuple[str, dict]:
     }
 
 
+async def _read_image(host: TmuxHost, path: str) -> tuple[str, dict]:
+    """('', image) or (error code, details). too_large comes with the size."""
+    rc, out, _ = await tmux_hosts.run_shell(
+        host, _READ_IMAGE, f'{path}\n'.encode(),
+        limit=IMAGE_READ_LIMIT + 32, timeout=IMAGE_READ_TIMEOUT)
+    size, sep, body = out.partition('\n')
+    if rc == 15 and size.isdigit():
+        return 'too_large', {'size': int(size)}
+    if rc != 0:
+        return _FILE_ERRORS.get(rc, 'unavailable'), {}
+    if not sep or not size.isdigit():
+        return 'unavailable', {}
+    data = body.encode('utf-8', errors='surrogateescape')
+    mime = _image_type(data)
+    if not mime:
+        return 'unsupported_image', {}
+    return '', {
+        'path': path,
+        'size': int(size),
+        'truncated': False,
+        'binary': False,
+        'mime': mime,
+        'data': base64.b64encode(data).decode('ascii'),
+    }
+
+
 async def _pane_cwd(host: TmuxHost, pane) -> str:
     """`pane`'s working directory, or '' (meaning $HOME) when there's none to use."""
     pane = _pane_id(pane)
@@ -1658,11 +1740,13 @@ async def _answer_file_request(client, msg: dict) -> None:
     elif t == 'list_dir':
         start = path if path is not None else await _pane_cwd(host, msg.get('pane'))
         code, result = await _list_dir(host, start)
+    elif msg.get('image'):
+        code, result = await _read_image(host, path)
     else:
         code, result = await _read_file(host, path)
     if code:
         log.info('%s on host %s failed: %s', t, msg['host'], code)
-        await client.send(json.dumps({**reply, 'type': 'file_error', 'request': t,
+        await client.send(json.dumps({**reply, **result, 'type': 'file_error', 'request': t,
                                       'path': path, 'code': code}))
     else:
         await client.send(json.dumps({**reply, **result,

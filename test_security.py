@@ -173,6 +173,8 @@ class MessageValidationTest(unittest.TestCase):
             {'type': 'list_dir', 'id': 7, 'host': 'local', 'pane': '%1', 'gen': 0}))
         server._validated_message(json.dumps(
             {'type': 'read_file', 'id': 8, 'host': 'local', 'path': '/etc/hosts'}))
+        server._validated_message(json.dumps(
+            {'type': 'read_file', 'host': 'local', 'path': '/a.png', 'image': True}))
         # A path the host can't take is answered (invalid_path), not a
         # violation: it can come straight from a listed name.
         server._validated_message(json.dumps(
@@ -191,6 +193,8 @@ class MessageValidationTest(unittest.TestCase):
             json.dumps({'type': 'read_file', 'host': 'local'}),
             json.dumps({'type': 'read_file', 'host': 'local', 'path': '/a', 'pane': '%1'}),
             json.dumps({'type': 'read_file', 'host': 'local', 'path': ['/a']}),
+            json.dumps({'type': 'read_file', 'host': 'local', 'path': '/a', 'image': 'yes'}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'image': True}),
         )
         for raw in bad_messages:
             with self.subTest(raw=raw):

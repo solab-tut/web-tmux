@@ -30,7 +30,7 @@ See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configura
 - Color themes: Dark (default), Light, Nord
 - Adjustable font size (11–18 px), persisted in `localStorage`
 - Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
-- Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown. Works on SSH hosts too; files are capped at 200 KiB and only regular files open
+- Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown, and images (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG), including those a Markdown document shows from the same host. Works on SSH hosts too; text is cut at 200 KiB, images over 4 MiB are not shown, and only regular files open
 - **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
 
 ## Requirements

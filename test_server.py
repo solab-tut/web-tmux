@@ -1173,6 +1173,89 @@ class FileViewerTest(unittest.TestCase):
         self.assertEqual(reply['code'], 'host_changed')
         self.assertEqual(self.captures, [])
 
+    def write(self, name, data):
+        path = os.path.join(self.dir, name)
+        with open(path, 'wb') as fh:
+            fh.write(data)
+        return path
+
+    def test_reads_an_image_whole_with_its_type(self):
+        png = b'\x89PNG\r\n\x1a\n' + bytes(range(256)) * 4
+        path = self.write('pic.png', png)
+        reply = self.ask(type='read_file', id=5, path=path, image=True)
+        self.assertEqual(reply['type'], 'file_content')
+        self.assertEqual(reply['mime'], 'image/png')
+        self.assertEqual(reply['size'], len(png))
+        self.assertFalse(reply['truncated'])
+        self.assertEqual(base64.b64decode(reply['data']), png)
+
+    def test_image_types_come_from_the_content(self):
+        cases = {
+            b'\xff\xd8\xff\xe0\0\x10JFIF': 'image/jpeg',
+            b'GIF89a\1\0\1\0': 'image/gif',
+            b'RIFF\x24\0\0\0WEBPVP8 ': 'image/webp',
+            b'\0\0\0\x1cftypavif\0\0\0\0avifmif1': 'image/avif',
+            b'\0\0\0\x1cftypmif1\0\0\0\0mif1avif': 'image/avif',
+            b'BM\x36\0\0\0\0\0\0\0\x36\0\0\0\x28\0\0\0': 'image/bmp',
+            b'\0\0\1\0\1\0\x10\x10': 'image/x-icon',
+            b'<svg xmlns="http://www.w3.org/2000/svg"/>': 'image/svg+xml',
+            b'\xef\xbb\xbf<?xml version="1.0"?>\n<!-- by hand -->\n'
+            b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd">\n<svg>': 'image/svg+xml',
+            b'\0\0\0\x18ftypheic\0\0\0\0mif1heic': '',   # HEIC: few browsers draw it
+            b'BMW notes, not a bitmap': '',
+            b'<svgfoo/>': '',
+            b'<html><svg></svg></html>': '',
+            b'plain text': '',
+        }
+        for data, mime in cases.items():
+            with self.subTest(data=data):
+                self.assertEqual(server._image_type(data), mime)
+
+    def test_not_an_image_is_unsupported(self):
+        path = self.write('fake.png', b'just text\n')
+        reply = self.ask(type='read_file', path=path, image=True)
+        self.assertEqual((reply['type'], reply['code']), ('file_error', 'unsupported_image'))
+
+    def test_image_over_the_limit_is_refused_with_its_size(self):
+        size = server.IMAGE_READ_LIMIT + 1
+        path = self.write('huge.png', b'\x89PNG\r\n\x1a\n' + b'\0' * (size - 8))
+        reply = self.ask(type='read_file', path=path, image=True)
+        self.assertEqual(reply['code'], 'too_large')
+        self.assertEqual(reply['size'], size)
+        self.assertNotIn('data', reply)
+
+    def test_image_at_the_limit_is_read(self):
+        size = server.IMAGE_READ_LIMIT
+        path = self.write('edge.png', b'\x89PNG\r\n\x1a\n' + b'\0' * (size - 8))
+        reply = self.ask(type='read_file', path=path, image=True)
+        self.assertEqual(reply['type'], 'file_content')
+        self.assertEqual(len(base64.b64decode(reply['data'])), size)
+
+    def test_image_reads_get_their_own_limit_and_timeout(self):
+        calls = []
+
+        async def run_shell(host, script, stdin, **kwargs):
+            calls.append((script, kwargs))
+            return 10, '', ''
+
+        with patch.object(server.tmux_hosts, 'run_shell', run_shell):
+            self.ask(type='read_file', path='/a.png', image=True)
+            self.ask(type='read_file', path='/a.txt')
+        (image_script, image_kw), (text_script, text_kw) = calls
+        self.assertIs(image_script, server._READ_IMAGE)
+        self.assertEqual(image_kw, {'limit': server.IMAGE_READ_LIMIT + 32,
+                                    'timeout': server.IMAGE_READ_TIMEOUT})
+        self.assertIs(text_script, server._READ_FILE)
+        self.assertEqual(text_kw, {})
+
+    def test_image_errors_match_text_ones(self):
+        self.assertEqual(self.ask(type='read_file', path=os.path.join(self.dir, 'fifo'),
+                                  image=True)['code'], 'not_regular')
+        self.assertEqual(self.ask(type='read_file', path=os.path.join(self.dir, 'sub'),
+                                  image=True)['code'], 'is_directory')
+        self.assertEqual(self.ask(type='read_file', path=os.path.join(self.dir, 'gone.png'),
+                                  image=True)['code'], 'not_found')
+
     def test_one_request_at_a_time_and_only_the_latest_waits(self):
         answered = []
         release = None

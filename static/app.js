@@ -1226,6 +1226,11 @@ function onInit(msg) {
   if (_files.open) {
     if (_files.host !== currentHost) closeFileViewer();
     else if (_files.pending) reloadFileView();
+    else if (_mdImages.inFlight) {
+      _mdImages.queue.unshift(_mdImages.inFlight.path);
+      _mdImages.inFlight = null;
+      pumpMdImages();
+    }
   }
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
@@ -3244,11 +3249,19 @@ document.querySelectorAll('#virtual-keyboard-menu [data-virtual-keyboard-mode]')
 // ─── File viewer ──────────────────────────────────────────────────────────────
 // Browses the host being viewed, starting from a pane's working directory.
 // Every request goes over the socket (list_dir / read_file); there is no
-// request queue here — the server runs one at a time and the reply that
-// carries the latest id is the only one listened to.
+// request queue here — the server runs one at a time, and a request that
+// arrives while one runs replaces any already waiting. So only one is ever
+// left outstanding: the latest navigation (_files.reqId), or else one
+// image a Markdown document shows (_mdImages.inFlight).
 
 const FILES_HIDDEN_STORAGE_KEY = 'web-tmux-files-hidden';
 const MARKDOWN_FILE_RE = /\.(md|markdown|mdown|mkd)$/i;
+// Opened as an image; the server goes by the content, not the name.
+const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
+const IMAGE_READ_LIMIT = 4 * 1024 * 1024;   // server.IMAGE_READ_LIMIT
+// What one Markdown document may pull in, beyond which images keep their alt text.
+const MD_IMAGE_MAX_COUNT = 30;
+const MD_IMAGE_MAX_BYTES = 16 * 1024 * 1024;
 const FILE_ERRORS = {
   not_found:         'No such file or folder.',
   not_a_directory:   'Not a folder.',
@@ -3258,21 +3271,41 @@ const FILE_ERRORS = {
   invalid_path:      'This name can’t be opened here.',
   host_changed:      'The host changed. Close and open the viewer again.',
   unavailable:       'The host did not answer.',
+  unsupported_image: 'Not an image this browser can show.',
 };
 
 const _files = {
   open: false,
   host: '',
-  reqId: 0,
-  pending: null,     // { kind: 'dir'|'file', path, pane } awaiting its reply
+  lastId: 0,         // ids for every request, navigation or image
+  reqId: -1,         // the navigation whose reply is awaited
+  pending: null,     // { kind: 'dir'|'file', path, pane, image } awaiting its reply
   dir: '',           // folder being shown, or the one the open file is in
   entries: null,     // its listing
   truncated: false,
-  file: null,        // { path, size, truncated, binary, text }
+  file: null,        // { path, size, truncated, binary, text } or { path, size, image, src, dims }
   raw: false,        // Markdown shown as source
+  fit: true,         // an image scaled to the sheet rather than 1:1
   showHidden: loadFilesShowHidden(),
 };
 let _markdown = null;
+
+// Images in the Markdown document on screen, fetched one at a time as they
+// scroll into view.
+const _mdImages = {
+  doc: '',           // the document they belong to
+  cache: new Map(),  // path → { src } or { error }
+  queue: [],         // paths waiting to be asked for
+  inFlight: null,    // { id, path }
+  count: 0,
+  bytes: 0,
+  observer: null,
+};
+
+function nextFileId() {
+  _files.lastId = (_files.lastId + 1) % 2 ** 31;
+  return _files.lastId;
+}
 
 function loadFilesShowHidden() {
   try { return localStorage.getItem(FILES_HIDDEN_STORAGE_KEY) === '1'; }
@@ -3318,7 +3351,8 @@ function openFileViewer(paneId) {
 function closeFileViewer() {
   _files.open = false;
   _files.pending = null;
-  _files.reqId++;   // whatever is still on its way is no longer wanted
+  _files.reqId = -1;   // whatever is still on its way is no longer wanted
+  resetMdImages('');
   setFileSheetOpen(false);
   document.getElementById('file-body').replaceChildren();
   focusActivePane();
@@ -3326,10 +3360,15 @@ function closeFileViewer() {
 
 function sendFileRequest(req) {
   _files.pending = req;
-  _files.reqId++;
+  _files.reqId = nextFileId();
+  // A document image still loading is dropped: this request may replace it
+  // at the server, and its reply would land on a page that is going away.
+  _mdImages.queue = [];
+  _mdImages.inFlight = null;
   const extra = { id: _files.reqId, host: _files.host };
   if (req.path) extra.path = req.path;
   else if (req.pane) { extra.pane = req.pane; extra.gen = currentGen; }
+  if (req.image) extra.image = true;
   if (!wsSendType(req.kind === 'dir' ? 'list_dir' : 'read_file', extra)) {
     _files.pending = null;
     showFileNote('Not connected.');
@@ -3344,7 +3383,7 @@ function requestFileDir(path, pane) {
 }
 
 function requestFile(path) {
-  sendFileRequest({ kind: 'file', path });
+  sendFileRequest({ kind: 'file', path, image: IMAGE_FILE_RE.test(path) });
 }
 
 function reloadFileView() {
@@ -3368,12 +3407,26 @@ function onDirListing(msg) {
 }
 
 function onFileContent(msg) {
+  if (onMdImageReply(msg)) return;
   if (!fileReplyWanted(msg)) return;
   _files.pending = null;
   const dir = parentPath(msg.path);
   if (dir !== _files.dir) {
     _files.dir = dir;      // reached through a link: Back lists its folder
     _files.entries = null;
+  }
+  if (msg.mime) {
+    _files.file = {
+      path: msg.path,
+      size: msg.size,
+      image: true,
+      src: `data:${msg.mime};base64,${msg.data}`,
+      dims: '',
+    };
+    _files.fit = true;
+    renderFileView();
+    document.getElementById('file-body').scrollTop = 0;
+    return;
   }
   const bytes = b64ToUint8(msg.data || '');
   _files.file = {
@@ -3389,7 +3442,17 @@ function onFileContent(msg) {
   document.getElementById('file-body').scrollTop = 0;
 }
 
+function fileErrorText(msg) {
+  if (msg.code === 'too_large' && msg.request === 'read_file') {
+    return Number.isInteger(msg.size)
+      ? `Too large to show: ${formatFileSize(msg.size)} (the limit is ${formatFileSize(IMAGE_READ_LIMIT)}).`
+      : 'Too large to show.';
+  }
+  return FILE_ERRORS[msg.code] || 'Could not open it.';
+}
+
 function onFileError(msg) {
+  if (onMdImageReply(msg)) return;
   if (!fileReplyWanted(msg)) return;
   const req = _files.pending;
   _files.pending = null;
@@ -3399,7 +3462,7 @@ function onFileError(msg) {
     return;
   }
   renderFileView();
-  showFileNote(FILE_ERRORS[msg.code] || 'Could not open it.');
+  showFileNote(fileErrorText(msg));
 }
 
 function showFileNote(text) {
@@ -3430,14 +3493,16 @@ function renderFileCrumbs() {
   crumbs.scrollLeft = crumbs.scrollWidth;   // the end of a long path is the part that matters
 }
 
-function buildFileEntry(label, kind, onClick, extraClass) {
+function buildFileEntry(label, kind, onClick, extraClass, isImage) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = `file-entry file-${kind}` + (extraClass ? ` ${extraClass}` : '');
   const icon = document.createElement('span');
   icon.className = 'file-icon';
   icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = kind === 'd' ? '\u{1F4C1}' : kind === 'f' ? '\u{1F4C4}' : '◇';
+  icon.textContent = kind === 'd' ? '\u{1F4C1}'
+    : kind !== 'f' ? '◇'
+    : isImage ? '\u{1F5BC}' : '\u{1F4C4}';
   const name = document.createElement('span');
   name.className = 'file-name';
   name.textContent = label;
@@ -3463,7 +3528,7 @@ function renderFileList(body) {
     list.appendChild(buildFileEntry(label, e.kind, () => {
       if (e.kind === 'd') requestFileDir(path);
       else requestFile(path);
-    }));
+    }, '', IMAGE_FILE_RE.test(e.name)));
   });
   if (!entries.length) {
     const empty = document.createElement('div');
@@ -3495,34 +3560,151 @@ function markdownRenderer() {
   return _markdown;
 }
 
+function isLocalUrl(href) {
+  return !/^[a-z][a-z0-9+.-]*:/i.test(href) && !href.startsWith('//');
+}
+
+// A link or image source in a document, as a path on its host.
+function documentPath(href, filePath) {
+  const target = href.replace(/[?#].*$/, '');
+  if (!target) return '';
+  let path;
+  try { path = decodeURIComponent(target); } catch (_) { path = target; }
+  if (!path.startsWith('/')) path = joinPath(parentPath(filePath), path);
+  return normalizePath(path);
+}
+
 // Links to the same host's files open in the viewer; everything else in a
-// new tab. Images other than data: URLs can't load under the CSP and would
-// only show as broken, so their alt text stands in.
+// new tab. Images on the same host are fetched over the socket as they come
+// into view (observeMdImages); remote ones can't load under the CSP and
+// would only show as broken, so their alt text stands in.
 function wireMarkdownContent(root, filePath) {
   root.querySelectorAll('a[href]').forEach((a) => {
     const href = a.getAttribute('href');
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
+    if (!isLocalUrl(href)) {
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       return;
     }
     a.addEventListener('click', (ev) => {
       ev.preventDefault();
-      const target = href.replace(/[?#].*$/, '');
-      if (!target) return;   // an in-page anchor: headings carry no ids
-      let path;
-      try { path = decodeURIComponent(target); } catch (_) { path = target; }
-      if (!path.startsWith('/')) path = joinPath(parentPath(filePath), path);
-      requestFile(normalizePath(path));
+      const path = documentPath(href, filePath);
+      if (path) requestFile(path);   // '' is an in-page anchor: headings carry no ids
     });
   });
   root.querySelectorAll('img').forEach((img) => {
-    if ((img.getAttribute('src') || '').startsWith('data:')) return;
+    const src = img.getAttribute('src') || '';
+    if (src.startsWith('data:')) return;
+    const altText = img.getAttribute('alt') || src;
+    const path = isLocalUrl(src) ? documentPath(src, filePath) : '';
+    const cached = path && _mdImages.cache.get(path);
+    if (cached && cached.src) {
+      img.replaceWith(buildMdImage(cached.src, altText));
+      return;
+    }
     const alt = document.createElement('span');
     alt.className = 'md-img-alt';
-    alt.textContent = `[image: ${img.getAttribute('alt') || img.getAttribute('src') || ''}]`;
+    alt.textContent = `[image: ${altText}]`;
+    if (cached) {
+      alt.textContent = `[image: ${altText} \u2014 ${cached.error}]`;
+    } else if (path) {
+      alt.classList.add('md-img-slot');
+      alt.dataset.path = path;
+      alt.dataset.alt = altText;
+    }
     img.replaceWith(alt);
   });
+}
+
+function buildMdImage(src, altText) {
+  const img = document.createElement('img');
+  img.className = 'md-img';
+  img.alt = altText;
+  img.src = src;
+  return img;
+}
+
+function resetMdImages(docPath) {
+  if (_mdImages.observer) _mdImages.observer.disconnect();
+  _mdImages.observer = null;
+  _mdImages.queue = [];
+  if (docPath === _mdImages.doc) return;   // re-drawn, not replaced: keep what came
+  _mdImages.doc = docPath;
+  _mdImages.cache = new Map();
+  _mdImages.inFlight = null;
+  _mdImages.count = 0;
+  _mdImages.bytes = 0;
+}
+
+function observeMdImages(doc) {
+  const slots = doc.querySelectorAll('.md-img-slot');
+  if (!slots.length) return;
+  const observer = new IntersectionObserver((items) => {
+    items.forEach((item) => {
+      if (!item.isIntersecting) return;
+      observer.unobserve(item.target);
+      const path = item.target.dataset.path;
+      if (!_mdImages.queue.includes(path) && _mdImages.inFlight?.path !== path) {
+        _mdImages.queue.push(path);
+      }
+    });
+    pumpMdImages();
+  }, { root: document.getElementById('file-body'), rootMargin: '600px 0px' });
+  _mdImages.observer = observer;
+  slots.forEach((slot) => observer.observe(slot));
+}
+
+function settleMdImageSlots(path) {
+  const entry = _mdImages.cache.get(path);
+  document.querySelectorAll('#file-body .md-img-slot').forEach((slot) => {
+    if (slot.dataset.path !== path) return;
+    if (entry.src) {
+      slot.replaceWith(buildMdImage(entry.src, slot.dataset.alt));
+    } else {
+      slot.classList.remove('md-img-slot');
+      slot.textContent = `[image: ${slot.dataset.alt} \u2014 ${entry.error}]`;
+    }
+  });
+}
+
+// Asks for the next image waiting, unless a request is already out: one
+// sent behind another could replace it at the server and never be answered.
+function pumpMdImages() {
+  if (!_files.open || _files.pending || _mdImages.inFlight) return;
+  while (_mdImages.queue.length) {
+    const path = _mdImages.queue.shift();
+    if (!_mdImages.cache.has(path)
+        && (_mdImages.count >= MD_IMAGE_MAX_COUNT || _mdImages.bytes >= MD_IMAGE_MAX_BYTES)) {
+      _mdImages.cache.set(path, { error: 'not loaded: this document has too many images' });
+    }
+    if (_mdImages.cache.has(path)) {
+      settleMdImageSlots(path);
+      continue;
+    }
+    const id = nextFileId();
+    if (!wsSend('read_file', { id, host: _files.host, path, image: true })) return;
+    _mdImages.inFlight = { id, path };
+    return;
+  }
+}
+
+// True when `msg` answers the document image in flight (and is dealt with).
+function onMdImageReply(msg) {
+  const req = _mdImages.inFlight;
+  if (!req || msg.id !== req.id || msg.host !== _files.host) return false;
+  _mdImages.inFlight = null;
+  if (msg.type === 'file_content' && msg.mime) {
+    _mdImages.cache.set(req.path, { src: `data:${msg.mime};base64,${msg.data}` });
+    _mdImages.count++;
+    _mdImages.bytes += msg.size;
+  } else {
+    const text = msg.type === 'file_error' ? fileErrorText(msg) : FILE_ERRORS.unsupported_image;
+    const reason = text.replace(/\.$/, '');
+    _mdImages.cache.set(req.path, { error: reason.charAt(0).toLowerCase() + reason.slice(1) });
+  }
+  settleMdImageSlots(req.path);
+  pumpMdImages();
+  return true;
 }
 
 function normalizePath(path) {
@@ -3535,8 +3717,39 @@ function normalizePath(path) {
   return `/${out.join('/')}`;
 }
 
+function renderImageFile(body, file) {
+  const wrap = document.createElement('div');
+  wrap.className = 'file-image-wrap' + (_files.fit ? ' fit' : '');
+  const img = document.createElement('img');
+  img.className = 'file-image';
+  img.alt = baseName(file.path);
+  img.src = file.src;
+  img.addEventListener('load', () => {
+    file.dims = `${img.naturalWidth}\u00D7${img.naturalHeight}`;
+    document.getElementById('file-meta').textContent = fileMetaText(file);
+  });
+  img.addEventListener('error', () => showFileNote('The browser could not draw this image.'));
+  img.addEventListener('click', toggleImageFit);
+  wrap.appendChild(img);
+  body.appendChild(wrap);
+}
+
+function toggleImageFit() {
+  if (!_files.file || !_files.file.image) return;
+  _files.fit = !_files.fit;
+  renderFileView();
+}
+
+function fileMetaText(file) {
+  return [_files.host, file.dims, formatFileSize(file.size)].filter(Boolean).join(' \u00B7 ');
+}
+
 function renderFileContent(body) {
   const file = _files.file;
+  if (file.image) {
+    renderImageFile(body, file);
+    return;
+  }
   if (file.binary) {
     showFileNote('Binary file; not shown.');
     return;
@@ -3555,6 +3768,7 @@ function renderFileContent(body) {
     doc.className = 'md-body';
     doc.appendChild(tpl.content);
     body.appendChild(doc);
+    observeMdImages(doc);
     return;
   }
   const pre = document.createElement('pre');
@@ -3568,24 +3782,29 @@ function renderFileView() {
   if (!_files.open) return;
   const file = _files.file;
   const viewingFile = !!file;
-  const isMarkdown = viewingFile && MARKDOWN_FILE_RE.test(file.path);
+  const isMarkdown = viewingFile && !file.image && MARKDOWN_FILE_RE.test(file.path);
   document.getElementById('file-title').textContent =
     viewingFile ? baseName(file.path) : (_files.dir ? baseName(_files.dir) : 'Files');
   document.getElementById('file-back').hidden = !viewingFile;
   document.getElementById('file-crumbs').hidden = viewingFile;
   const meta = document.getElementById('file-meta');
   meta.hidden = !viewingFile;
-  meta.textContent = viewingFile ? `${_files.host} · ${formatFileSize(file.size)}` : '';
+  meta.textContent = viewingFile ? fileMetaText(file) : '';
   const hiddenBtn = document.getElementById('file-hidden');
   hiddenBtn.hidden = viewingFile;
   hiddenBtn.setAttribute('aria-pressed', _files.showHidden ? 'true' : 'false');
   const rawBtn = document.getElementById('file-raw');
   rawBtn.hidden = !isMarkdown || file.binary;
   rawBtn.setAttribute('aria-pressed', _files.raw ? 'true' : 'false');
+  const fitBtn = document.getElementById('file-fit');
+  fitBtn.hidden = !(viewingFile && file.image);
+  fitBtn.setAttribute('aria-pressed', _files.fit ? 'false' : 'true');
   document.getElementById('file-copy').hidden = !viewingFile;
   if (!viewingFile) renderFileCrumbs();
 
   showFileNote('');
+  // Raw and back keeps the document's images; anything else lets them go.
+  resetMdImages(isMarkdown ? file.path : '');
   const body = document.getElementById('file-body');
   body.replaceChildren();
   body.classList.toggle('loading', !!_files.pending);
@@ -3618,6 +3837,7 @@ document.getElementById('file-raw').addEventListener('click', () => {
   _files.raw = !_files.raw;
   renderFileView();
 });
+document.getElementById('file-fit').addEventListener('click', toggleImageFit);
 document.getElementById('file-copy').addEventListener('click', () => {
   if (!_files.file) return;
   writeClipboard(_files.file.path).then(

@@ -160,6 +160,14 @@ class OutputLimitTest(unittest.TestCase):
         rc, out, _ = asyncio.run(tmux_hosts.run_argv(['cat'], timeout=5.0, stdin=b'a\nb\n'))
         self.assertEqual((rc, out), (0, 'a\nb\n'))
 
+    def test_a_caller_can_set_its_own_limit(self):
+        size = tmux_hosts.CAPTURE_LIMIT * 2
+        script = f'head -c {size} /dev/zero | tr "\\0" x'
+        rc, out, _ = asyncio.run(tmux_hosts.run_argv(['sh', '-c', script], timeout=10.0, limit=size))
+        self.assertEqual((rc, len(out)), (0, size))
+        rc, out, _ = asyncio.run(tmux_hosts.run_argv(['sh', '-c', script], timeout=10.0, limit=size - 1))
+        self.assertEqual((rc, out), (tmux_hosts.RC_TOO_LARGE, ''))
+
 
 class _Clock:
     def __init__(self):
@@ -385,6 +393,14 @@ class FakeSshIntegrationTest(unittest.TestCase):
         self.assertEqual(code, '')
         self.assertEqual(base64.b64decode(content['data']), body)
         self.assertEqual(content['size'], len(body))
+        # Every byte value, so nothing is lost to a decode on the way back.
+        png = b'\x89PNG\r\n\x1a\n' + bytes(range(256)) * 2048
+        with open(os.path.join(here, 'all bytes.png'), 'wb') as fh:
+            fh.write(png)
+        code, image = asyncio.run(server._read_image(self.host, os.path.join(here, 'all bytes.png')))
+        self.assertEqual(code, '')
+        self.assertEqual(image['mime'], 'image/png')
+        self.assertEqual(base64.b64decode(image['data']), png)
 
 class SignInIntegrationTest(unittest.TestCase):
     """The whole askpass path with real processes: a stand-in `ssh` whose
