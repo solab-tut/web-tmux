@@ -1904,12 +1904,19 @@ function renderWindowList(windows) {
 // ─── Agent status ─────────────────────────────────────────────────────────────
 // The server reads the screen of every pane that runs Claude Code, Codex or
 // Hermes Agent on the host being viewed, and says which of them are working
-// or waiting for an answer. Each pane, window and session row gets a dot for
-// the most pressing state among its panes.
+// or waiting for an answer. Each pane, window and session row gets an icon
+// for the most pressing state among its panes — an icon rather than a dot,
+// so it can't be taken for a host's connection dot.
 
 const AGENT_STATE_RANK = { idle: 1, thinking: 2, approval: 3 };
 const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'waiting for approval' };
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
+// Pause bars, a turning arc, a warning sign.
+const AGENT_STATE_ICONS = {
+  idle: '<path d="M6 4.5v7M10 4.5v7"/>',
+  thinking: '<path d="M13 8a5 5 0 11-1.46-3.54"/><path d="M13 3v2.5h-2.5"/>',
+  approval: '<path d="M8 2.2L14.3 13.3H1.7z"/><path d="M8 6.5v3M8 11.6v.1"/>',
+};
 
 // Kept whole, even from another view: it may arrive just before the init it
 // belongs to, and the server only sends it again when something changes.
@@ -1931,37 +1938,65 @@ function mostPressing(entries) {
     (!best || AGENT_STATE_RANK[e.state] > AGENT_STATE_RANK[best.state] ? e : best), null);
 }
 
-// Only the dots change, so a rename field that is open keeps its draft.
+// Only the icons change, so a rename field that is open keeps its draft.
 function applyAgentStatus() {
   const entries = currentAgentPanes();
-  document.querySelectorAll('#pane-list .pane-item').forEach((item) => {
-    setAgentDot(item, mostPressing(entries.filter((e) => e.pane === item.dataset.paneId)));
-  });
-  document.querySelectorAll('#window-list .window-item').forEach((item) => {
-    setAgentDot(item, mostPressing(entries.filter((e) =>
-      e.session === currentSession && String(e.window) === item.dataset.windowIndex)));
-  });
-  document.querySelectorAll('#session-list .session-item').forEach((item) => {
-    setAgentDot(item, item.dataset.sessionHost !== currentHost ? null
-      : mostPressing(entries.filter((e) => e.session === item.dataset.sessionName)));
-  });
+  applyAgentIcons('pane-list', '.pane-item', (item) =>
+    entries.filter((e) => e.pane === item.dataset.paneId));
+  applyAgentIcons('window-list', '.window-item', (item) =>
+    entries.filter((e) => e.session === currentSession && String(e.window) === item.dataset.windowIndex));
+  applyAgentIcons('session-list', '.session-item', (item) =>
+    item.dataset.sessionHost !== currentHost ? []
+      : entries.filter((e) => e.session === item.dataset.sessionName));
 }
 
-function setAgentDot(item, entry) {
-  let dot = item.querySelector(':scope > .agent-dot');
-  if (!entry || item.classList.contains('editing') || item.classList.contains('confirming')) {
-    dot?.remove();
+// Rows without an agent keep an empty slot while any row of the list has an
+// icon, so the names stay in one column; a list with no agent has no slots.
+function applyAgentIcons(listId, selector, entriesFor) {
+  const list = document.getElementById(listId);
+  let any = false;
+  list.querySelectorAll(selector).forEach((item) => {
+    const entry = mostPressing(entriesFor(item));
+    if (entry) any = true;
+    setAgentIcon(item, entry);
+  });
+  list.classList.toggle('has-agents', any);
+}
+
+function setAgentIcon(item, entry) {
+  let icon = item.querySelector(':scope > .agent-icon');
+  if (item.classList.contains('editing') || item.classList.contains('confirming')) {
+    icon?.remove();
     return;
   }
-  if (!dot) {
-    dot = document.createElement('span');
-    dot.setAttribute('role', 'img');
-    item.prepend(dot);
+  if (!icon) {
+    icon = document.createElement('span');
+    item.prepend(icon);
+  }
+  if (!entry) {
+    icon.className = 'agent-icon agent-none';
+    icon.dataset.state = '';
+    icon.innerHTML = '';
+    icon.removeAttribute('role');
+    icon.removeAttribute('title');
+    icon.removeAttribute('aria-label');
+    icon.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  icon.setAttribute('role', 'img');
+  icon.removeAttribute('aria-hidden');
+  // Redrawn only on a change of state: a fresh SVG would restart the spin.
+  if (icon.dataset.state !== entry.state) {
+    icon.dataset.state = entry.state;
+    icon.className = `agent-icon agent-${entry.state}`;
+    icon.innerHTML =
+      `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"` +
+      ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+      `${AGENT_STATE_ICONS[entry.state]}</svg>`;
   }
   const label = `${AGENT_NAMES[entry.agent] || entry.agent}: ${AGENT_STATE_LABELS[entry.state]}`;
-  dot.className = `agent-dot agent-${entry.state}`;
-  dot.title = label;
-  dot.setAttribute('aria-label', label);
+  icon.title = label;
+  icon.setAttribute('aria-label', label);
 }
 
 // ─── Hosts & sessions ─────────────────────────────────────────────────────────
