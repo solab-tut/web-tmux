@@ -1913,7 +1913,7 @@ const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'wait
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
 // Pause bars, a turning arc, a warning sign.
 const AGENT_STATE_ICONS = {
-  idle: '<path d="M6 4.5v7M10 4.5v7"/>',
+  idle: '<path d="M2.5 4l4 4-4 4" stroke-width="1.9"/><path d="M8.5 12.5h5" stroke-width="1.9"/>',
   thinking: '<path d="M13 8a5 5 0 11-1.46-3.54"/><path d="M13 3v2.5h-2.5"/>',
   approval: '<path d="M8 2.2L14.3 13.3H1.7z"/><path d="M8 6.5v3M8 11.6v.1"/>',
 };
