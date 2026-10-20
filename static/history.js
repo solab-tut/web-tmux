@@ -115,7 +115,62 @@
     return null;
   }
 
-  function cellStyle(cell, theme) {
+  // ─── Minimum contrast ──────────────────────────────────────────────────────
+  //
+  // xterm 5.3's minimumContrastRatio, restated so overlay rows keep matching
+  // the live screen: a foreground too close to its background is stepped
+  // towards black or white, 10% at a time, whichever gets further.
+
+  function hexChannels(hex) {
+    const v = parseInt(hex.slice(1, 7), 16);
+    return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+  }
+
+  function luminance([r, g, b]) {
+    const lin = (c) => {
+      const s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  }
+
+  function contrast(l1, l2) {
+    return l1 > l2 ? (l1 + 0.05) / (l2 + 0.05) : (l2 + 0.05) / (l1 + 0.05);
+  }
+
+  function stepLuminance(bgL, fg, ratio, darker) {
+    let c = fg.slice();
+    let cr = contrast(bgL, luminance(c));
+    while (cr < ratio && (darker ? c.some(v => v > 0) : c.some(v => v < 255))) {
+      c = darker
+        ? c.map(v => v - Math.max(0, Math.ceil(v * 0.1)))
+        : c.map(v => Math.min(255, v + Math.ceil((255 - v) * 0.1)));
+      cr = contrast(bgL, luminance(c));
+    }
+    return [c, cr];
+  }
+
+  // The foreground to draw, or null when `fg` already stands out enough.
+  function ensureContrast(bgHex, fgHex, ratio) {
+    const bg = hexChannels(bgHex);
+    const fg = hexChannels(fgHex);
+    const bgL = luminance(bg);
+    if (contrast(bgL, luminance(fg)) >= ratio) return null;
+    const darker = luminance(fg) < bgL;
+    const [a, aRatio] = stepLuminance(bgL, fg, ratio, darker);
+    if (aRatio >= ratio) return rgbHex(...a);
+    const [b, bRatio] = stepLuminance(bgL, fg, ratio, !darker);
+    return rgbHex(...(aRatio > bRatio ? a : b));
+  }
+
+  // Powerline separators and box/block drawing keep their colours in xterm:
+  // they are drawn to meet the cells around them.
+  function exemptFromContrast(cell) {
+    const code = cell.getCode();
+    return (code >= 0xe0a4 && code <= 0xe0d6) || (code >= 0x2500 && code <= 0x259f);
+  }
+
+  function cellStyle(cell, theme, ratio) {
     let fg = cellFg(cell, theme);
     let bg = cellBg(cell, theme);
 
@@ -123,6 +178,14 @@
       const prevFg = fg;
       fg = bg !== null ? bg : theme.background;
       bg = prevFg !== null ? prevFg : theme.foreground;
+    }
+
+    // Dim text asks for half the ratio, then is drawn at half opacity.
+    if (ratio > 1 && !exemptFromContrast(cell)) {
+      const adjusted = ensureContrast(bg !== null ? bg : theme.background || '#1e1e1e',
+                                      fg !== null ? fg : theme.foreground || '#d4d4d4',
+                                      cell.isDim() ? ratio / 2 : ratio);
+      if (adjusted) fg = adjusted;
     }
 
     let s = '';
@@ -141,10 +204,11 @@
   // CellData exposes the packed fg/bg attribute words; fall back to composing a
   // key from the public getters if that ever stops being true.
   function cellKey(cell) {
+    const exempt = exemptFromContrast(cell) ? ',x' : '';
     if (typeof cell.fg === 'number' && typeof cell.bg === 'number') {
-      return cell.fg + ',' + cell.bg;
+      return cell.fg + ',' + cell.bg + exempt;
     }
-    return cell.getFgColor() + ',' + cell.getFgColorMode() + ',' +
+    return exempt + cell.getFgColor() + ',' + cell.getFgColorMode() + ',' +
            cell.getBgColor() + ',' + cell.getBgColorMode() + ',' +
            (cell.isBold() ? 1 : 0) + (cell.isDim() ? 1 : 0) + (cell.isItalic() ? 1 : 0) +
            (cell.isUnderline() ? 1 : 0) + (cell.isInverse() ? 1 : 0) +
@@ -169,7 +233,7 @@
     return -1;
   }
 
-  function renderLine(line, cell, theme) {
+  function renderLine(line, cell, theme, ratio) {
     const last = lastMeaningfulCol(line, cell);
     if (last < 0) return '<div class="hist-row"></div>';
 
@@ -185,7 +249,7 @@
       if (key !== runKey) {
         if (runKey !== null) html += span(runText, runStyle);
         runKey = key;
-        runStyle = cellStyle(cell, theme);
+        runStyle = cellStyle(cell, theme, ratio);
         runText = '';
       }
       const chars = cell.getChars();
@@ -200,12 +264,12 @@
     return style ? '<span style="' + style + '">' + t + '</span>' : '<span>' + t + '</span>';
   }
 
-  function renderRange(buffer, start, end, theme) {
+  function renderRange(buffer, start, end, theme, ratio) {
     const cell = buffer.getNullCell();
     const parts = [];
     for (let i = start; i < end; i++) {
       const line = buffer.getLine(i);
-      parts.push(line ? renderLine(line, cell, theme) : '<div class="hist-row"></div>');
+      parts.push(line ? renderLine(line, cell, theme, ratio) : '<div class="hist-row"></div>');
     }
     return parts.join('');
   }
@@ -270,13 +334,17 @@
     }
   }
 
+  function contrastRatio(pane) {
+    return pane.term.options.minimumContrastRatio || 1;
+  }
+
   function buildWindow(pane) {
     const buffer = pane.term.buffer.active;
     const theme = deps.getTheme();
     totalLines = buffer.length;
     const end = totalLines;
     const start = Math.max(0, end - WINDOW_ROWS);
-    rowsEl.innerHTML = renderRange(buffer, start, end, theme);
+    rowsEl.innerHTML = renderRange(buffer, start, end, theme, contrastRatio(pane));
     buildStart = start;
     buildEnd = end;
     pad.style.height = (start * rowH) + 'px';
@@ -292,7 +360,8 @@
     const start = Math.max(0, buildStart - CHUNK_ROWS);
     const prevScrollTop = scroller.scrollTop;
 
-    rowsEl.insertAdjacentHTML('afterbegin', renderRange(buffer, start, buildStart, theme));
+    rowsEl.insertAdjacentHTML('afterbegin',
+      renderRange(buffer, start, buildStart, theme, contrastRatio(pane)));
     buildStart = start;
     pad.style.height = (start * rowH) + 'px';
     // The new rows are exactly as tall as the spacer they replaced, so the

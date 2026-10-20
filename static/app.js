@@ -105,6 +105,13 @@ const XTERM_THEMES = {
   },
 };
 
+// Text colours too close to the background are lightened or darkened until
+// they reach this contrast (WCAG AA). Applications pick greys for a dark or a
+// light terminal without knowing ours: Nord's bright black on its background
+// is 1.6:1, and xterm's black on the dark theme is the background itself.
+// history.js applies the same rule so its rows still match the screen.
+const MIN_CONTRAST_RATIO = 4.5;
+
 const THEME_STORAGE_KEY = 'web-tmux-theme';
 const VALID_THEMES = ['dark', 'light', 'nord'];
 
@@ -1645,6 +1652,7 @@ function ensurePane(paneId, cols, rows) {
     scrollback:  terminalScrollback(),
     cursorBlink: true,
     scrollOnUserInput: true,
+    minimumContrastRatio: MIN_CONTRAST_RATIO,
     theme:       XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   });
 
