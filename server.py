@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+import agent_status
 import askpass
 import layout_store
 import tmux_hosts
@@ -79,6 +80,12 @@ _auth_prompts: dict[str, tuple[object, asyncio.Future]] = {}
 AUTH_PROMPT_TIMEOUT = askpass.HELPER_TIMEOUT - 10
 _AUTH_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 _restore_seq = 0
+# How often the panes are looked at for a coding agent's state, while anyone
+# is connected. Each look is one list-panes plus one capture per candidate.
+AGENT_STATUS_INTERVAL = 2.0
+_agent_status_msg: str | None = None   # the latest agent_status, for new connections
+_agent_known: dict[str, tuple[str, str]] = {}   # pane -> (command, agent), see pane_states
+_agent_known_gen = -1
 
 
 def _single_header(headers, name: str) -> str | None:
@@ -658,6 +665,8 @@ async def ws_handler(websocket: ServerConnection) -> None:
         state = await tmux.get_initial_state()
         _update_allowed_targets(state)
         await client.send(_view_message('init', state))
+        if _agent_status_msg is not None:
+            await client.send(_agent_status_msg)
         _refresh_hosts_soon()
 
         async for raw in websocket:
@@ -1826,6 +1835,7 @@ async def main() -> None:
                        fallback=(LOCAL_HOST, SESSION), on_target_changed=_on_target_changed)
     await tmux.start()
     refresher = asyncio.ensure_future(_refresh_hosts_loop())
+    agent_watcher = asyncio.ensure_future(_agent_status_loop())
 
     # server.sh stop sends SIGTERM. Shut down through the code below rather
     # than dying on the spot, so no ssh connection outlives the server.
@@ -1854,6 +1864,7 @@ async def main() -> None:
             log.info('stopping')
         finally:
             refresher.cancel()
+            agent_watcher.cancel()
             await _shutdown_hosts()
 
 
@@ -1863,6 +1874,56 @@ async def _shutdown_hosts() -> None:
     await tmux_hosts.stop_masters(HOSTS.values())
     if ASKPASS is not None:
         await ASKPASS.stop()
+
+
+def _tmux_utf8(text: str) -> str:
+    # The control client reads tmux's bytes as latin-1 (see _on_readable).
+    return text.encode('latin-1', errors='replace').decode('utf-8', errors='replace')
+
+
+async def _poll_agent_status() -> str | None:
+    """One look at every pane on the active host, as an agent_status
+    message; None if the control client moved to another host meanwhile.
+
+    Screens are read here and never logged or sent on: only the verdict is."""
+    global _agent_known, _agent_known_gen
+    gen, host = tmux.target_gen, tmux.host.name
+    if gen != _agent_known_gen:
+        _agent_known, _agent_known_gen = {}, gen   # pane ids name other panes now
+    raw = await tmux.send_command(f'list-panes -a -F "{agent_status.LIST_FORMAT}"',
+                                  target_gen=gen)
+    panes = agent_status.parse_pane_list(_tmux_utf8(raw))
+    candidates = [p for p in panes if agent_status.is_candidate(p.command)]
+    screens: dict[str, str] = {}
+    if candidates:
+        captured = await tmux.send_command_list(
+            [f'capture-pane -p -t {p.pane}' for p in candidates], target_gen=gen)
+        screens = {p.pane: _tmux_utf8(text) for p, text in zip(candidates, captured)}
+    if gen != tmux.target_gen:
+        return None
+    entries = agent_status.pane_states(panes, screens, _agent_known)
+    return json.dumps({'type': 'agent_status', 'gen': gen, 'host': host, 'panes': entries})
+
+
+async def _agent_status_loop() -> None:
+    # Sends only when something changed, so a quiet screen costs no traffic.
+    global _agent_status_msg
+    while True:
+        await asyncio.sleep(AGENT_STATUS_INTERVAL)
+        # A control client that is down or reconnecting is left alone: a
+        # command sent now would only start another attempt.
+        if not _clients or not tmux._alive():
+            continue
+        try:
+            data = await _poll_agent_status()
+        except Exception as exc:
+            log.warning('agent status poll failed: %s', type(exc).__name__)
+            continue
+        if data is None or data == _agent_status_msg:
+            continue
+        _agent_status_msg = data
+        for client in list(_clients):
+            client.enqueue(data)
 
 
 async def _refresh_hosts_loop() -> None:

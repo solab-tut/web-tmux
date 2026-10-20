@@ -1172,6 +1172,7 @@ function handleMsg(msg) {
     case 'dir_listing':     onDirListing(msg);     break;
     case 'file_content':    onFileContent(msg);    break;
     case 'file_error':      onFileError(msg);      break;
+    case 'agent_status':    onAgentStatus(msg);    break;
   }
 }
 
@@ -1896,7 +1897,71 @@ function renderWindowList(windows) {
     }
     list.appendChild(div);
     });
+  applyAgentStatus();
   focusInlineEditor(list);
+}
+
+// ─── Agent status ─────────────────────────────────────────────────────────────
+// The server reads the screen of every pane that runs Claude Code, Codex or
+// Hermes Agent on the host being viewed, and says which of them are working
+// or waiting for an answer. Each pane, window and session row gets a dot for
+// the most pressing state among its panes.
+
+const AGENT_STATE_RANK = { idle: 1, thinking: 2, approval: 3 };
+const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'waiting for approval' };
+const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
+
+// Kept whole, even from another view: it may arrive just before the init it
+// belongs to, and the server only sends it again when something changes.
+let _agentStatus = { gen: -1, host: '', panes: [] };
+
+function onAgentStatus(msg) {
+  if (!Number.isInteger(msg.gen) || !Array.isArray(msg.panes)) return;
+  _agentStatus = { gen: msg.gen, host: String(msg.host || ''), panes: msg.panes };
+  applyAgentStatus();
+}
+
+function currentAgentPanes() {
+  if (_agentStatus.gen !== currentGen || _agentStatus.host !== currentHost) return [];
+  return _agentStatus.panes.filter((e) => e && AGENT_STATE_RANK[e.state]);
+}
+
+function mostPressing(entries) {
+  return entries.reduce((best, e) =>
+    (!best || AGENT_STATE_RANK[e.state] > AGENT_STATE_RANK[best.state] ? e : best), null);
+}
+
+// Only the dots change, so a rename field that is open keeps its draft.
+function applyAgentStatus() {
+  const entries = currentAgentPanes();
+  document.querySelectorAll('#pane-list .pane-item').forEach((item) => {
+    setAgentDot(item, mostPressing(entries.filter((e) => e.pane === item.dataset.paneId)));
+  });
+  document.querySelectorAll('#window-list .window-item').forEach((item) => {
+    setAgentDot(item, mostPressing(entries.filter((e) =>
+      e.session === currentSession && String(e.window) === item.dataset.windowIndex)));
+  });
+  document.querySelectorAll('#session-list .session-item').forEach((item) => {
+    setAgentDot(item, item.dataset.sessionHost !== currentHost ? null
+      : mostPressing(entries.filter((e) => e.session === item.dataset.sessionName)));
+  });
+}
+
+function setAgentDot(item, entry) {
+  let dot = item.querySelector(':scope > .agent-dot');
+  if (!entry || item.classList.contains('editing') || item.classList.contains('confirming')) {
+    dot?.remove();
+    return;
+  }
+  if (!dot) {
+    dot = document.createElement('span');
+    dot.setAttribute('role', 'img');
+    item.prepend(dot);
+  }
+  const label = `${AGENT_NAMES[entry.agent] || entry.agent}: ${AGENT_STATE_LABELS[entry.state]}`;
+  dot.className = `agent-dot agent-${entry.state}`;
+  dot.title = label;
+  dot.setAttribute('aria-label', label);
 }
 
 // ─── Hosts & sessions ─────────────────────────────────────────────────────────
@@ -2019,6 +2084,7 @@ function renderSessionList() {
       .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'))
       .forEach((s) => list.appendChild(buildSessionItem(h.host, s)));
   });
+  applyAgentStatus();
   focusInlineEditor(list);
 }
 
@@ -2192,6 +2258,7 @@ function renderPaneList(panesInfo, activePane) {
     });
     list.appendChild(div);
   });
+  applyAgentStatus();
 }
 
 function buildFilesButton(paneId) {

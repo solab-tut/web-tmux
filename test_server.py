@@ -1303,5 +1303,106 @@ class FileViewerTest(unittest.TestCase):
         client = asyncio.run(scenario())
         self.assertEqual([m['type'] for m in client.sent], ['dir_listing'])
 
+
+class _AgentTmux:
+    """Answers list-panes and capture-pane like a control client would:
+    UTF-8 bytes read as latin-1."""
+    def __init__(self, panes, screens):
+        self.host = server.LOCAL_HOST
+        self.target_gen = 0
+        self.panes, self.screens = panes, screens
+        self.captured = []
+        self.move_during_capture = False
+
+    @staticmethod
+    def _wire(text):
+        return text.encode('utf-8').decode('latin-1')
+
+    async def send_command(self, cmd, *, target_gen=None):
+        assert cmd.startswith('list-panes -a ')
+        return self._wire('\n'.join(self.panes))
+
+    async def send_command_list(self, cmds, on_end=None, *, target_gen=None):
+        if self.move_during_capture:
+            self.target_gen += 1
+        panes = [cmd.rsplit(' ', 1)[1] for cmd in cmds]
+        self.captured.append(panes)
+        return [self._wire(self.screens[pane]) for pane in panes]
+
+
+class AgentStatusPollTest(unittest.TestCase):
+    THINKING = '✶ Quantumizing…\n' + '─' * 40 + '\n❯ \n' + '─' * 40 + '\n  ⏸ manual mode on\n'
+
+    def setUp(self):
+        self.tmux = _AgentTmux(
+            ['web|0|%8|claude|✳ Claude Code', 'web|1|%9|bash|host', 'ops|0|%3|node|x'],
+            {'%8': self.THINKING, '%3': '$ npm test\n'})
+        patcher = patch.multiple(server, tmux=self.tmux, _agent_known={}, _agent_known_gen=-1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def poll(self):
+        data = asyncio.run(server._poll_agent_status())
+        return None if data is None else server.json.loads(data)
+
+    def test_only_candidates_are_captured_and_only_agents_reported(self):
+        msg = self.poll()
+        self.assertEqual(self.tmux.captured, [['%8', '%3']])
+        self.assertEqual(msg, {'type': 'agent_status', 'gen': 0, 'host': 'local', 'panes': [
+            {'pane': '%8', 'session': 'web', 'window': 0, 'agent': 'claude', 'state': 'thinking'},
+        ]})
+
+    def test_a_poll_across_a_host_switch_is_dropped(self):
+        self.tmux.move_during_capture = True
+        self.assertIsNone(self.poll())
+
+    def test_the_loop_sends_only_changes(self):
+        client = _Client()
+        polls = iter(['{"a": 1}', '{"a": 1}', '{"a": 2}'])
+
+        async def fake_poll():
+            return next(polls)
+
+        async def run():
+            sleeps = 0
+
+            async def fake_sleep(_):
+                nonlocal sleeps
+                sleeps += 1
+                if sleeps > 3:
+                    raise asyncio.CancelledError
+
+            with patch.object(server.asyncio, 'sleep', fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await server._agent_status_loop()
+
+        self.tmux._alive = lambda: True
+        with patch.multiple(server, _clients={client}, _agent_status_msg=None,
+                            _poll_agent_status=fake_poll):
+            asyncio.run(run())
+        self.assertEqual(client.queued, [{'a': 1}, {'a': 2}])
+
+    def test_the_loop_leaves_a_dead_control_client_alone(self):
+        self.tmux._alive = lambda: False
+
+        async def fail():
+            raise AssertionError('polled a dead client')
+
+        async def run():
+            calls = 0
+
+            async def fake_sleep(_):
+                nonlocal calls
+                calls += 1
+                if calls > 2:
+                    raise asyncio.CancelledError
+
+            with patch.object(server.asyncio, 'sleep', fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await server._agent_status_loop()
+
+        with patch.multiple(server, _clients={_Client()}, _poll_agent_status=fail):
+            asyncio.run(run())
+
 if __name__ == '__main__':
     unittest.main()

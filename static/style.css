@@ -585,6 +585,34 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   margin-left: auto;
 }
 
+/* A coding agent's state on its pane, window and session rows (app.js
+   applyAgentStatus): grey when idle, accent while thinking, warning colour
+   while it waits for an approval. */
+.agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-faint);
+}
+.agent-thinking {
+  background: var(--accent);
+  animation: agent-pulse 1.2s ease-in-out infinite;
+}
+.agent-approval {
+  width: 9px;
+  height: 9px;
+  background: var(--status-warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 35%, transparent);
+  animation: agent-pulse 0.9s ease-in-out infinite;
+}
+@keyframes agent-pulse {
+  50% { opacity: .35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-dot { animation: none; }
+}
+
 /* One group per host when ssh hosts are configured. */
 .host-head {
   display: flex;
