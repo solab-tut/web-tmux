@@ -80,11 +80,13 @@ _auth_prompts: dict[str, tuple[object, asyncio.Future]] = {}
 AUTH_PROMPT_TIMEOUT = askpass.HELPER_TIMEOUT - 10
 _AUTH_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}$')
 _restore_seq = 0
-# How often the panes are looked at for a coding agent's state, while anyone
-# is connected. Each look is one list-panes plus one capture per candidate.
+# How often the panes are looked at for a coding agent's state. Each look is
+# one list-panes plus one capture per candidate. It goes on with no browser
+# connected, so a turn that ends meanwhile is still marked finished.
 AGENT_STATUS_INTERVAL = 2.0
 _agent_status_msg: str | None = None   # the latest agent_status, for new connections
 _agent_known: dict[str, tuple[str, str]] = {}   # pane -> (command, agent), see pane_states
+_agent_unseen = agent_status.Unseen()
 _agent_known_gen = -1
 
 
@@ -1886,22 +1888,28 @@ async def _poll_agent_status() -> str | None:
     message; None if the control client moved to another host meanwhile.
 
     Screens are read here and never logged or sent on: only the verdict is."""
-    global _agent_known, _agent_known_gen
+    global _agent_known, _agent_unseen, _agent_known_gen
     gen, host = tmux.target_gen, tmux.host.name
     if gen != _agent_known_gen:
-        _agent_known, _agent_known_gen = {}, gen   # pane ids name other panes now
+        # Pane ids name other panes now.
+        _agent_known, _agent_unseen, _agent_known_gen = {}, agent_status.Unseen(), gen
     raw = await tmux.send_command(f'list-panes -a -F "{agent_status.LIST_FORMAT}"',
                                   target_gen=gen)
     panes = agent_status.parse_pane_list(_tmux_utf8(raw))
     candidates = [p for p in panes if agent_status.is_candidate(p.command)]
     screens: dict[str, str] = {}
+    view = ''
     if candidates:
-        captured = await tmux.send_command_list(
-            [f'capture-pane -p -t {p.pane}' for p in candidates], target_gen=gen)
+        view, *captured = await tmux.send_command_list(
+            [f'display-message -p "{agent_status.VIEW_FORMAT}"']
+            + [f'capture-pane -p -t {p.pane}' for p in candidates], target_gen=gen)
         screens = {p.pane: _tmux_utf8(text) for p, text in zip(candidates, captured)}
     if gen != tmux.target_gen:
         return None
     entries = agent_status.pane_states(panes, screens, _agent_known)
+    # The window on screen counts as seen only while a browser shows it.
+    seen = agent_status.viewed_panes(_tmux_utf8(view), panes) if _clients else set()
+    _agent_unseen.apply(entries, seen)
     return json.dumps({'type': 'agent_status', 'gen': gen, 'host': host, 'panes': entries})
 
 
@@ -1912,7 +1920,7 @@ async def _agent_status_loop() -> None:
         await asyncio.sleep(AGENT_STATUS_INTERVAL)
         # A control client that is down or reconnecting is left alone: a
         # command sent now would only start another attempt.
-        if not _clients or not tmux._alive():
+        if not tmux._alive():
             continue
         try:
             data = await _poll_agent_status()

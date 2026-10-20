@@ -21,9 +21,11 @@ IDLE = 'idle'
 THINKING = 'thinking'
 # Waiting on the user: an approval, and also a choice or a value it asked for.
 APPROVAL = 'approval'
+# Idle, after a turn that ended while its pane was not on screen (Unseen).
+DONE = 'done'
 
 # Higher wins when one row stands for several panes (a window, a session).
-STATE_RANK = {IDLE: 1, THINKING: 2, APPROVAL: 3}
+STATE_RANK = {IDLE: 1, THINKING: 2, DONE: 3, APPROVAL: 4}
 
 # Only the bottom of the screen counts. The agents redraw their dialogs and
 # status lines down there, while the rows above may still show an old
@@ -234,3 +236,48 @@ def pane_states(panes: list[PaneInfo], screens: dict[str, str],
     for pane in set(known) - seen:
         del known[pane]
     return entries
+
+
+# ──────────────────────────────────────────── finished, not yet seen
+
+# The control client's own session and window: what every browser shows.
+VIEW_FORMAT = '#{session_name}|#{window_index}|#{window_zoomed_flag}|#{pane_id}'
+
+
+def viewed_panes(view: str, panes: list[PaneInfo]) -> set[str]:
+    """The panes on screen, from `display-message -p VIEW_FORMAT` output:
+    the whole current window, or only its active pane while it is zoomed."""
+    p = view.strip().split('|')
+    if len(p) != 4 or not p[1].isdigit():
+        return set()
+    session, window, zoomed, active = p[0], int(p[1]), p[2] == '1', p[3]
+    return {info.pane for info in panes
+            if info.session == session and info.window == window
+            and (not zoomed or info.pane == active)}
+
+
+class Unseen:
+    """Marks an agent DONE when its turn ends off screen, until it is seen.
+
+    A pane that goes from thinking or waiting to idle while it is not shown
+    reads DONE instead of idle; showing it, or the agent starting again,
+    clears that."""
+
+    def __init__(self):
+        self.last: dict[str, str] = {}   # pane -> its state at the last look
+        self.panes: set[str] = set()     # panes finished and not yet seen
+
+    def apply(self, entries: list[dict], seen: set[str]) -> None:
+        for e in entries:
+            pane, state = e['pane'], e['state']
+            if state != IDLE or pane in seen:
+                self.panes.discard(pane)
+            elif self.last.get(pane) in (THINKING, APPROVAL):
+                self.panes.add(pane)
+            self.last[pane] = state
+            if pane in self.panes:
+                e['state'] = DONE
+        present = {e['pane'] for e in entries}
+        for pane in set(self.last) - present:
+            del self.last[pane]
+        self.panes &= present

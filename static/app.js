@@ -1904,17 +1904,21 @@ function renderWindowList(windows) {
 // ─── Agent status ─────────────────────────────────────────────────────────────
 // The server reads the screen of every pane that runs Claude Code, Codex or
 // Hermes Agent on the host being viewed, and says which of them are working
-// or waiting for an answer. Each pane, window and session row gets an icon
+// or waiting for an answer, and which finished a turn off screen and have
+// not been looked at since. Each pane, window and session row gets an icon
 // for the most pressing state among its panes — an icon rather than a dot,
 // so it can't be taken for a host's connection dot.
 
-const AGENT_STATE_RANK = { idle: 1, thinking: 2, approval: 3 };
-const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'waiting for you' };
+const AGENT_STATE_RANK = { idle: 1, thinking: 2, done: 3, approval: 4 };
+const AGENT_STATE_LABELS = {
+  idle: 'idle', thinking: 'thinking', done: 'finished, not seen yet', approval: 'waiting for you',
+};
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
-// Pause bars, a turning arc, a warning sign.
+// A prompt, a turning arc, a check mark, a warning sign.
 const AGENT_STATE_ICONS = {
   idle: '<path d="M2.5 4l4 4-4 4" stroke-width="1.9"/><path d="M8.5 12.5h5" stroke-width="1.9"/>',
   thinking: '<path d="M13 8a5 5 0 11-1.46-3.54"/><path d="M13 3v2.5h-2.5"/>',
+  done: '<path d="M2.5 8.5l3.5 3.5 7.5-8" stroke-width="2.2"/>',
   approval: '<path d="M8 2.2L14.3 13.3H1.7z"/><path d="M8 6.5v3M8 11.6v.1"/>',
 };
 

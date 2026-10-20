@@ -1313,6 +1313,7 @@ class _AgentTmux:
         self.panes, self.screens = panes, screens
         self.captured = []
         self.move_during_capture = False
+        self.view = 'web|1|0|%9'   # the browsers show web:1
 
     @staticmethod
     def _wire(text):
@@ -1325,9 +1326,10 @@ class _AgentTmux:
     async def send_command_list(self, cmds, on_end=None, *, target_gen=None):
         if self.move_during_capture:
             self.target_gen += 1
-        panes = [cmd.rsplit(' ', 1)[1] for cmd in cmds]
+        assert cmds[0].startswith('display-message -p ')
+        panes = [cmd.rsplit(' ', 1)[1] for cmd in cmds[1:]]
         self.captured.append(panes)
-        return [self._wire(self.screens[pane]) for pane in panes]
+        return [self._wire(self.view)] + [self._wire(self.screens[pane]) for pane in panes]
 
 
 class AgentStatusPollTest(unittest.TestCase):
@@ -1337,7 +1339,8 @@ class AgentStatusPollTest(unittest.TestCase):
         self.tmux = _AgentTmux(
             ['web|0|%8|claude|✳ Claude Code', 'web|1|%9|bash|host', 'ops|0|%3|node|x'],
             {'%8': self.THINKING, '%3': '$ npm test\n'})
-        patcher = patch.multiple(server, tmux=self.tmux, _agent_known={}, _agent_known_gen=-1)
+        patcher = patch.multiple(server, tmux=self.tmux, _agent_known={}, _agent_known_gen=-1,
+                                 _agent_unseen=server.agent_status.Unseen(), _clients={_Client()})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1351,6 +1354,20 @@ class AgentStatusPollTest(unittest.TestCase):
         self.assertEqual(msg, {'type': 'agent_status', 'gen': 0, 'host': 'local', 'panes': [
             {'pane': '%8', 'session': 'web', 'window': 0, 'agent': 'claude', 'state': 'thinking'},
         ]})
+
+    def test_a_turn_ending_off_screen_is_done_until_its_window_is_shown(self):
+        def states():
+            return [e['state'] for e in self.poll()['panes']]
+
+        self.assertEqual(states(), ['thinking'])
+        self.tmux.screens['%8'] = self.THINKING.replace('✶ Quantumizing…', '✻ Baked for 4s')
+        self.assertEqual(states(), ['done'])
+        with patch.object(server, '_clients', set()):
+            self.tmux.view = 'web|0|0|%8'
+            self.assertEqual(states(), ['done'])   # on screen, but no browser
+        self.assertEqual(states(), ['idle'])
+        self.tmux.view = 'web|1|0|%9'
+        self.assertEqual(states(), ['idle'])
 
     def test_a_poll_across_a_host_switch_is_dropped(self):
         self.tmux.move_during_capture = True
@@ -1381,6 +1398,34 @@ class AgentStatusPollTest(unittest.TestCase):
                             _poll_agent_status=fake_poll):
             asyncio.run(run())
         self.assertEqual(client.queued, [{'a': 1}, {'a': 2}])
+
+    def test_the_loop_polls_with_no_browser_connected(self):
+        self.tmux._alive = lambda: True
+        polled = 0
+
+        async def fake_poll():
+            nonlocal polled
+            polled += 1
+            return '{"a": 1}'
+
+        async def run():
+            calls = 0
+
+            async def fake_sleep(_):
+                nonlocal calls
+                calls += 1
+                if calls > 2:
+                    raise asyncio.CancelledError
+
+            with patch.object(server.asyncio, 'sleep', fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    await server._agent_status_loop()
+
+        with patch.multiple(server, _clients=set(), _agent_status_msg=None,
+                            _poll_agent_status=fake_poll):
+            asyncio.run(run())
+            self.assertEqual(server._agent_status_msg, '{"a": 1}')
+        self.assertEqual(polled, 2)
 
     def test_the_loop_leaves_a_dead_control_client_alone(self):
         self.tmux._alive = lambda: False

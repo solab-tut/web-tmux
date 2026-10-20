@@ -276,5 +276,41 @@ class PaneListTest(unittest.TestCase):
         self.assertEqual(known, {})
 
 
+class UnseenTest(unittest.TestCase):
+    PANES = [a.PaneInfo('web', 0, '%1', 'claude', ''), a.PaneInfo('web', 0, '%2', 'codex', ''),
+             a.PaneInfo('web', 1, '%3', 'claude', '')]
+
+    def test_viewed_panes(self):
+        self.assertEqual(a.viewed_panes('web|0|0|%2\n', self.PANES), {'%1', '%2'})
+        self.assertEqual(a.viewed_panes('web|0|1|%2', self.PANES), {'%2'})   # zoomed
+        self.assertEqual(a.viewed_panes('ops|0|0|%7', self.PANES), set())
+        self.assertEqual(a.viewed_panes('', self.PANES), set())
+
+    def look(self, unseen, states, seen=()):
+        entries = [{'pane': p, 'state': s} for p, s in states.items()]
+        unseen.apply(entries, set(seen))
+        return {e['pane']: e['state'] for e in entries}
+
+    def test_a_turn_ending_off_screen_stays_done_until_seen(self):
+        u = a.Unseen()
+        self.look(u, {'%1': a.THINKING, '%3': a.APPROVAL})
+        self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}),
+                         {'%1': a.DONE, '%3': a.DONE})
+        self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}, seen={'%1'}),
+                         {'%1': a.IDLE, '%3': a.DONE})
+        self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}), {'%1': a.IDLE, '%3': a.DONE})
+        # Started again: no longer done, and done again only after this turn.
+        self.assertEqual(self.look(u, {'%3': a.THINKING}), {'%3': a.THINKING})
+        self.assertEqual(u.panes, set())
+        self.assertEqual(u.last, {'%3': a.THINKING})
+
+    def test_a_turn_ending_on_screen_is_just_idle(self):
+        u = a.Unseen()
+        self.look(u, {'%1': a.THINKING}, seen={'%1'})
+        self.assertEqual(self.look(u, {'%1': a.IDLE}, seen={'%1'}), {'%1': a.IDLE})
+        # An agent first seen idle has no turn to report.
+        self.assertEqual(self.look(u, {'%2': a.IDLE}), {'%2': a.IDLE})
+
+
 if __name__ == '__main__':
     unittest.main()
