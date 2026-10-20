@@ -1909,7 +1909,7 @@ function renderWindowList(windows) {
 // so it can't be taken for a host's connection dot.
 
 const AGENT_STATE_RANK = { idle: 1, thinking: 2, approval: 3 };
-const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'waiting for approval' };
+const AGENT_STATE_LABELS = { idle: 'idle', thinking: 'thinking', approval: 'waiting for you' };
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
 // Pause bars, a turning arc, a warning sign.
 const AGENT_STATE_ICONS = {

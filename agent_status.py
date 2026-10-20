@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 IDLE = 'idle'
 THINKING = 'thinking'
+# Waiting on the user: an approval, and also a choice or a value it asked for.
 APPROVAL = 'approval'
 
 # Higher wins when one row stands for several panes (a window, a session).
@@ -92,6 +93,12 @@ AGENTS: dict[str, AgentRules] = {
             re.compile(r'\bAllow once\b'),
             re.compile(r'needs your input'),
             re.compile(r'Confirm action|Type 1/2/3 or use'),
+            # Boxes that wait for a choice or a value, not a yes: "⚙ Model
+            # Picker — Select Provider", a sudo password, a skill's secret.
+            # Each is gone from the screen once answered.
+            re.compile(r'⚙ Model Picker —'),
+            re.compile(r'Sudo Password Required|Skill Setup Required'),
+            re.compile(r'🔐 (?:Verification code for|Save login for|Unlock) '),
         ),
         thinking=(
             # The input line while a turn runs: "☤ ❯ msg=interrupt · /queue …"

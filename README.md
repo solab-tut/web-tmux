@@ -31,7 +31,7 @@ See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configura
 - Adjustable font size (11–18 px), persisted in `localStorage`
 - Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
 - Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown, and images (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG), including those a Markdown document shows from the same host. Works on SSH hosts too; text is cut at 200 KiB, images over 4 MiB are not shown, and only regular files open
-- Coding agent status: a pane running Claude Code, Codex or Hermes Agent gets a round icon in the sidebar — grey pause bars when idle, a turning blue arc while thinking, a pulsing orange warning sign while it waits for an approval. Window and session rows show the most pressing state among their panes. The server reads the bottom of those panes' screens every 2 seconds or so and matches what each agent prints (`esc to interrupt`, `Do you want to proceed?`, …), so nothing needs to be set up; it covers the host being viewed only, and a change in an agent's wording can throw it off
+- Coding agent status: a pane running Claude Code, Codex or Hermes Agent gets a round icon in the sidebar — grey pause bars when idle, a turning blue arc while thinking, a pulsing orange warning sign while it waits for you (an approval, or a choice such as Hermes's model picker). Window and session rows show the most pressing state among their panes. The server reads the bottom of those panes' screens every 2 seconds or so and matches what each agent prints (`esc to interrupt`, `Do you want to proceed?`, …), so nothing needs to be set up; it covers the host being viewed only, and a change in an agent's wording can throw it off
 - **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
 
 ## Requirements
@@ -117,7 +117,7 @@ TMUX_SESSION=my-session ./server.sh
 | **Sessions** | Click to switch; ✏ to rename; 🗑 to delete |
 | **Windows** | Click to switch (zoomed windows unzoom automatically) |
 | **Panes** | Click active pane → toggle zoom on/off; click another pane → zoom to it |
-| **⏸ / ↻ / ⚠** (round icon at the start of a row) | A coding agent's state: idle, thinking, waiting for approval. Hover for the agent and state |
+| **⏸ / ↻ / ⚠** (round icon at the start of a row) | A coding agent's state: idle, thinking, waiting for you (approval or a choice). Hover for the agent and state |
 | **+** (windows row) | New window in current session |
 | **+** (sessions row) | New session (without ssh hosts; with them, use each host row's **+**) |
 | **Host rows** (ssh hosts configured) | Click to fold / unfold that host's sessions |

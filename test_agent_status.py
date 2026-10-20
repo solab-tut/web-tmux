@@ -147,6 +147,20 @@ HERMES_APPROVAL = f'''\
 {RULE}
 '''
 
+# /model leaves the status bar behind its box, so the ☤ is out of the tail.
+HERMES_MODEL_PICKER = f'''\
+Welcome to Hermes Agent! Type your message or /help for commands.
+╭─ ⚙ Model Picker — Select Provider {'─' * 24}╮
+│ Current: gpt-6.1-sol on ChatGPT or Codex Subscription     │
+│ ❯ ChatGPT or Codex Subscription (14 models)  ← current    │
+│   azure (2 models)                                        │
+│   Cancel                                                  │
+╰{'─' * 59}╯
+{RULE}
+❯ Set a reminder or schedule a recurring task
+{RULE}
+'''
+
 
 class ClassifyTest(unittest.TestCase):
     def assertState(self, command, screen, expected, title=''):
@@ -180,6 +194,14 @@ class ClassifyTest(unittest.TestCase):
         self.assertState('python3', HERMES_THINKING_TYPING, ('hermes', a.THINKING))
         self.assertState('python3', HERMES_APPROVAL, ('hermes', a.APPROVAL))
         self.assertState('hermes', HERMES_IDLE, ('hermes', a.IDLE))
+
+    def test_hermes_waiting_for_a_choice(self):
+        self.assertState('hermes', HERMES_MODEL_PICKER, ('hermes', a.APPROVAL))
+        self.assertEqual(a.classify('python3', '', HERMES_MODEL_PICKER, known='hermes'),
+                         ('hermes', a.APPROVAL))
+        # Once picked, only the result line is left.
+        switched = HERMES_IDLE.replace('Ran rm', '  ✓ Model switched: gpt-6.1-sol\nRan rm')
+        self.assertState('python3', switched, ('hermes', a.IDLE))
 
     def test_agents_under_node_are_told_apart(self):
         self.assertState('node', CLAUDE_IDLE, ('claude', a.IDLE))
