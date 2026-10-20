@@ -587,23 +587,32 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 
 /* A coding agent's state on its pane, window and session rows (app.js
    applyAgentStatus): pause bars when idle, a turning arc while thinking, a
-   warning sign while it waits for an approval. Icons, not dots, so they
-   don't read as a host's connection state. */
+   warning sign while it waits for an approval. Framed like the rows' square
+   buttons so it is as easy to spot, but round: it shows a state and does
+   nothing when pressed. */
 .agent-icon {
-  width: 13px;
-  height: 13px;
+  width: 18px;
+  height: 18px;
+  padding: 2px;
+  box-sizing: border-box;
   flex: 0 0 auto;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-faint);
+  background: var(--bg-sink);
+  border: 1px solid var(--border-icon);
+  border-radius: 50%;
 }
-.agent-icon svg { width: 100%; height: 100%; display: block; }
+.agent-icon svg { width: 12px; height: 12px; display: block; }
 /* An empty slot keeps names in line, only in a list that shows an icon. */
 .agent-none { display: none; }
 .has-agents .agent-none { display: inline-flex; visibility: hidden; }
-.agent-thinking { color: var(--accent); }
+.agent-thinking { color: var(--accent); border-color: currentColor; }
 .agent-thinking svg { animation: agent-spin 1.1s linear infinite; }
 .agent-approval {
   color: var(--status-warn);
+  border-color: currentColor;
   animation: agent-pulse 0.9s ease-in-out infinite;
 }
 @keyframes agent-spin {
@@ -629,7 +638,9 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 .host-head.current { color: var(--text-bright); }
 .host-head .side-btn { min-width: 18px; height: 18px; font-size: 11px; padding: 0 4px; }
-.host-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The connection dot follows the name; the buttons keep to the right. */
+.host-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-head .side-btn:first-of-type { margin-left: auto; }
 .host-dot {
   width: 6px;
   height: 6px;

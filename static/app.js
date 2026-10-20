@@ -2136,8 +2136,8 @@ function buildHostHeader(h) {
     `<svg class="host-chevron" viewBox="0 0 8 8" aria-hidden="true">` +
     `<path d="M2.5 1.5L5.5 4L2.5 6.5" fill="none" stroke="currentColor" stroke-width="1.2"` +
     ` stroke-linecap="round" stroke-linejoin="round"/></svg>` +
-    `<span class="host-dot" aria-hidden="true"></span>` +
     `<span class="host-name">${escHtml(label)}</span>` +
+    `<span class="host-dot" aria-hidden="true"></span>` +
     (collapsed && count ? `<span class="host-count">${count}</span>` : '');
   div.title = h.reachable === false ? `${label} ${HOST_ERRORS[h.code] || 'is unavailable'}` : label;
   if (h.reachable !== false) {
