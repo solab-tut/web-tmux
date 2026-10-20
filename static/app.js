@@ -1447,7 +1447,7 @@ function applyLayout(panesInfo, layoutPanes, layoutStr, activePane) {
   if (fallbackActivePane) {
     setActivePaneVisual(fallbackActivePane);
     activePaneId = fallbackActivePane;
-    panes[fallbackActivePane]?.term.focus();
+    if (!sheetIsOpen()) panes[fallbackActivePane]?.term.focus();
   }
 
   // Now position; fit() will see the active pane at its real container size.
@@ -1748,6 +1748,13 @@ function selectPane(paneId, opts) {
   }
 }
 
+// A sheet (sign-in, paste, layout conflict) owns the keyboard while it is up.
+// On iPhone, tapping its field raises the soft keyboard, which resizes the
+// pane, and the layout events that follow would hand focus back to xterm.
+function sheetIsOpen() {
+  return !!document.querySelector('.sheet:not(.hidden)');
+}
+
 function focusActivePane(opts) {
   const options = opts || {};
   const retries = Number.isInteger(options.retries) ? options.retries : 0;
@@ -1755,6 +1762,7 @@ function focusActivePane(opts) {
 
   const focusOnce = (remaining) => {
     if (document.visibilityState === 'hidden') return;
+    if (sheetIsOpen()) return;
     if (usesTouchInterface() && Date.now() - _lastTouchScrollAt < MOBILE_TOUCH_SCROLL_IDLE_MS) return;
 
     let paneId = activePaneId;
