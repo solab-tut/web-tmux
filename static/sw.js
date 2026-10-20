@@ -10,7 +10,7 @@
 // Everything here is the app shell. Terminal contents never travel over HTTP —
 // they only ever go through the WebSocket — so nothing cached here is private.
 
-const CACHE = 'web-tmux-shell-v4';
+const CACHE = 'web-tmux-shell-v5';
 const DOCUMENT = '/';
 const AUTH_PATH = '/auth/session';
 const IMMUTABLE_PREFIX = '/vendor/';
@@ -25,6 +25,7 @@ const SHELL = [
   '/vendor/xterm-addon-fit/0.8.0/lib/xterm-addon-fit.js',
   '/vendor/xterm-addon-unicode11/0.4.0/lib/xterm-addon-unicode11.js',
   '/vendor/xterm-addon-webgl/0.16.0/lib/xterm-addon-webgl.js',
+  '/vendor/markdown-it/14.1.0/dist/markdown-it.min.js',
 ];
 
 self.addEventListener('install', (event) => {

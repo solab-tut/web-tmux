@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import shlex
 import shutil
@@ -366,6 +367,24 @@ class FakeSshIntegrationTest(unittest.TestCase):
         self.assertEqual(existing, {here})
         self.assertTrue(home.startswith('/'))
 
+
+    def test_file_viewer_works_through_the_remote_shell(self):
+        os.environ.setdefault('WEB_TMUX_ALLOWED_ORIGINS', 'https://host.example.ts.net:8766')
+        os.environ.setdefault('WEB_TMUX_TAILSCALE_USERS', 'owner@example.com')
+        import server
+        here = os.path.join(self.tmp, "dir with 'quote' $(id)")
+        os.mkdir(here)
+        body = 'line\n\xe9\n'.encode('latin-1') + '日本語'.encode('utf-8')
+        with open(os.path.join(here, "it's.md"), 'wb') as fh:
+            fh.write(body)
+        code, listing = asyncio.run(server._list_dir(self.host, here))
+        self.assertEqual(code, '')
+        self.assertEqual(listing['path'], here)
+        self.assertEqual(listing['entries'], [{'name': "it's.md", 'kind': 'f', 'link': False}])
+        code, content = asyncio.run(server._read_file(self.host, os.path.join(here, "it's.md")))
+        self.assertEqual(code, '')
+        self.assertEqual(base64.b64decode(content['data']), body)
+        self.assertEqual(content['size'], len(body))
 
 class SignInIntegrationTest(unittest.TestCase):
     """The whole askpass path with real processes: a stand-in `ssh` whose

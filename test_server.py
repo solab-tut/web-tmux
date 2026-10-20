@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import os
 import re
+import shutil
+import tempfile
 import threading
 import unittest
 from functools import partial
@@ -1022,6 +1025,189 @@ class SnapshotDeliveryTest(unittest.TestCase):
         self.assertEqual(msg['data'], 'cm93')   # base64 of b'row'
         self.assertEqual(msg['scroll_region_lower'], 23)
 
+
+class FileViewerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dir = os.path.join(self.tmp, "a dir with 'quote'")
+        os.makedirs(os.path.join(self.dir, 'sub'))
+        with open(os.path.join(self.dir, 'README.md'), 'w') as fh:
+            fh.write('# 見出し\n')
+        for name in ('.hidden', '-dash', 'with $(id) `x`'):
+            open(os.path.join(self.dir, name), 'w').close()
+        with open(os.path.join(self.dir, 'bin'), 'wb') as fh:
+            fh.write(b'\x7fELF\0\0\1')
+        os.symlink('sub', os.path.join(self.dir, 'link'))
+        os.symlink('nowhere', os.path.join(self.dir, 'broken'))
+        os.mkfifo(os.path.join(self.dir, 'fifo'))
+        self.tmux = _SwitchingTmux()
+        self.tmux.panes = ['%3']
+        self.cwd = self.dir
+        self.captures = []
+
+        async def capture(*args, host=None):
+            self.captures.append(args)
+            return 0, self.cwd + '\n'
+
+        patcher = patch.multiple(
+            server,
+            HOSTS={'local': server.LOCAL_HOST, 'lan-box': REMOTE},
+            tmux=self.tmux,
+            _run_tmux_capture=capture,
+            _allowed_panes={'%3'},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def ask(self, **msg):
+        client = _Client()
+        msg.setdefault('host', 'local')
+        asyncio.run(server._answer_file_request(client, msg))
+        self.assertEqual(len(client.sent), 1)
+        return client.sent[0]
+
+    def test_lists_a_directory_with_awkward_names(self):
+        reply = self.ask(type='list_dir', id=4, path=self.dir)
+        self.assertEqual(reply['type'], 'dir_listing')
+        self.assertEqual(reply['id'], 4)
+        self.assertEqual(reply['path'], self.dir)
+        self.assertFalse(reply['truncated'])
+        kinds = {e['name']: (e['kind'], e['link']) for e in reply['entries']}
+        self.assertEqual(kinds, {
+            'README.md': ('f', False), '.hidden': ('f', False), '-dash': ('f', False),
+            'with $(id) `x`': ('f', False), 'bin': ('f', False), 'sub': ('d', False),
+            'link': ('d', True), 'broken': ('o', True), 'fifo': ('o', False),
+        })
+
+    def test_dot_dot_comes_back_resolved(self):
+        reply = self.ask(type='list_dir', path=os.path.join(self.dir, 'sub', '..'))
+        self.assertEqual(reply['path'], self.dir)
+
+    def test_starts_from_the_pane_cwd(self):
+        reply = self.ask(type='list_dir', pane='%3', gen=0)
+        self.assertEqual(reply['path'], self.dir)
+        self.assertEqual(self.captures,
+                         [('display-message', '-p', '-t', '%3', '#{pane_current_path}')])
+
+    def test_falls_back_to_home_without_a_usable_cwd(self):
+        home = os.path.expanduser('~')
+        self.assertEqual(self.ask(type='list_dir')['path'], home)
+        self.assertEqual(self.ask(type='list_dir', pane='%9')['path'], home)   # not in this window
+        self.cwd = 'relative'
+        self.assertEqual(self.ask(type='list_dir', pane='%3')['path'], home)
+
+    def test_cut_at_max_entries(self):
+        many = os.path.join(self.tmp, 'many')
+        os.mkdir(many)
+        for i in range(server.MAX_DIR_ENTRIES + 5):
+            open(os.path.join(many, f'f{i}'), 'w').close()
+        reply = self.ask(type='list_dir', path=many)
+        self.assertTrue(reply['truncated'])
+        self.assertEqual(len(reply['entries']), server.MAX_DIR_ENTRIES)
+
+    def test_reads_a_text_file(self):
+        path = os.path.join(self.dir, 'README.md')
+        reply = self.ask(type='read_file', id=9, path=path)
+        self.assertEqual(reply['type'], 'file_content')
+        self.assertEqual(reply['id'], 9)
+        self.assertEqual(reply['path'], path)
+        self.assertEqual(base64.b64decode(reply['data']).decode('utf-8'), '# 見出し\n')
+        self.assertEqual(reply['size'], len('# 見出し\n'.encode('utf-8')))
+        self.assertFalse(reply['truncated'])
+        self.assertFalse(reply['binary'])
+
+    def test_binary_file_is_flagged_not_sent(self):
+        reply = self.ask(type='read_file', path=os.path.join(self.dir, 'bin'))
+        self.assertTrue(reply['binary'])
+        self.assertEqual(reply['data'], '')
+
+    def test_large_file_is_cut_and_bytes_survive(self):
+        path = os.path.join(self.tmp, 'big.txt')
+        body = bytes(range(1, 256)) * (server.FILE_READ_LIMIT // 255 + 10)
+        with open(path, 'wb') as fh:
+            fh.write(body)
+        reply = self.ask(type='read_file', path=path)
+        self.assertTrue(reply['truncated'])
+        self.assertEqual(reply['size'], len(body))
+        self.assertEqual(base64.b64decode(reply['data']), body[:server.FILE_READ_LIMIT])
+
+    def test_errors_are_fixed_codes(self):
+        cases = (
+            ({'type': 'read_file', 'path': os.path.join(self.dir, 'fifo')}, 'not_regular'),
+            ({'type': 'read_file', 'path': os.path.join(self.dir, 'sub')}, 'is_directory'),
+            ({'type': 'read_file', 'path': os.path.join(self.dir, 'gone')}, 'not_found'),
+            ({'type': 'read_file', 'path': os.path.join(self.dir, 'broken')}, 'not_found'),
+            ({'type': 'list_dir', 'path': os.path.join(self.dir, 'README.md')}, 'not_a_directory'),
+            ({'type': 'list_dir', 'path': os.path.join(self.dir, 'gone')}, 'not_found'),
+            ({'type': 'read_file', 'path': 'README.md'}, 'invalid_path'),
+            ({'type': 'read_file', 'path': self.dir + '/a\nb'}, 'invalid_path'),
+            ({'type': 'read_file', 'path': '/\udcff'}, 'invalid_path'),
+            ({'type': 'list_dir', 'path': '/' + 'x' * server.MAX_FILE_PATH_BYTES}, 'invalid_path'),
+        )
+        for msg, code in cases:
+            with self.subTest(msg=msg):
+                reply = self.ask(id=1, **msg)
+                self.assertEqual(reply['type'], 'file_error')
+                self.assertEqual(reply['code'], code)
+                self.assertEqual(reply['request'], msg['type'])
+                self.assertEqual(reply['path'], msg['path'])
+
+    @unittest.skipIf(os.geteuid() == 0, 'root reads everything')
+    def test_unreadable_is_permission_denied(self):
+        secret = os.path.join(self.tmp, 'secret')
+        os.mkdir(secret)
+        with open(os.path.join(secret, 'f'), 'w') as fh:
+            fh.write('x')
+        os.chmod(os.path.join(secret, 'f'), 0)
+        self.assertEqual(self.ask(type='read_file', path=os.path.join(secret, 'f'))['code'],
+                         'permission_denied')
+        os.chmod(secret, 0)
+        self.addCleanup(os.chmod, secret, 0o700)
+        self.assertEqual(self.ask(type='list_dir', path=secret)['code'], 'permission_denied')
+
+    def test_only_the_viewed_host(self):
+        reply = self.ask(type='list_dir', host='lan-box', path='/')
+        self.assertEqual(reply['code'], 'host_changed')
+        reply = self.ask(type='list_dir', pane='%3', gen=self.tmux.target_gen + 1)
+        self.assertEqual(reply['code'], 'host_changed')
+        self.assertEqual(self.captures, [])
+
+    def test_one_request_at_a_time_and_only_the_latest_waits(self):
+        answered = []
+        release = None
+
+        async def answer(client, msg):
+            answered.append(msg['id'])
+            if msg['id'] == 1:
+                await release.wait()
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            client = _Client()
+            with patch.object(server, '_answer_file_request', answer):
+                task = server._queue_file_request(client, {'id': 1})
+                await asyncio.sleep(0)
+                self.assertIsNone(server._queue_file_request(client, {'id': 2}))
+                self.assertIsNone(server._queue_file_request(client, {'id': 3}))
+                release.set()
+                await task
+            self.assertNotIn(client, server._file_requests)
+        asyncio.run(scenario())
+        self.assertEqual(answered, [1, 3])
+
+    def test_handle_msg_answers_off_the_message_loop(self):
+        async def scenario():
+            client = _Client()
+            await server._handle_msg(client, {'type': 'list_dir', 'id': 2, 'host': 'local',
+                                              'path': self.dir})
+            self.assertEqual(client.sent, [])   # not answered inline
+            while client in server._file_requests:
+                await asyncio.sleep(0.01)
+            return client
+        client = asyncio.run(scenario())
+        self.assertEqual([m['type'] for m in client.sent], ['dir_listing'])
 
 if __name__ == '__main__':
     unittest.main()

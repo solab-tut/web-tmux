@@ -167,6 +167,36 @@ class MessageValidationTest(unittest.TestCase):
                     server._validated_message(raw)
 
 
+    def test_valid_file_messages(self):
+        server._validated_message(json.dumps({'type': 'list_dir', 'host': 'local'}))
+        server._validated_message(json.dumps(
+            {'type': 'list_dir', 'id': 7, 'host': 'local', 'pane': '%1', 'gen': 0}))
+        server._validated_message(json.dumps(
+            {'type': 'read_file', 'id': 8, 'host': 'local', 'path': '/etc/hosts'}))
+        # A path the host can't take is answered (invalid_path), not a
+        # violation: it can come straight from a listed name.
+        server._validated_message(json.dumps(
+            {'type': 'read_file', 'host': 'local', 'path': '/tmp/a\nb'}))
+
+    def test_bad_file_messages_are_rejected(self):
+        bad_messages = (
+            json.dumps({'type': 'list_dir'}),
+            json.dumps({'type': 'list_dir', 'host': 'elsewhere'}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'path': 42}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'pane': '%1; kill-server'}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'id': True}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'id': -1}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'id': '1'}),
+            json.dumps({'type': 'list_dir', 'host': 'local', 'name': 'x'}),
+            json.dumps({'type': 'read_file', 'host': 'local'}),
+            json.dumps({'type': 'read_file', 'host': 'local', 'path': '/a', 'pane': '%1'}),
+            json.dumps({'type': 'read_file', 'host': 'local', 'path': ['/a']}),
+        )
+        for raw in bad_messages:
+            with self.subTest(raw=raw):
+                with self.assertRaises(server.PolicyViolation):
+                    server._validated_message(raw)
+
 class HeaderAndRateLimitTest(unittest.TestCase):
     def test_security_headers_are_strict(self):
         headers = dict(server._security_headers())

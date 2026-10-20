@@ -511,6 +511,10 @@ _MESSAGE_FIELDS = {
     'save_layout': ({'type', 'name', 'overwrite'}, {'name'}),
     'restore_layout': ({'type', 'name', 'mode'}, {'name'}),
     'delete_layout': ({'type', 'name'}, {'name'}),
+    # `id` is echoed back: the browser only listens for its latest request.
+    # list_dir with no `path` starts from `pane`'s cwd, or from $HOME.
+    'list_dir': ({'type', 'id', 'host', 'path', 'pane', 'gen'}, {'host'}),
+    'read_file': ({'type', 'id', 'host', 'path'}, {'host', 'path'}),
 }
 
 _RESTORE_MODES = {'auto', 'replace', 'duplicate', 'skip'}
@@ -616,6 +620,18 @@ def _validated_message(raw: str | bytes) -> dict:
             raise PolicyViolation('invalid overwrite flag')
         if msg_type == 'restore_layout' and 'mode' in msg and msg['mode'] not in _RESTORE_MODES:
             raise PolicyViolation('invalid restore mode')
+    elif msg_type in {'list_dir', 'read_file'}:
+        _msg_host(msg)
+        req_id = msg.get('id', 0)
+        if isinstance(req_id, bool) or not isinstance(req_id, int) or not 0 <= req_id < 2 ** 31:
+            raise PolicyViolation('invalid request id')
+        # Only the type is checked here. A path the host-side scripts can't
+        # take — one through a name with a newline in it, say — is answered
+        # with invalid_path rather than a closed socket.
+        if 'path' in msg and not isinstance(msg['path'], str):
+            raise PolicyViolation('invalid path')
+        if 'pane' in msg and not _pane_id(msg['pane']):
+            raise PolicyViolation('unknown pane')
     return msg
 
 
@@ -1494,6 +1510,9 @@ async def _handle_msg(websocket, msg: dict) -> None:
                 {'type': 'restore_result', 'name': name, 'sessions': results}))
         await _send_layouts(websocket)
 
+    elif t in {'list_dir', 'read_file'}:
+        _queue_file_request(websocket, msg)
+
     elif t == 'delete_layout':
         name = _layout_name(msg.get('name'))
         if _layout_lock.locked():
@@ -1511,6 +1530,174 @@ async def _handle_msg(websocket, msg: dict) -> None:
                 await _send_layout_error(websocket, name, 'save_failed')
                 return
         await _send_layouts(websocket)
+
+
+# ──────────────────────────────────────────── file viewer
+
+FILE_READ_LIMIT = 200 * 1024    # stays under tmux_hosts.CAPTURE_LIMIT with the size line
+MAX_DIR_ENTRIES = 2000
+MAX_FILE_PATH_BYTES = 4096
+_BINARY_SNIFF_BYTES = 8192
+
+# Both scripts take their path on stdin, never on a command line, and run the
+# same way here and over ssh. Exit codes start at 10, clear of
+# tmux_hosts.RC_TOO_LARGE and ssh's 255.
+_FILE_ERRORS = {
+    10: 'not_found',
+    11: 'not_a_directory',
+    12: 'permission_denied',
+    13: 'is_directory',
+    14: 'not_regular',
+    tmux_hosts.RC_TOO_LARGE: 'too_large',
+}
+
+# The directory (an empty line means $HOME) as `pwd` sees it after cd, so
+# `..` comes back resolved; then one NUL-terminated "<kind> <name>" per entry,
+# kind d/f/o with an l appended for a symlink, and T if the list was cut.
+_LIST_DIR = (
+    'IFS= read -r d; [ -n "$d" ] || d=$HOME; '
+    '[ -e "$d" ] || exit 10; [ -d "$d" ] || exit 11; '
+    '{ cd -- "$d" && [ -r . ]; } 2>/dev/null || exit 12; '
+    'pwd; n=0; '
+    'for f in * .[!.]* ..?*; do '
+    '[ -e "$f" ] || [ -L "$f" ] || continue; '
+    'n=$((n + 1)); '
+    f'if [ "$n" -gt {MAX_DIR_ENTRIES} ]; then printf "T\\0"; break; fi; '
+    'if [ -d "$f" ]; then k=d; elif [ -f "$f" ]; then k=f; else k=o; fi; '
+    'if [ -L "$f" ]; then k="${k}l"; fi; '
+    'printf "%s %s\\0" "$k" "$f"; '
+    'done; exit 0'
+)
+
+# The file's size on one line, then at most FILE_READ_LIMIT bytes of it.
+# Anything but a regular file is refused: a FIFO or a device would hold the
+# read open until the timeout, or never end.
+_READ_FILE = (
+    'IFS= read -r p; '
+    '[ -e "$p" ] || exit 10; [ -d "$p" ] && exit 13; [ -f "$p" ] || exit 14; '
+    '[ -r "$p" ] || exit 12; '
+    's=$(wc -c < "$p") || exit 12; printf "%s\\n" $s; '
+    f'exec head -c {FILE_READ_LIMIT} < "$p"'
+)
+
+
+def _file_path(value) -> str:
+    """`value` if the host-side scripts can take it as a path, else ''.
+
+    They read it as one line of stdin, so it can't hold a line break."""
+    if (not isinstance(value, str) or not value.startswith('/')
+            or any(ch in value for ch in '\r\n\0')):
+        return ''
+    try:
+        size = len(value.encode('utf-8'))
+    except UnicodeEncodeError:   # a lone surrogate from a non-UTF-8 name
+        return ''
+    return value if size <= MAX_FILE_PATH_BYTES else ''
+
+
+async def _list_dir(host: TmuxHost, path: str) -> tuple[str, dict]:
+    """('', listing) or (error code, {}). An empty `path` lists $HOME."""
+    rc, out, _ = await tmux_hosts.run_shell(host, _LIST_DIR, f'{path}\n'.encode())
+    if rc != 0:
+        return _FILE_ERRORS.get(rc, 'unavailable'), {}
+    resolved, sep, rest = out.partition('\n')
+    if not sep or not resolved.startswith('/'):
+        return 'unavailable', {}
+    entries, truncated = [], False
+    for item in rest.split('\0')[:-1]:
+        if item == 'T':
+            truncated = True
+            continue
+        kind, _, name = item.partition(' ')
+        if not name:
+            continue
+        entries.append({'name': name, 'kind': kind[0], 'link': kind.endswith('l')})
+    return '', {'path': resolved, 'entries': entries, 'truncated': truncated}
+
+
+async def _read_file(host: TmuxHost, path: str) -> tuple[str, dict]:
+    rc, out, _ = await tmux_hosts.run_shell(host, _READ_FILE, f'{path}\n'.encode())
+    if rc != 0:
+        return _FILE_ERRORS.get(rc, 'unavailable'), {}
+    size, sep, body = out.partition('\n')
+    if not sep or not size.isdigit():
+        return 'unavailable', {}
+    data = body.encode('utf-8', errors='surrogateescape')   # the bytes as read
+    binary = b'\0' in data[:_BINARY_SNIFF_BYTES]
+    return '', {
+        'path': path,
+        'size': int(size),
+        'truncated': int(size) > len(data),
+        'binary': binary,
+        'data': '' if binary else base64.b64encode(data).decode('ascii'),
+    }
+
+
+async def _pane_cwd(host: TmuxHost, pane) -> str:
+    """`pane`'s working directory, or '' (meaning $HOME) when there's none to use."""
+    pane = _pane_id(pane)
+    if not pane or not await _known_pane(pane):
+        return ''
+    rc, out = await _run_tmux_capture('display-message', '-p', '-t', pane, '#{pane_current_path}',
+                                      host=host)
+    return _file_path(out.rstrip('\n')) if rc == 0 else ''
+
+
+async def _answer_file_request(client, msg: dict) -> None:
+    t = msg['type']
+    reply = {'id': msg.get('id', 0), 'host': msg['host']}
+    path = msg.get('path')
+    # The viewer browses the host the browser is looking at, and only that
+    # one: asking about another must never start an ssh sign-in. Taken once,
+    # so a switch while the pane's cwd is looked up can't move the listing.
+    host = tmux.host
+    if msg['host'] != host.name or _stale_view(msg):
+        code, result = 'host_changed', {}
+    elif path is not None and not _file_path(path):
+        code, result = 'invalid_path', {}
+    elif t == 'list_dir':
+        start = path if path is not None else await _pane_cwd(host, msg.get('pane'))
+        code, result = await _list_dir(host, start)
+    else:
+        code, result = await _read_file(host, path)
+    if code:
+        log.info('%s on host %s failed: %s', t, msg['host'], code)
+        await client.send(json.dumps({**reply, 'type': 'file_error', 'request': t,
+                                      'path': path, 'code': code}))
+    else:
+        await client.send(json.dumps({**reply, **result,
+                                      'type': 'dir_listing' if t == 'list_dir' else 'file_content'}))
+
+
+# client → the request waiting behind the one running for it (None if none)
+_file_requests: dict = {}
+
+
+def _queue_file_request(client, msg: dict) -> asyncio.Task | None:
+    """Answers list_dir/read_file off the message loop, so a host that is
+    slow to answer doesn't hold this browser's keystrokes behind it.
+
+    One request runs at a time per browser. One that arrives meanwhile
+    replaces any already waiting: the browser only listens for its latest id.
+    Returns the task when it started one."""
+    if client in _file_requests:
+        _file_requests[client] = msg
+        return None
+    _file_requests[client] = None
+
+    async def run(msg: dict | None) -> None:
+        try:
+            while msg is not None:
+                await _answer_file_request(client, msg)
+                msg, _file_requests[client] = _file_requests[client], None
+        except ConnectionClosed:
+            pass
+        except Exception as exc:
+            log.warning('file request failed: %s', type(exc).__name__)
+        finally:
+            _file_requests.pop(client, None)
+
+    return asyncio.ensure_future(run(msg))
 
 
 # ──────────────────────────────────────────── main

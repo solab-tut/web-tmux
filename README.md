@@ -30,6 +30,7 @@ See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configura
 - Color themes: Dark (default), Light, Nord
 - Adjustable font size (11–18 px), persisted in `localStorage`
 - Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
+- Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown. Works on SSH hosts too; files are capped at 200 KiB and only regular files open
 - **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
 
 ## Requirements
@@ -378,6 +379,8 @@ tailscale serve --https=8765 off
 - `xterm@5.3.0`
 - `xterm-addon-fit@0.8.0`
 - `xterm-addon-unicode11@0.4.0`
+- `markdown-it@14.1.0` (its bundled dependencies' licenses, including
+  `entities` under BSD-2-Clause, are in `THIRD_PARTY_LICENSES` next to it)
 
 These assets are distributed under the MIT license. Their license files are
 included next to the vendored files in `static/vendor/`.

@@ -18,6 +18,11 @@
       <div id="topbar-host"></div>
       <div id="session-name">—</div>
       <div id="topbar-spacer"></div>
+      <button id="files-toggle" class="topbar-btn" type="button" aria-label="Files" title="Files in the pane's folder">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3.5 7.5a2 2 0 012-2h4l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button id="paste-toggle" class="topbar-btn" type="button" aria-label="Paste" title="Paste">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="7" y="4" width="10" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
@@ -219,6 +224,28 @@
       </div>
     </div>
 
+    <!-- Files in a pane's folder, on the host being viewed. Read-only. -->
+    <div id="file-sheet" class="sheet sheet-full hidden" aria-hidden="true">
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="file-title">
+        <div class="sheet-head">
+          <button id="file-back" class="sheet-close" type="button" aria-label="Back to folder" title="Back to folder" hidden>‹</button>
+          <div id="file-title"></div>
+          <button id="file-close" class="sheet-close" type="button" aria-label="Close files">×</button>
+        </div>
+        <div class="file-toolbar">
+          <div id="file-crumbs"></div>
+          <div id="file-meta"></div>
+          <button id="file-hidden" class="file-tool" type="button" aria-pressed="false" title="Show hidden files">.*</button>
+          <button id="file-raw" class="file-tool" type="button" aria-pressed="false" title="Show the Markdown source">Raw</button>
+          <button id="file-copy" class="file-tool" type="button" title="Copy path">Copy path</button>
+          <button id="file-reload" class="file-tool" type="button" aria-label="Reload" title="Reload">↻</button>
+        </div>
+        <div id="file-note" hidden></div>
+        <div id="file-body" tabindex="-1"></div>
+      </div>
+    </div>
+
   </div>
 
   <!-- Scrollback view. Re-parented into whichever .pane-wrap is active, so its
@@ -245,6 +272,7 @@
   <script src="vendor/xterm-addon-fit/0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="vendor/xterm-addon-unicode11/0.4.0/lib/xterm-addon-unicode11.js"></script>
   <script src="vendor/xterm-addon-webgl/0.16.0/lib/xterm-addon-webgl.js"></script>
+  <script src="vendor/markdown-it/14.1.0/dist/markdown-it.min.js"></script>
   <script src="history.js"></script>
   <script src="app.js"></script>
 </body>

@@ -1162,6 +1162,9 @@ function handleMsg(msg) {
     case 'save_result':     onSaveResult(msg);     break;
     case 'host_auth_prompt': onHostAuthPrompt(msg); break;
     case 'host_auth_closed': onHostAuthClosed(msg); break;
+    case 'dir_listing':     onDirListing(msg);     break;
+    case 'file_content':    onFileContent(msg);    break;
+    case 'file_error':      onFileError(msg);      break;
   }
 }
 
@@ -1219,6 +1222,11 @@ function onInit(msg) {
   dropHostAuthPrompts();   // a reconnect means the server gave up on them
   _editingWindowIndex = null;   // its window belonged to the old session
   updateSessions(msg);
+  // Another host's files, or a reply the old socket took with it.
+  if (_files.open) {
+    if (_files.host !== currentHost) closeFileViewer();
+    else if (_files.pending) reloadFileView();
+  }
   renderWindowList(msg.windows);
   renderPaneList(msg.panes, msg.active_pane);
   updateCurrentWindow(msg.windows);
@@ -2162,6 +2170,7 @@ function renderPaneList(panesInfo, activePane) {
     div.innerHTML =
       `<span class="pane-id">${escHtml(p.id)}</span>` +
       `<span class="pane-cmd">${escHtml(p.command || '')}</span>`;
+    div.appendChild(buildFilesButton(p.id));
     div.addEventListener('click', () => {
       const isCurrentPane = p.id === activePaneId;
       selectPane(p.id, isCurrentPane ? { toggleZoom: true } : { forceZoom: true });
@@ -2170,6 +2179,26 @@ function renderPaneList(panesInfo, activePane) {
     });
     list.appendChild(div);
   });
+}
+
+function buildFilesButton(paneId) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item-icon-btn';
+  button.setAttribute('aria-label', `Files in ${paneId}'s folder`);
+  button.title = 'Files in this pane\'s folder';
+  button.innerHTML =
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"` +
+    ` stroke-linejoin="round" aria-hidden="true">` +
+    `<path d="M2 4.5a1 1 0 011-1h3l1.5 1.5H13a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1z"/>` +
+    `</svg>`;
+  button.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (isMobileWidth()) setSidebarOpen(false);
+    openFileViewer(paneId);
+  });
+  return button;
 }
 
 function switchWindow(idx) {
@@ -2732,9 +2761,9 @@ document.getElementById('layout-list').addEventListener('keydown', handleSidebar
 // ─── Sidebar action buttons ───────────────────────────────────────────────────
 
 function wsSendType(type, extra) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   markClientActive();
-  wsSend(type, extra);
+  return wsSend(type, extra);
 }
 
 // Plain send, for messages that are not the user acting on this tab: a probe
@@ -3211,6 +3240,395 @@ document.querySelectorAll('#virtual-keyboard-menu [data-virtual-keyboard-mode]')
     document.getElementById('virtual-keyboard-menu').hidden = true;
   });
 });
+
+// ─── File viewer ──────────────────────────────────────────────────────────────
+// Browses the host being viewed, starting from a pane's working directory.
+// Every request goes over the socket (list_dir / read_file); there is no
+// request queue here — the server runs one at a time and the reply that
+// carries the latest id is the only one listened to.
+
+const FILES_HIDDEN_STORAGE_KEY = 'web-tmux-files-hidden';
+const MARKDOWN_FILE_RE = /\.(md|markdown|mdown|mkd)$/i;
+const FILE_ERRORS = {
+  not_found:         'No such file or folder.',
+  not_a_directory:   'Not a folder.',
+  permission_denied: 'Permission denied.',
+  not_regular:       'Not a regular file (a device, FIFO or socket).',
+  too_large:         'This folder has too much in it to list.',
+  invalid_path:      'This name can’t be opened here.',
+  host_changed:      'The host changed. Close and open the viewer again.',
+  unavailable:       'The host did not answer.',
+};
+
+const _files = {
+  open: false,
+  host: '',
+  reqId: 0,
+  pending: null,     // { kind: 'dir'|'file', path, pane } awaiting its reply
+  dir: '',           // folder being shown, or the one the open file is in
+  entries: null,     // its listing
+  truncated: false,
+  file: null,        // { path, size, truncated, binary, text }
+  raw: false,        // Markdown shown as source
+  showHidden: loadFilesShowHidden(),
+};
+let _markdown = null;
+
+function loadFilesShowHidden() {
+  try { return localStorage.getItem(FILES_HIDDEN_STORAGE_KEY) === '1'; }
+  catch (_) { return false; }
+}
+
+function joinPath(dir, name) {
+  return dir === '/' ? `/${name}` : `${dir}/${name}`;
+}
+
+function parentPath(path) {
+  return path.replace(/\/[^/]*$/, '') || '/';
+}
+
+function baseName(path) {
+  return path === '/' ? '/' : path.slice(path.lastIndexOf('/') + 1);
+}
+
+function formatFileSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function setFileSheetOpen(open) {
+  const sheet = document.getElementById('file-sheet');
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function openFileViewer(paneId) {
+  HistoryOverlay.close();
+  _files.open = true;
+  _files.host = currentHost;
+  _files.dir = '';
+  _files.entries = null;
+  _files.file = null;
+  setFileSheetOpen(true);
+  requestFileDir('', paneId || activePaneId || '');
+  document.getElementById('file-body').focus({ preventScroll: true });
+}
+
+function closeFileViewer() {
+  _files.open = false;
+  _files.pending = null;
+  _files.reqId++;   // whatever is still on its way is no longer wanted
+  setFileSheetOpen(false);
+  document.getElementById('file-body').replaceChildren();
+  focusActivePane();
+}
+
+function sendFileRequest(req) {
+  _files.pending = req;
+  _files.reqId++;
+  const extra = { id: _files.reqId, host: _files.host };
+  if (req.path) extra.path = req.path;
+  else if (req.pane) { extra.pane = req.pane; extra.gen = currentGen; }
+  if (!wsSendType(req.kind === 'dir' ? 'list_dir' : 'read_file', extra)) {
+    _files.pending = null;
+    showFileNote('Not connected.');
+    return;
+  }
+  renderFileView();
+}
+
+// An empty path starts from `pane`'s cwd (or $HOME, when it has none).
+function requestFileDir(path, pane) {
+  sendFileRequest({ kind: 'dir', path, pane: path ? '' : pane });
+}
+
+function requestFile(path) {
+  sendFileRequest({ kind: 'file', path });
+}
+
+function reloadFileView() {
+  if (_files.file) requestFile(_files.file.path);
+  else requestFileDir(_files.dir, activePaneId || '');
+}
+
+function fileReplyWanted(msg) {
+  return _files.open && msg.id === _files.reqId && msg.host === _files.host;
+}
+
+function onDirListing(msg) {
+  if (!fileReplyWanted(msg)) return;
+  _files.pending = null;
+  _files.dir = msg.path;
+  _files.entries = msg.entries || [];
+  _files.truncated = !!msg.truncated;
+  _files.file = null;
+  renderFileView();
+  document.getElementById('file-body').scrollTop = 0;
+}
+
+function onFileContent(msg) {
+  if (!fileReplyWanted(msg)) return;
+  _files.pending = null;
+  const dir = parentPath(msg.path);
+  if (dir !== _files.dir) {
+    _files.dir = dir;      // reached through a link: Back lists its folder
+    _files.entries = null;
+  }
+  const bytes = b64ToUint8(msg.data || '');
+  _files.file = {
+    path: msg.path,
+    size: msg.size,
+    shown: bytes.length,
+    truncated: !!msg.truncated,
+    binary: !!msg.binary,
+    text: msg.binary ? '' : new TextDecoder('utf-8').decode(bytes),
+  };
+  _files.raw = false;
+  renderFileView();
+  document.getElementById('file-body').scrollTop = 0;
+}
+
+function onFileError(msg) {
+  if (!fileReplyWanted(msg)) return;
+  const req = _files.pending;
+  _files.pending = null;
+  // A link (or a symlink) that named a folder: list it instead.
+  if (msg.code === 'is_directory' && req && req.kind === 'file') {
+    requestFileDir(req.path);
+    return;
+  }
+  renderFileView();
+  showFileNote(FILE_ERRORS[msg.code] || 'Could not open it.');
+}
+
+function showFileNote(text) {
+  const note = document.getElementById('file-note');
+  note.textContent = text;
+  note.hidden = !text;
+}
+
+function renderFileCrumbs() {
+  const crumbs = document.getElementById('file-crumbs');
+  crumbs.replaceChildren();
+  if (!_files.dir) return;
+  const parts = _files.dir.split('/').filter(Boolean);
+  const add = (label, path) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'file-crumb';
+    btn.textContent = label;
+    btn.addEventListener('click', () => requestFileDir(path));
+    crumbs.appendChild(btn);
+  };
+  add('/', '/');
+  let path = '';
+  parts.forEach((part) => {
+    path += `/${part}`;
+    add(part, path);
+  });
+  crumbs.scrollLeft = crumbs.scrollWidth;   // the end of a long path is the part that matters
+}
+
+function buildFileEntry(label, kind, onClick, extraClass) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `file-entry file-${kind}` + (extraClass ? ` ${extraClass}` : '');
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = kind === 'd' ? '\u{1F4C1}' : kind === 'f' ? '\u{1F4C4}' : '◇';
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = label;
+  btn.append(icon, name);
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function renderFileList(body) {
+  const list = document.createElement('div');
+  list.className = 'file-list';
+  if (_files.dir !== '/') {
+    list.appendChild(buildFileEntry('..', 'd', () => requestFileDir(parentPath(_files.dir)), 'file-up'));
+  }
+  const entries = (_files.entries || [])
+    .filter((e) => _files.showHidden || !e.name.startsWith('.'))
+    .sort((a, b) => ((a.kind === 'd') === (b.kind === 'd')
+      ? a.name.localeCompare(b.name)
+      : (a.kind === 'd' ? -1 : 1)));
+  entries.forEach((e) => {
+    const path = joinPath(_files.dir, e.name);
+    const label = e.name + (e.kind === 'd' ? '/' : '') + (e.link ? ' →' : '');
+    list.appendChild(buildFileEntry(label, e.kind, () => {
+      if (e.kind === 'd') requestFileDir(path);
+      else requestFile(path);
+    }));
+  });
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'file-empty';
+    empty.textContent = (_files.entries || []).length ? 'Only hidden files here.' : 'Empty folder.';
+    list.appendChild(empty);
+  }
+  body.appendChild(list);
+  if (_files.truncated) showFileNote('Too many entries; only the first ones are listed.');
+}
+
+function markdownRenderer() {
+  if (_markdown || !window.markdownit) return _markdown;
+  // html: false escapes any raw HTML in the document, and markdown-it's own
+  // link check drops javascript:, vbscript: and file: URLs.
+  _markdown = window.markdownit({ html: false, linkify: false, typographer: false });
+  // Column alignment comes out as style="text-align:…", which the page's CSP
+  // (style-src 'self') refuses. Turn it into a class.
+  _markdown.core.ruler.push('align_class', (state) => {
+    state.tokens.forEach((token) => {
+      if (token.type !== 'th_open' && token.type !== 'td_open') return;
+      const style = token.attrGet('style');
+      if (!style) return;
+      token.attrs = token.attrs.filter(([name]) => name !== 'style');
+      const align = style.replace('text-align:', '');
+      if (['left', 'center', 'right'].includes(align)) token.attrJoin('class', `md-align-${align}`);
+    });
+  });
+  return _markdown;
+}
+
+// Links to the same host's files open in the viewer; everything else in a
+// new tab. Images other than data: URLs can't load under the CSP and would
+// only show as broken, so their alt text stands in.
+function wireMarkdownContent(root, filePath) {
+  root.querySelectorAll('a[href]').forEach((a) => {
+    const href = a.getAttribute('href');
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      return;
+    }
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const target = href.replace(/[?#].*$/, '');
+      if (!target) return;   // an in-page anchor: headings carry no ids
+      let path;
+      try { path = decodeURIComponent(target); } catch (_) { path = target; }
+      if (!path.startsWith('/')) path = joinPath(parentPath(filePath), path);
+      requestFile(normalizePath(path));
+    });
+  });
+  root.querySelectorAll('img').forEach((img) => {
+    if ((img.getAttribute('src') || '').startsWith('data:')) return;
+    const alt = document.createElement('span');
+    alt.className = 'md-img-alt';
+    alt.textContent = `[image: ${img.getAttribute('alt') || img.getAttribute('src') || ''}]`;
+    img.replaceWith(alt);
+  });
+}
+
+function normalizePath(path) {
+  const out = [];
+  path.split('/').forEach((part) => {
+    if (!part || part === '.') return;
+    if (part === '..') out.pop();
+    else out.push(part);
+  });
+  return `/${out.join('/')}`;
+}
+
+function renderFileContent(body) {
+  const file = _files.file;
+  if (file.binary) {
+    showFileNote('Binary file; not shown.');
+    return;
+  }
+  if (file.truncated) {
+    showFileNote(`Showing the first ${formatFileSize(file.shown)} of ${formatFileSize(file.size)}.`);
+  }
+  const md = MARKDOWN_FILE_RE.test(file.path) && !_files.raw ? markdownRenderer() : null;
+  if (md) {
+    // Parsed in an inert <template> first: set on a live element, the HTML
+    // would start fetching every image before they can be swapped out.
+    const tpl = document.createElement('template');
+    tpl.innerHTML = md.render(file.text);
+    wireMarkdownContent(tpl.content, file.path);
+    const doc = document.createElement('div');
+    doc.className = 'md-body';
+    doc.appendChild(tpl.content);
+    body.appendChild(doc);
+    return;
+  }
+  const pre = document.createElement('pre');
+  pre.className = 'file-raw';
+  pre.style.fontSize = `${currentFontSize()}px`;
+  pre.textContent = file.text;
+  body.appendChild(pre);
+}
+
+function renderFileView() {
+  if (!_files.open) return;
+  const file = _files.file;
+  const viewingFile = !!file;
+  const isMarkdown = viewingFile && MARKDOWN_FILE_RE.test(file.path);
+  document.getElementById('file-title').textContent =
+    viewingFile ? baseName(file.path) : (_files.dir ? baseName(_files.dir) : 'Files');
+  document.getElementById('file-back').hidden = !viewingFile;
+  document.getElementById('file-crumbs').hidden = viewingFile;
+  const meta = document.getElementById('file-meta');
+  meta.hidden = !viewingFile;
+  meta.textContent = viewingFile ? `${_files.host} · ${formatFileSize(file.size)}` : '';
+  const hiddenBtn = document.getElementById('file-hidden');
+  hiddenBtn.hidden = viewingFile;
+  hiddenBtn.setAttribute('aria-pressed', _files.showHidden ? 'true' : 'false');
+  const rawBtn = document.getElementById('file-raw');
+  rawBtn.hidden = !isMarkdown || file.binary;
+  rawBtn.setAttribute('aria-pressed', _files.raw ? 'true' : 'false');
+  document.getElementById('file-copy').hidden = !viewingFile;
+  if (!viewingFile) renderFileCrumbs();
+
+  showFileNote('');
+  const body = document.getElementById('file-body');
+  body.replaceChildren();
+  body.classList.toggle('loading', !!_files.pending);
+  if (_files.pending && !(viewingFile || _files.entries)) {
+    const loading = document.createElement('div');
+    loading.className = 'file-empty';
+    loading.textContent = 'Loading…';
+    body.appendChild(loading);
+    return;
+  }
+  if (viewingFile) renderFileContent(body);
+  else if (_files.entries) renderFileList(body);
+}
+
+document.getElementById('files-toggle').addEventListener('click', () => openFileViewer());
+document.getElementById('file-close').addEventListener('click', closeFileViewer);
+document.querySelector('#file-sheet .sheet-backdrop').addEventListener('click', closeFileViewer);
+document.getElementById('file-back').addEventListener('click', () => {
+  _files.file = null;
+  if (_files.entries) renderFileView();
+  else requestFileDir(_files.dir);
+});
+document.getElementById('file-reload').addEventListener('click', reloadFileView);
+document.getElementById('file-hidden').addEventListener('click', () => {
+  _files.showHidden = !_files.showHidden;
+  try { localStorage.setItem(FILES_HIDDEN_STORAGE_KEY, _files.showHidden ? '1' : '0'); } catch (_) {}
+  renderFileView();
+});
+document.getElementById('file-raw').addEventListener('click', () => {
+  _files.raw = !_files.raw;
+  renderFileView();
+});
+document.getElementById('file-copy').addEventListener('click', () => {
+  if (!_files.file) return;
+  writeClipboard(_files.file.path).then(
+    () => showFileNote('Path copied.'),
+    () => showFileNote(_files.file.path));
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !_files.open) return;
+  ev.preventDefault();
+  closeFileViewer();
+}, true);   // capture, so xterm doesn't swallow it first
 
 // ─── Soft keyboard / viewport handling (touch devices) ───────────────────────
 // On iOS, `height: 100vh` returns the LARGEST possible viewport (URL bar hidden),
