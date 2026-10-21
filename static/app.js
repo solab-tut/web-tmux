@@ -1905,14 +1905,14 @@ function renderWindowList(windows) {
 // The server reads the screen of every pane that runs Claude Code, Codex or
 // Hermes Agent, on the host being viewed and on the other reachable hosts,
 // and says which of them are working or waiting for an answer, and which
-// finished a turn off screen and have not been looked at since. Each pane,
+// finished a turn no one has acknowledged yet (see Unseen there). Each pane,
 // window and session row gets an icon for the most pressing state among its
 // panes — an icon rather than a dot, so it can't be taken for a host's
 // connection dot. Another host's sessions only have session rows here.
 
 const AGENT_STATE_RANK = { idle: 1, thinking: 2, done: 3, approval: 4 };
 const AGENT_STATE_LABELS = {
-  idle: 'idle', thinking: 'thinking', done: 'finished, not seen yet', approval: 'waiting for you',
+  idle: 'idle', thinking: 'thinking', done: 'finished', approval: 'waiting for you',
 };
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes Agent' };
 // A prompt, a turning arc, a check mark, a warning sign.

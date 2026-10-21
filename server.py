@@ -1214,6 +1214,9 @@ _PANE_MESSAGES = {'input', 'split_window', 'get_snapshot', 'get_history', 'selec
 _AUTOMATIC_INPUT_RE = re.compile(
     r'(?:\x1b\[[0-9;?>]*\$?[Rcnty]|\x1b\][0-9]+;[^\x07\x1b]*(?:\x1b\\|\x07)'
     r'|\x1bP[01]\$r[^\x1b]*\x1b\\|\x1b\[[IO])+')
+# Mouse reports, X10 and SGR: a click or a wheel turn, not a key. Neither
+# they nor automatic input acknowledges a finished agent (see Unseen).
+_MOUSE_INPUT_RE = re.compile(r'(?:\x1b\[M[\s\S]{3}|\x1b\[<\d+;\d+;\d+[Mm])+')
 
 
 async def _known_pane(pane: str) -> bool:
@@ -1252,6 +1255,8 @@ async def _handle_msg(websocket, msg: dict) -> None:
         if pane and data:
             # Also dropped if a switch lands while this is being written.
             await tmux.write_input(pane, data.encode('utf-8'), target_gen=msg['gen'])
+            if not (_AUTOMATIC_INPUT_RE.fullmatch(data) or _MOUSE_INPUT_RE.fullmatch(data)):
+                _agent_typed(pane)
 
     elif t == 'client_active':
         _resize_master = websocket
@@ -1916,8 +1921,9 @@ async def _poll_agent_status() -> bool:
         screens = {p.pane: _tmux_utf8(text) for p, text in zip(candidates, captured)}
     if gen != tmux.target_gen:
         return False
-    # The window on screen counts as seen only while a browser shows it.
-    seen = agent_status.viewed_panes(_tmux_utf8(view), panes) if _clients else set()
+    # The window on screen counts as shown only while a browser shows it;
+    # with none connected, no one is looking and no one has looked away.
+    seen = agent_status.viewed_panes(_tmux_utf8(view), panes) if _clients else None
     _agent_host(host).update(panes, screens, seen, time.monotonic())
     return True
 
@@ -1956,6 +1962,13 @@ async def _poll_remote_agents(host: TmuxHost) -> None:
         return
     agents.update(*found, set(), time.monotonic())
     _send_agent_status()
+
+
+def _agent_typed(pane: str) -> None:
+    # Sent at once, not at the next look: the check goes as the key is typed.
+    agents = _agent_hosts.get(_active_host())
+    if agents is not None and agents.typed(pane):
+        _send_agent_status()
 
 
 def _agent_status_message() -> str:

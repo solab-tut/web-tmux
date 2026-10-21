@@ -21,7 +21,7 @@ IDLE = 'idle'
 THINKING = 'thinking'
 # Waiting on the user: an approval, and also a choice or a value it asked for.
 APPROVAL = 'approval'
-# Idle, after a turn that ended while its pane was not on screen (Unseen).
+# Idle, after a turn that ended and has not been acknowledged (Unseen).
 DONE = 'done'
 
 # Higher wins when one row stands for several panes (a window, a session).
@@ -277,18 +277,19 @@ def pane_states(panes: list[PaneInfo], screens: dict[str, str],
     return entries
 
 
-# ──────────────────────────────────────────── finished, not yet seen
+# ──────────────────────────────────────────── finished, not yet acknowledged
 
 # The control client's own session and window: what every browser shows.
 VIEW_FORMAT = '#{session_name}|#{window_index}|#{window_zoomed_flag}|#{pane_id}'
 
 
-def viewed_panes(view: str, panes: list[PaneInfo]) -> set[str]:
+def viewed_panes(view: str, panes: list[PaneInfo]) -> set[str] | None:
     """The panes on screen, from `display-message -p VIEW_FORMAT` output:
-    the whole current window, or only its active pane while it is zoomed."""
+    the whole current window, or only its active pane while it is zoomed.
+    None if the output can't be read, which says nothing either way."""
     p = view.strip().split('|')
     if len(p) != 4 or not p[1].isdigit():
-        return set()
+        return None
     session, window, zoomed, active = p[0], int(p[1]), p[2] == '1', p[3]
     return {info.pane for info in panes
             if info.session == session and info.window == window
@@ -296,23 +297,33 @@ def viewed_panes(view: str, panes: list[PaneInfo]) -> set[str]:
 
 
 class Unseen:
-    """Marks an agent DONE when its turn ends off screen, until it is seen.
+    """Marks an agent DONE when a turn ends, until someone acknowledges it.
 
-    A pane that goes from thinking or waiting to idle while it is not shown
-    reads DONE instead of idle; showing it, or the agent starting again,
-    clears that."""
+    A pane that goes from thinking or waiting to idle reads DONE instead of
+    idle, on screen or not: the browser may be in a background tab, or no
+    one in front of it. A key typed into the pane clears that, and so does
+    its window leaving the screen once it has been on it, as does the agent
+    starting again."""
 
     def __init__(self):
         self.last: dict[str, str] = {}   # pane -> its state at the last look
-        self.panes: set[str] = set()     # panes finished and not yet seen
+        self.panes: set[str] = set()     # panes finished and not yet acknowledged
+        self.shown: set[str] = set()     # those of them on screen since they finished
 
-    def apply(self, entries: list[dict], seen: set[str]) -> None:
+    def apply(self, entries: list[dict], seen: set[str] | None) -> None:
+        """`seen` is the panes on screen, or None when that is not known
+        (no browser connected): then nothing counts as shown or as left."""
         for e in entries:
             pane, state = e['pane'], e['state']
-            if state != IDLE or pane in seen:
-                self.panes.discard(pane)
+            if state != IDLE:
+                self._clear(pane)
             elif self.last.get(pane) in (THINKING, APPROVAL):
                 self.panes.add(pane)
+            if pane in self.panes and seen is not None:
+                if pane in seen:
+                    self.shown.add(pane)
+                elif pane in self.shown:
+                    self._clear(pane)   # looked at, then left
             self.last[pane] = state
             if pane in self.panes:
                 e['state'] = DONE
@@ -320,6 +331,17 @@ class Unseen:
         for pane in set(self.last) - present:
             del self.last[pane]
         self.panes &= present
+        self.shown &= present
+
+    def typed(self, pane: str) -> bool:
+        """A key typed into `pane`; whether that cleared a DONE."""
+        cleared = pane in self.panes
+        self._clear(pane)
+        return cleared
+
+    def _clear(self, pane: str) -> None:
+        self.panes.discard(pane)
+        self.shown.discard(pane)
 
 
 class HostAgents:
@@ -335,7 +357,7 @@ class HostAgents:
         self.checked_at = 0.0
 
     def update(self, panes: list[PaneInfo], screens: dict[str, str],
-               seen: set[str], now: float) -> None:
+               seen: set[str] | None, now: float) -> None:
         server = next((p.server for p in panes), self.server)
         if server != self.server:
             # Pane ids name other panes now.
@@ -343,3 +365,12 @@ class HostAgents:
         self.entries = pane_states(panes, screens, self.known)
         self.unseen.apply(self.entries, seen)
         self.checked_at = now
+
+    def typed(self, pane: str) -> bool:
+        """A key typed into `pane`; whether its entry changed."""
+        if not self.unseen.typed(pane):
+            return False
+        for e in self.entries:
+            if e['pane'] == pane:
+                e['state'] = IDLE
+        return True

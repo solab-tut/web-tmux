@@ -9,7 +9,7 @@ import unittest
 from functools import partial
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault(
     'WEB_TMUX_ALLOWED_ORIGINS', 'https://host.example.ts.net:8766'
@@ -1368,9 +1368,31 @@ class AgentStatusPollTest(unittest.TestCase):
         with patch.object(server, '_clients', set()):
             self.tmux.view = 'web|0|0|%8'
             self.assertEqual(states(), ['done'])   # on screen, but no browser
-        self.assertEqual(states(), ['idle'])
+        self.assertEqual(states(), ['done'])       # shown: still done
         self.tmux.view = 'web|1|0|%9'
-        self.assertEqual(states(), ['idle'])
+        self.assertEqual(states(), ['idle'])       # and left
+
+    def test_a_turn_ending_on_screen_is_done_until_a_key_is_typed(self):
+        self.tmux.view = 'web|0|0|%8'
+        self.poll()
+        self.tmux.screens['%8'] = self.THINKING.replace('✶ Quantumizing…', '✻ Baked for 4s')
+        self.assertEqual([e['state'] for e in self.poll()['panes']], ['done'])
+        client = _Client()
+        server._clients = {client}
+        server._send_agent_status()
+        stale = patch.object(server, '_stale_view', lambda msg: False)
+        known = patch.object(server, '_known_pane', AsyncMock(return_value=True))
+        with stale, known, patch.object(self.tmux, 'write_input', AsyncMock(), create=True):
+            for data in ('\x1b[<64;10;5M', '\x1b[<0;3;4M\x1b[<0;3;4m', '\x1b[I', '\x1b[0n'):
+                self.handle(type='input', pane='%8', data=data, gen=0)
+            self.assertEqual([m['panes'][0]['state'] for m in client.queued], ['done'])
+            self.handle(type='input', pane='%8', data='y', gen=0)
+        self.assertEqual([m['panes'][0]['state'] for m in client.queued], ['done', 'idle'])
+        self.assertEqual([e['state'] for e in self.poll()['panes']], ['idle'])
+
+    def handle(self, **msg):
+        msg = server._validated_message(server.json.dumps(msg))
+        asyncio.run(server._handle_msg(_Client(), msg))
 
     def test_a_poll_across_a_host_switch_is_dropped(self):
         self.tmux.move_during_capture = True

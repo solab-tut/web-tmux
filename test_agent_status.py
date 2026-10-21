@@ -318,33 +318,53 @@ class UnseenTest(unittest.TestCase):
         self.assertEqual(a.viewed_panes('web|0|0|%2\n', self.PANES), {'%1', '%2'})
         self.assertEqual(a.viewed_panes('web|0|1|%2', self.PANES), {'%2'})   # zoomed
         self.assertEqual(a.viewed_panes('ops|0|0|%7', self.PANES), set())
-        self.assertEqual(a.viewed_panes('', self.PANES), set())
+        self.assertIsNone(a.viewed_panes('', self.PANES))
 
     def look(self, unseen, states, seen=()):
         entries = [{'pane': p, 'state': s} for p, s in states.items()]
-        unseen.apply(entries, set(seen))
+        unseen.apply(entries, None if seen is None else set(seen))
         return {e['pane']: e['state'] for e in entries}
 
-    def test_a_turn_ending_off_screen_stays_done_until_seen(self):
+    def test_a_turn_ending_off_screen_stays_done_while_shown_until_left(self):
         u = a.Unseen()
         self.look(u, {'%1': a.THINKING, '%3': a.APPROVAL})
         self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}),
                          {'%1': a.DONE, '%3': a.DONE})
+        # Shown: still done, for whoever is not looking at the tab.
         self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}, seen={'%1'}),
-                         {'%1': a.IDLE, '%3': a.DONE})
+                         {'%1': a.DONE, '%3': a.DONE})
+        # Left: acknowledged. %3 was never shown, so leaving it means nothing.
         self.assertEqual(self.look(u, {'%1': a.IDLE, '%3': a.IDLE}), {'%1': a.IDLE, '%3': a.DONE})
         # Started again: no longer done, and done again only after this turn.
         self.assertEqual(self.look(u, {'%3': a.THINKING}), {'%3': a.THINKING})
         self.assertEqual(u.panes, set())
         self.assertEqual(u.last, {'%3': a.THINKING})
 
-    def test_a_turn_ending_on_screen_is_just_idle(self):
+    def test_a_turn_ending_on_screen_is_done_until_a_key(self):
+        u = a.Unseen()
+        self.look(u, {'%1': a.THINKING, '%2': a.THINKING}, seen={'%1', '%2'})
+        self.assertEqual(self.look(u, {'%1': a.IDLE, '%2': a.IDLE}, seen={'%1', '%2'}),
+                         {'%1': a.DONE, '%2': a.DONE})
+        self.assertTrue(u.typed('%1'))
+        self.assertFalse(u.typed('%1'))
+        self.assertEqual(self.look(u, {'%1': a.IDLE, '%2': a.IDLE}, seen={'%1', '%2'}),
+                         {'%1': a.IDLE, '%2': a.DONE})
+        # An agent first seen idle has no turn to report.
+        self.assertEqual(self.look(u, {'%3': a.IDLE}, seen={'%3'}), {'%3': a.IDLE})
+
+    def test_not_knowing_what_is_on_screen_is_not_leaving_it(self):
         u = a.Unseen()
         self.look(u, {'%1': a.THINKING}, seen={'%1'})
-        self.assertEqual(self.look(u, {'%1': a.IDLE}, seen={'%1'}), {'%1': a.IDLE})
-        # An agent first seen idle has no turn to report.
-        self.assertEqual(self.look(u, {'%2': a.IDLE}), {'%2': a.IDLE})
+        self.look(u, {'%1': a.IDLE}, seen={'%1'})
+        self.assertEqual(self.look(u, {'%1': a.IDLE}, seen=None), {'%1': a.DONE})
+        self.assertEqual(self.look(u, {'%1': a.IDLE}, seen={'%1'}), {'%1': a.DONE})
+        self.assertEqual(self.look(u, {'%1': a.IDLE}), {'%1': a.IDLE})
 
+    def test_a_key_typed_while_working_leaves_the_next_finish(self):
+        u = a.Unseen()
+        self.look(u, {'%1': a.THINKING}, seen={'%1'})
+        self.assertFalse(u.typed('%1'))
+        self.assertEqual(self.look(u, {'%1': a.IDLE}, seen={'%1'}), {'%1': a.DONE})
 
 
 class RemoteCaptureTest(unittest.TestCase):
@@ -378,6 +398,16 @@ class HostAgentsTest(unittest.TestCase):
         # A new server whose %0 is another, idle Claude: not finished.
         agents.update([panes[0]._replace(server='200')], {'%0': CLAUDE_IDLE}, set(), 3.0)
         self.assertEqual([e['state'] for e in agents.entries], [a.IDLE])
+
+    def test_a_key_turns_the_entry_idle_at_once(self):
+        agents = a.HostAgents()
+        panes = [a.PaneInfo('s', 0, '%0', 'claude', '', '100')]
+        agents.update(panes, {'%0': CLAUDE_THINKING}, {'%0'}, 1.0)
+        agents.update(panes, {'%0': CLAUDE_IDLE}, {'%0'}, 2.0)
+        self.assertEqual([e['state'] for e in agents.entries], [a.DONE])
+        self.assertTrue(agents.typed('%0'))
+        self.assertEqual([e['state'] for e in agents.entries], [a.IDLE])
+        self.assertFalse(agents.typed('%0'))
 
 
 if __name__ == '__main__':
