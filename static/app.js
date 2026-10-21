@@ -1903,11 +1903,12 @@ function renderWindowList(windows) {
 
 // ─── Agent status ─────────────────────────────────────────────────────────────
 // The server reads the screen of every pane that runs Claude Code, Codex or
-// Hermes Agent on the host being viewed, and says which of them are working
-// or waiting for an answer, and which finished a turn off screen and have
-// not been looked at since. Each pane, window and session row gets an icon
-// for the most pressing state among its panes — an icon rather than a dot,
-// so it can't be taken for a host's connection dot.
+// Hermes Agent, on the host being viewed and on the other reachable hosts,
+// and says which of them are working or waiting for an answer, and which
+// finished a turn off screen and have not been looked at since. Each pane,
+// window and session row gets an icon for the most pressing state among its
+// panes — an icon rather than a dot, so it can't be taken for a host's
+// connection dot. Another host's sessions only have session rows here.
 
 const AGENT_STATE_RANK = { idle: 1, thinking: 2, done: 3, approval: 4 };
 const AGENT_STATE_LABELS = {
@@ -1922,19 +1923,15 @@ const AGENT_STATE_ICONS = {
   approval: '<path d="M8 2.2L14.3 13.3H1.7z"/><path d="M8 6.5v3M8 11.6v.1"/>',
 };
 
-// Kept whole, even from another view: it may arrive just before the init it
-// belongs to, and the server only sends it again when something changes.
-let _agentStatus = { gen: -1, host: '', panes: [] };
+// Every host's agents, each entry naming its host. Kept whole across a
+// switch of host: the server only sends it again when something changes.
+let _agentPanes = [];
 
 function onAgentStatus(msg) {
-  if (!Number.isInteger(msg.gen) || !Array.isArray(msg.panes)) return;
-  _agentStatus = { gen: msg.gen, host: String(msg.host || ''), panes: msg.panes };
+  if (!Array.isArray(msg.panes)) return;
+  _agentPanes = msg.panes.filter((e) =>
+    e && typeof e.host === 'string' && Object.hasOwn(AGENT_STATE_RANK, e.state));
   applyAgentStatus();
-}
-
-function currentAgentPanes() {
-  if (_agentStatus.gen !== currentGen || _agentStatus.host !== currentHost) return [];
-  return _agentStatus.panes.filter((e) => e && AGENT_STATE_RANK[e.state]);
 }
 
 function mostPressing(entries) {
@@ -1944,15 +1941,15 @@ function mostPressing(entries) {
 
 // Only the icons change, so a rename field that is open keeps its draft.
 function applyAgentStatus() {
-  const entries = currentAgentPanes();
+  const here = _agentPanes.filter((e) => e.host === currentHost);
   applyAgentIcons('pane-list', '.pane-item', (item) =>
-    entries.filter((e) => e.pane === item.dataset.paneId));
+    here.filter((e) => e.pane === item.dataset.paneId));
   applyAgentIcons('window-list', '.window-item', (item) =>
-    entries.filter((e) => e.session === currentSession && String(e.window) === item.dataset.windowIndex));
+    here.filter((e) => e.session === currentSession && String(e.window) === item.dataset.windowIndex));
   applyAgentIcons('session-list', '.session-item', (item) =>
-    item.dataset.sessionHost !== currentHost ? []
-      : entries.filter((e) => e.session === item.dataset.sessionName));
-  applyAgentAlert(entries);
+    _agentPanes.filter((e) => e.host === item.dataset.sessionHost && e.session === item.dataset.sessionName));
+  // Counted over every host: the reason to look may be on another one.
+  applyAgentAlert(_agentPanes);
 }
 
 // Agents that want a look — waiting for you, or finished off screen — show

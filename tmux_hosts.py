@@ -384,10 +384,10 @@ async def _read_capped(stream, limit: int, *, drain: bool = False) -> bytes | No
 
 
 async def run(host: TmuxHost, *args: str, timeout: float | None = None,
-              ) -> tuple[int, str, str]:
+              limit: int = CAPTURE_LIMIT) -> tuple[int, str, str]:
     """One tmux command on `host`."""
     return await run_argv(host.argv(args), timeout=timeout or host.timeout,
-                          env=process_env(host))
+                          env=process_env(host), limit=limit)
 
 
 async def run_shell(host: TmuxHost, script: str, stdin: bytes, *,

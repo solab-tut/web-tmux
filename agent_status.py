@@ -191,8 +191,10 @@ def classify(command: str, title: str, screen: str,
 
 # ──────────────────────────────────────────── tmux output
 
-# Title last: it is free text and may hold the separator itself.
-LIST_FORMAT = '#{session_name}|#{window_index}|#{pane_id}|#{pane_current_command}|#{pane_title}'
+# Title last: it is free text and may hold the separator itself. The tmux
+# server's pid first: pane ids start again from %0 when the server restarts.
+LIST_FORMAT = ('#{pid}|#{session_name}|#{window_index}|#{pane_id}'
+               '|#{pane_current_command}|#{pane_title}')
 # A session name may hold the separator too, and shift the fields after it.
 # The pane id goes into a tmux command, so it must be nothing but an id.
 _PANE_ID_RE = re.compile(r'%\d+')
@@ -204,17 +206,41 @@ class PaneInfo(NamedTuple):
     pane: str
     command: str
     title: str
+    server: str = ''
 
 
 def parse_pane_list(raw: str) -> list[PaneInfo]:
     """`list-panes -a -F LIST_FORMAT` output → one PaneInfo per pane."""
     panes = []
     for line in raw.splitlines():
-        p = line.split('|', 4)
-        if len(p) < 5 or not p[1].isdigit() or not _PANE_ID_RE.fullmatch(p[2]):
+        p = line.split('|', 5)
+        if (len(p) < 6 or not p[0].isdigit() or not p[2].isdigit()
+                or not _PANE_ID_RE.fullmatch(p[3])):
             continue
-        panes.append(PaneInfo(p[0], int(p[1]), p[2], p[3], p[4]))
+        panes.append(PaneInfo(p[1], int(p[2]), p[3], p[4], p[5], p[0]))
     return panes
+
+
+def capture_args(panes: list[PaneInfo], marker: str) -> list[str]:
+    """tmux arguments that print each pane's screen, each followed by a line
+    reading `marker`: one tmux run for all of them, over one ssh call.
+
+    The marker should be new each time. A screen may show any text, and a
+    fixed one would let it claim the rows after it for another pane."""
+    args = []
+    for p in panes:
+        if args:
+            args.append(';')
+        args += ['capture-pane', '-p', '-t', p.pane, ';', 'display-message', '-p', marker]
+    return args
+
+
+def split_captures(out: str, panes: list[PaneInfo], marker: str) -> dict[str, str] | None:
+    """capture_args output → pane -> screen; None unless every pane is there."""
+    parts = out.split(marker + '\n')
+    if len(parts) != len(panes) + 1 or parts[-1]:
+        return None
+    return {p.pane: screen for p, screen in zip(panes, parts)}
 
 
 def pane_states(panes: list[PaneInfo], screens: dict[str, str],
@@ -294,3 +320,26 @@ class Unseen:
         for pane in set(self.last) - present:
             del self.last[pane]
         self.panes &= present
+
+
+class HostAgents:
+    """One host's agents, kept while the browser looks at other hosts: the
+    active host is read through the control client, the others over ssh,
+    and a host keeps what it knew when it changes from one to the other."""
+
+    def __init__(self):
+        self.server = ''   # the tmux server's pid, see LIST_FORMAT
+        self.known: dict[str, tuple[str, str]] = {}
+        self.unseen = Unseen()
+        self.entries: list[dict] = []
+        self.checked_at = 0.0
+
+    def update(self, panes: list[PaneInfo], screens: dict[str, str],
+               seen: set[str], now: float) -> None:
+        server = next((p.server for p in panes), self.server)
+        if server != self.server:
+            # Pane ids name other panes now.
+            self.server, self.known, self.unseen = server, {}, Unseen()
+        self.entries = pane_states(panes, screens, self.known)
+        self.unseen.apply(self.entries, seen)
+        self.checked_at = now

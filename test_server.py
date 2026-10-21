@@ -17,6 +17,7 @@ os.environ.setdefault(
 os.environ.setdefault('WEB_TMUX_TAILSCALE_USERS', 'owner@example.com')
 
 import server
+import tmux_hosts
 from web_security import AccessController
 
 
@@ -1337,22 +1338,24 @@ class AgentStatusPollTest(unittest.TestCase):
 
     def setUp(self):
         self.tmux = _AgentTmux(
-            ['web|0|%8|claude|✳ Claude Code', 'web|1|%9|bash|host', 'ops|0|%3|node|x'],
+            ['5|web|0|%8|claude|✳ Claude Code', '5|web|1|%9|bash|host', '5|ops|0|%3|node|x'],
             {'%8': self.THINKING, '%3': '$ npm test\n'})
-        patcher = patch.multiple(server, tmux=self.tmux, _agent_known={}, _agent_known_gen=-1,
-                                 _agent_unseen=server.agent_status.Unseen(), _clients={_Client()})
+        patcher = patch.multiple(server, tmux=self.tmux, _agent_hosts={}, _agent_status_msg=None,
+                                 _clients={_Client()})
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def poll(self):
-        data = asyncio.run(server._poll_agent_status())
-        return None if data is None else server.json.loads(data)
+        if not asyncio.run(server._poll_agent_status()):
+            return None
+        return server.json.loads(server._agent_status_message())
 
     def test_only_candidates_are_captured_and_only_agents_reported(self):
         msg = self.poll()
         self.assertEqual(self.tmux.captured, [['%8', '%3']])
-        self.assertEqual(msg, {'type': 'agent_status', 'gen': 0, 'host': 'local', 'panes': [
-            {'pane': '%8', 'session': 'web', 'window': 0, 'agent': 'claude', 'state': 'thinking'},
+        self.assertEqual(msg, {'type': 'agent_status', 'panes': [
+            {'host': 'local', 'pane': '%8', 'session': 'web', 'window': 0,
+             'agent': 'claude', 'state': 'thinking'},
         ]})
 
     def test_a_turn_ending_off_screen_is_done_until_its_window_is_shown(self):
@@ -1372,32 +1375,36 @@ class AgentStatusPollTest(unittest.TestCase):
     def test_a_poll_across_a_host_switch_is_dropped(self):
         self.tmux.move_during_capture = True
         self.assertIsNone(self.poll())
+        self.assertNotIn('local', server._agent_hosts)
 
-    def test_the_loop_sends_only_changes(self):
-        client = _Client()
-        polls = iter(['{"a": 1}', '{"a": 1}', '{"a": 2}'])
-
-        async def fake_poll():
-            return next(polls)
-
+    def _run_loop(self, loop, ticks):
         async def run():
-            sleeps = 0
+            calls = 0
 
             async def fake_sleep(_):
-                nonlocal sleeps
-                sleeps += 1
-                if sleeps > 3:
+                nonlocal calls
+                calls += 1
+                if calls > ticks:
                     raise asyncio.CancelledError
 
             with patch.object(server.asyncio, 'sleep', fake_sleep):
                 with self.assertRaises(asyncio.CancelledError):
-                    await server._agent_status_loop()
+                    await loop()
+
+        asyncio.run(run())
+
+    def test_the_loop_sends_only_changes(self):
+        client = _Client()
+        states = iter(['thinking', 'thinking', 'idle'])
+
+        async def fake_poll():
+            server._agent_host('local').entries = [{'pane': '%8', 'state': next(states)}]
+            return True
 
         self.tmux._alive = lambda: True
-        with patch.multiple(server, _clients={client}, _agent_status_msg=None,
-                            _poll_agent_status=fake_poll):
-            asyncio.run(run())
-        self.assertEqual(client.queued, [{'a': 1}, {'a': 2}])
+        with patch.multiple(server, _clients={client}, _poll_agent_status=fake_poll):
+            self._run_loop(server._agent_status_loop, 3)
+        self.assertEqual([m['panes'][0]['state'] for m in client.queued], ['thinking', 'idle'])
 
     def test_the_loop_polls_with_no_browser_connected(self):
         self.tmux._alive = lambda: True
@@ -1406,25 +1413,12 @@ class AgentStatusPollTest(unittest.TestCase):
         async def fake_poll():
             nonlocal polled
             polled += 1
-            return '{"a": 1}'
+            server._agent_host('local').entries = [{'pane': '%8', 'state': 'thinking'}]
+            return True
 
-        async def run():
-            calls = 0
-
-            async def fake_sleep(_):
-                nonlocal calls
-                calls += 1
-                if calls > 2:
-                    raise asyncio.CancelledError
-
-            with patch.object(server.asyncio, 'sleep', fake_sleep):
-                with self.assertRaises(asyncio.CancelledError):
-                    await server._agent_status_loop()
-
-        with patch.multiple(server, _clients=set(), _agent_status_msg=None,
-                            _poll_agent_status=fake_poll):
-            asyncio.run(run())
-            self.assertEqual(server._agent_status_msg, '{"a": 1}')
+        with patch.multiple(server, _clients=set(), _poll_agent_status=fake_poll):
+            self._run_loop(server._agent_status_loop, 2)
+            self.assertIn('thinking', server._agent_status_msg)
         self.assertEqual(polled, 2)
 
     def test_the_loop_leaves_a_dead_control_client_alone(self):
@@ -1433,21 +1427,131 @@ class AgentStatusPollTest(unittest.TestCase):
         async def fail():
             raise AssertionError('polled a dead client')
 
+        with patch.multiple(server, _clients={_Client()}, _poll_agent_status=fail):
+            self._run_loop(server._agent_status_loop, 2)
+
+
+class _AgentDirectory:
+    def __init__(self, **reachable):
+        self.status = {name: tmux_hosts.HostStatus(reachable=ok) for name, ok in reachable.items()}
+
+
+class RemoteAgentStatusTest(unittest.TestCase):
+    """Hosts the control client is not on, looked at over their own tmux."""
+    THINKING = AgentStatusPollTest.THINKING
+    BOX = tmux_hosts.TmuxHost('box')
+
+    def setUp(self):
+        self.tmux = _AgentTmux([], {})
+        self.calls = []
+        self.panes = ['9|dev|0|%2|claude|t', '9|dev|1|%5|bash|t']
+        self.screens = {'%2': self.THINKING}
+        patcher = patch.multiple(
+            server, tmux=self.tmux, _agent_hosts={}, _agent_status_msg=None,
+            _agent_remote_polls={}, _clients={_Client()},
+            HOSTS={'local': server.LOCAL_HOST, 'box': self.BOX},
+            DIRECTORY=_AgentDirectory(local=True, box=True))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        run_patcher = patch.object(server.tmux_hosts, 'run', self.fake_run)
+        run_patcher.start()
+        self.addCleanup(run_patcher.stop)
+
+    async def fake_run(self, host, *args, timeout=None, limit=None):
+        self.calls.append((host.name, args, limit))
+        if 'list-panes' in args:
+            return 0, '\n'.join(self.panes) + '\n', ''
+        marker = args[args.index('display-message') + 2]
+        panes = [args[i + 1] for i, a in enumerate(args) if a == '-t']
+        return 0, ''.join(self.screens[p] + marker + '\n' for p in panes), ''
+
+    def message(self):
+        return server.json.loads(server._agent_status_message())
+
+    def test_a_remote_host_is_read_in_two_calls_with_a_fresh_marker(self):
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertEqual(self.message()['panes'], [
+            {'host': 'box', 'pane': '%2', 'session': 'dev', 'window': 0,
+             'agent': 'claude', 'state': 'thinking'},
+        ])
+        (_, listing, _), (_, capture, limit) = self.calls
+        self.assertEqual(listing[:3], ('-u', 'list-panes', '-a'))
+        self.assertEqual(capture[:5], ('-u', 'capture-pane', '-p', '-t', '%2'))
+        self.assertEqual(limit, server.AGENT_CAPTURE_LIMIT)
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertNotEqual(capture[-1], self.calls[-1][1][-1])
+
+    def test_a_failed_capture_keeps_the_last_look(self):
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.panes.append('9|dev|2|%7|node|t')   # gone before its capture
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertEqual([e['pane'] for e in self.message()['panes']], ['%2'])
+
+    def test_a_turn_ending_on_another_host_is_done(self):
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.screens['%2'] = self.THINKING.replace('✶ Quantumizing…', '✻ Baked for 4s')
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertEqual([e['state'] for e in self.message()['panes']], ['done'])
+
+    def test_a_look_is_dropped_once_the_control_client_is_on_that_host(self):
+        self.tmux.host = self.BOX
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertEqual(self.message()['panes'], [])
+
+    def test_a_look_older_than_the_control_clients_is_dropped(self):
+        async def scenario():
+            task = asyncio.ensure_future(server._poll_remote_agents(self.BOX))
+            await asyncio.sleep(0)
+            server._agent_host('box').update([], {}, set(), 123.0)
+            await task
+
+        asyncio.run(scenario())
+        self.assertEqual(server._agent_hosts['box'].checked_at, 123.0)
+
+    def test_another_hosts_agents_go_when_it_is_unreachable_or_stale(self):
+        asyncio.run(server._poll_remote_agents(self.BOX))
+        self.assertEqual(len(self.message()['panes']), 1)
+        server.DIRECTORY.status['box'].reachable = False
+        self.assertEqual(self.message()['panes'], [])
+        server.DIRECTORY.status['box'].reachable = True
+        server._agent_hosts['box'].checked_at -= server.AGENT_REMOTE_STALE + 1
+        self.assertEqual(self.message()['panes'], [])
+
+    def test_the_active_hosts_agents_never_go_stale(self):
+        agents = server._agent_host('local')
+        agents.entries, agents.checked_at = [{'pane': '%1', 'state': 'idle'}], 0.0
+        self.assertEqual([e['host'] for e in self.message()['panes']], ['local'])
+
+    def _run_remote_loop(self):
         async def run():
             calls = 0
 
             async def fake_sleep(_):
                 nonlocal calls
                 calls += 1
-                if calls > 2:
+                if calls > 1:
                     raise asyncio.CancelledError
 
             with patch.object(server.asyncio, 'sleep', fake_sleep):
                 with self.assertRaises(asyncio.CancelledError):
-                    await server._agent_status_loop()
+                    await server._agent_remote_loop()
+                for task in list(server._agent_remote_polls.values()):
+                    await task
 
-        with patch.multiple(server, _clients={_Client()}, _poll_agent_status=fail):
-            asyncio.run(run())
+        asyncio.run(run())
+
+    def test_the_remote_loop_looks_at_reachable_hosts_but_the_active_one(self):
+        self._run_remote_loop()
+        self.assertEqual({name for name, _, _ in self.calls}, {'box'})
+
+    def test_the_remote_loop_skips_unreachable_hosts_and_idle_servers(self):
+        server.DIRECTORY.status['box'].reachable = False
+        self._run_remote_loop()
+        with patch.object(server, '_clients', set()):
+            server.DIRECTORY.status['box'].reachable = True
+            self._run_remote_loop()
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()

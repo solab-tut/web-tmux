@@ -84,10 +84,16 @@ _restore_seq = 0
 # one list-panes plus one capture per candidate. It goes on with no browser
 # connected, so a turn that ends meanwhile is still marked finished.
 AGENT_STATUS_INTERVAL = 2.0
-_agent_status_msg: str | None = None   # the latest agent_status, for new connections
-_agent_known: dict[str, tuple[str, str]] = {}   # pane -> (command, agent), see pane_states
-_agent_unseen = agent_status.Unseen()
-_agent_known_gen = -1
+# The other hosts are looked at over ssh, less often, and only while a
+# browser is connected: two ssh calls a look, and none to keep a connection
+# up for no one. Their state is shown until it is this old.
+AGENT_REMOTE_INTERVAL = 10.0
+AGENT_REMOTE_STALE = 3 * AGENT_REMOTE_INTERVAL
+# A host's screens all come back in one ssh call.
+AGENT_CAPTURE_LIMIT = 4 * 1024 * 1024
+_agent_status_msg: str | None = None   # the latest agent_status sent
+_agent_hosts: dict[str, agent_status.HostAgents] = {}
+_agent_remote_polls: dict[str, asyncio.Task] = {}
 
 
 def _single_header(headers, name: str) -> str | None:
@@ -667,8 +673,7 @@ async def ws_handler(websocket: ServerConnection) -> None:
         state = await tmux.get_initial_state()
         _update_allowed_targets(state)
         await client.send(_view_message('init', state))
-        if _agent_status_msg is not None:
-            await client.send(_agent_status_msg)
+        await client.send(_agent_status_message())
         _refresh_hosts_soon()
 
         async for raw in websocket:
@@ -1838,6 +1843,7 @@ async def main() -> None:
     await tmux.start()
     refresher = asyncio.ensure_future(_refresh_hosts_loop())
     agent_watcher = asyncio.ensure_future(_agent_status_loop())
+    remote_agent_watcher = asyncio.ensure_future(_agent_remote_loop())
 
     # server.sh stop sends SIGTERM. Shut down through the code below rather
     # than dying on the spot, so no ssh connection outlives the server.
@@ -1867,6 +1873,7 @@ async def main() -> None:
         finally:
             refresher.cancel()
             agent_watcher.cancel()
+            remote_agent_watcher.cancel()
             await _shutdown_hosts()
 
 
@@ -1883,16 +1890,19 @@ def _tmux_utf8(text: str) -> str:
     return text.encode('latin-1', errors='replace').decode('utf-8', errors='replace')
 
 
-async def _poll_agent_status() -> str | None:
-    """One look at every pane on the active host, as an agent_status
-    message; None if the control client moved to another host meanwhile.
+def _agent_host(name: str) -> agent_status.HostAgents:
+    agents = _agent_hosts.get(name)
+    if agents is None:
+        agents = _agent_hosts[name] = agent_status.HostAgents()
+    return agents
+
+
+async def _poll_agent_status() -> bool:
+    """One look at every pane on the active host; False if the control
+    client moved to another host or session meanwhile.
 
     Screens are read here and never logged or sent on: only the verdict is."""
-    global _agent_known, _agent_unseen, _agent_known_gen
     gen, host = tmux.target_gen, tmux.host.name
-    if gen != _agent_known_gen:
-        # Pane ids name other panes now.
-        _agent_known, _agent_unseen, _agent_known_gen = {}, agent_status.Unseen(), gen
     raw = await tmux.send_command(f'list-panes -a -F "{agent_status.LIST_FORMAT}"',
                                   target_gen=gen)
     panes = agent_status.parse_pane_list(_tmux_utf8(raw))
@@ -1905,17 +1915,77 @@ async def _poll_agent_status() -> str | None:
             + [f'capture-pane -p -t {p.pane}' for p in candidates], target_gen=gen)
         screens = {p.pane: _tmux_utf8(text) for p, text in zip(candidates, captured)}
     if gen != tmux.target_gen:
-        return None
-    entries = agent_status.pane_states(panes, screens, _agent_known)
+        return False
     # The window on screen counts as seen only while a browser shows it.
     seen = agent_status.viewed_panes(_tmux_utf8(view), panes) if _clients else set()
-    _agent_unseen.apply(entries, seen)
-    return json.dumps({'type': 'agent_status', 'gen': gen, 'host': host, 'panes': entries})
+    _agent_host(host).update(panes, screens, seen, time.monotonic())
+    return True
+
+
+async def _read_remote_agents(host: TmuxHost):
+    """(panes, screens) on a host the control client is not on, over its
+    own tmux commands; None if either call fails. A pane that closes
+    between the two fails the second, and the next look tries again."""
+    # -u: a non-interactive ssh login often has no UTF-8 locale.
+    rc, raw, _ = await tmux_hosts.run(host, '-u', 'list-panes', '-a',
+                                      '-F', agent_status.LIST_FORMAT)
+    if rc != 0:
+        return None
+    panes = agent_status.parse_pane_list(raw)
+    candidates = [p for p in panes if agent_status.is_candidate(p.command)]
+    if not candidates:
+        return panes, {}
+    marker = f'web-tmux-{secrets.token_hex(16)}'
+    rc, out, _ = await tmux_hosts.run(host, '-u', *agent_status.capture_args(candidates, marker),
+                                      limit=AGENT_CAPTURE_LIMIT)
+    screens = agent_status.split_captures(out, candidates, marker) if rc == 0 else None
+    return None if screens is None else (panes, screens)
+
+
+async def _poll_remote_agents(host: TmuxHost) -> None:
+    agents = _agent_host(host.name)
+    started = agents.checked_at
+    try:
+        found = await _read_remote_agents(host)
+    except Exception as exc:
+        log.warning('agent status poll of %s failed: %s', host.name, type(exc).__name__)
+        return
+    # Dropped if the control client moved to this host meanwhile and has
+    # looked at it since: its look is the newer one.
+    if found is None or host.name == _active_host() or agents.checked_at != started:
+        return
+    agents.update(*found, set(), time.monotonic())
+    _send_agent_status()
+
+
+def _agent_status_message() -> str:
+    """Every host's agents, each entry with its host. Another host's go once
+    it is unreachable or no longer looked at, rather than shown stale."""
+    active, now = _active_host(), time.monotonic()
+    panes = []
+    for name in HOSTS:
+        agents = _agent_hosts.get(name)
+        if agents is None:
+            continue
+        if name != active and (not DIRECTORY.status[name].reachable
+                               or now - agents.checked_at > AGENT_REMOTE_STALE):
+            continue
+        panes += [{'host': name, **e} for e in agents.entries]
+    return json.dumps({'type': 'agent_status', 'panes': panes})
+
+
+def _send_agent_status() -> None:
+    # Sends only when something changed, so a quiet screen costs no traffic.
+    global _agent_status_msg
+    data = _agent_status_message()
+    if data == _agent_status_msg:
+        return
+    _agent_status_msg = data
+    for client in list(_clients):
+        client.enqueue(data)
 
 
 async def _agent_status_loop() -> None:
-    # Sends only when something changed, so a quiet screen costs no traffic.
-    global _agent_status_msg
     while True:
         await asyncio.sleep(AGENT_STATUS_INTERVAL)
         # A control client that is down or reconnecting is left alone: a
@@ -1923,15 +1993,31 @@ async def _agent_status_loop() -> None:
         if not tmux._alive():
             continue
         try:
-            data = await _poll_agent_status()
+            if not await _poll_agent_status():
+                continue
         except Exception as exc:
             log.warning('agent status poll failed: %s', type(exc).__name__)
             continue
-        if data is None or data == _agent_status_msg:
+        _send_agent_status()
+
+
+async def _agent_remote_loop() -> None:
+    # Only hosts the directory found reachable on its last check, so this
+    # never starts a sign-in nor waits on a dead host; one look at a time
+    # per host, each on its own, so a slow host delays nobody else.
+    while True:
+        await asyncio.sleep(AGENT_REMOTE_INTERVAL)
+        if not _clients:
             continue
-        _agent_status_msg = data
-        for client in list(_clients):
-            client.enqueue(data)
+        active = _active_host()
+        for name, host in HOSTS.items():
+            task = _agent_remote_polls.get(name)
+            if (name == active or not DIRECTORY.status[name].reachable
+                    or (task is not None and not task.done())):
+                continue
+            _agent_remote_polls[name] = asyncio.ensure_future(_poll_remote_agents(host))
+        # Drops the hosts that went unreachable or stale.
+        _send_agent_status()
 
 
 async def _refresh_hosts_loop() -> None:

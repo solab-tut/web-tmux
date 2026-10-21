@@ -263,9 +263,9 @@ class ClassifyTest(unittest.TestCase):
 
 class PaneListTest(unittest.TestCase):
     RAW = '\n'.join([
-        'web|0|%8|claude|✳ sidebar-agent-status',
-        'web|1|%9|bash|MS-A2',
-        'work|2|%12|codex|[ . ] Action Required | Create hello2.txt | work',
+        '700|web|0|%8|claude|✳ sidebar-agent-status',
+        '700|web|1|%9|bash|MS-A2',
+        '700|work|2|%12|codex|[ . ] Action Required | Create hello2.txt | work',
         'broken line',
     ])
 
@@ -274,10 +274,11 @@ class PaneListTest(unittest.TestCase):
         self.assertEqual([p.pane for p in panes], ['%8', '%9', '%12'])
         self.assertEqual(panes[2].title, '[ . ] Action Required | Create hello2.txt | work')
         self.assertEqual(panes[2].window, 2)
+        self.assertEqual(panes[2].server, '700')
 
     def test_parse_drops_a_pane_id_shifted_by_bars_in_the_session_name(self):
         # It would go into "capture-pane -t …" and run as a command of its own.
-        raw = 'x|0|%0 ; new-session -d -s PWNED|node|0|%0|sleep|MS-A2\nweb|0|%8|claude|t'
+        raw = '7|x|0|%0 ; new-session -d -s PWNED|node|0|%0|sleep|MS-A2\n7|web|0|%8|claude|t'
         self.assertEqual([p.pane for p in a.parse_pane_list(raw)], ['%8'])
 
     def test_candidates(self):
@@ -343,6 +344,40 @@ class UnseenTest(unittest.TestCase):
         self.assertEqual(self.look(u, {'%1': a.IDLE}, seen={'%1'}), {'%1': a.IDLE})
         # An agent first seen idle has no turn to report.
         self.assertEqual(self.look(u, {'%2': a.IDLE}), {'%2': a.IDLE})
+
+
+
+class RemoteCaptureTest(unittest.TestCase):
+    PANES = [a.PaneInfo('s', 0, '%1', 'claude', ''), a.PaneInfo('s', 1, '%4', 'node', '')]
+
+    def test_capture_args(self):
+        self.assertEqual(a.capture_args(self.PANES, 'M'), [
+            'capture-pane', '-p', '-t', '%1', ';', 'display-message', '-p', 'M', ';',
+            'capture-pane', '-p', '-t', '%4', ';', 'display-message', '-p', 'M'])
+
+    def test_split_captures(self):
+        out = 'one\n\nM\ntwo\nM\n'
+        self.assertEqual(a.split_captures(out, self.PANES, 'M'), {'%1': 'one\n\n', '%4': 'two\n'})
+
+    def test_split_captures_wants_every_pane_and_nothing_after(self):
+        self.assertIsNone(a.split_captures('one\nM\n', self.PANES, 'M'))
+        self.assertIsNone(a.split_captures('one\nM\ntwo\nM\nM\n', self.PANES, 'M'))
+        self.assertIsNone(a.split_captures('one\nM\ntwo\nM\nthree\n', self.PANES, 'M'))
+
+
+class HostAgentsTest(unittest.TestCase):
+    def test_a_restarted_tmux_server_forgets_what_its_pane_ids_meant(self):
+        agents = a.HostAgents()
+        panes = [a.PaneInfo('s', 0, '%0', 'claude', '', '100')]
+        agents.update(panes, {'%0': CLAUDE_THINKING}, set(), 1.0)
+        self.assertEqual([e['state'] for e in agents.entries], [a.THINKING])
+        self.assertEqual(agents.checked_at, 1.0)
+        # Same server: the turn ended off screen.
+        agents.update(panes, {'%0': CLAUDE_IDLE}, set(), 2.0)
+        self.assertEqual([e['state'] for e in agents.entries], [a.DONE])
+        # A new server whose %0 is another, idle Claude: not finished.
+        agents.update([panes[0]._replace(server='200')], {'%0': CLAUDE_IDLE}, set(), 3.0)
+        self.assertEqual([e['state'] for e in agents.entries], [a.IDLE])
 
 
 if __name__ == '__main__':
