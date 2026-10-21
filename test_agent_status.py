@@ -73,6 +73,27 @@ CLAUDE_TRUST = f'''\
  Enter to confirm · Esc to cancel
 '''
 
+# Claude Code 2.1.305: a dialog in a rule of its own above the input box,
+# which keeps a message typed before it came up.
+CLAUDE_DIALOG_ABOVE_BOX = f'''\
+  修正案: parse_pane_list で re.fullmatch(r'%\\d+', p[2]) を必須にします。
+{RULE}
+  Teach auto mode about your environment?
+
+  Auto mode works better when it knows your environment. Takes about a minute.
+
+  ❯ 1. Yes
+    2. Not now
+    3. Don't show again
+
+  Enter to confirm · Esc to cancel
+{RULE}
+❯ はい、修正してテストも追加して
+{RULE}
+
+  ⏵⏵ auto mode on (shift+tab to cycle)
+'''
+
 CODEX_IDLE = '''\
   >_ OpenAI Codex (v0.163.0)
 › Create a file named hello2.txt containing the word hi using a shell command.
@@ -173,6 +194,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertState('claude', CLAUDE_EDIT_APPROVAL, ('claude', a.APPROVAL))
         self.assertState('claude', CLAUDE_BASH_APPROVAL, ('claude', a.APPROVAL))
         self.assertState('claude', CLAUDE_TRUST, ('claude', a.APPROVAL))
+        self.assertState('claude', CLAUDE_DIALOG_ABOVE_BOX, ('claude', a.APPROVAL))
 
     def test_claude_spinner_includes_a_plain_asterisk(self):
         screen = CLAUDE_THINKING.replace('✶ Quantumizing…', '* Quantumizing… (2s · ↓ 5 tokens)')
@@ -223,6 +245,12 @@ class ClassifyTest(unittest.TestCase):
         quoted = CLAUDE_BASH_APPROVAL.replace(RULE + '\n', '') + CLAUDE_IDLE.split('✻')[1]
         self.assertState('claude', '● Bash(cat capture.txt)\n' + quoted, ('claude', a.IDLE))
 
+    def test_approval_words_above_claudes_box_need_a_rule_of_their_own(self):
+        # The same dialog quoted in Claude's output, with no rule between it
+        # and the box, nor one above it.
+        quoted = CLAUDE_DIALOG_ABOVE_BOX.replace(RULE + '\n', '', 1)
+        self.assertState('claude', quoted, ('claude', a.IDLE))
+
     def test_approval_words_in_codex_output_are_not_a_dialog(self):
         screen = '• Would you like to run the tests next?\n' + CODEX_IDLE
         self.assertState('codex', screen, ('codex', a.IDLE))
@@ -246,6 +274,11 @@ class PaneListTest(unittest.TestCase):
         self.assertEqual([p.pane for p in panes], ['%8', '%9', '%12'])
         self.assertEqual(panes[2].title, '[ . ] Action Required | Create hello2.txt | work')
         self.assertEqual(panes[2].window, 2)
+
+    def test_parse_drops_a_pane_id_shifted_by_bars_in_the_session_name(self):
+        # It would go into "capture-pane -t …" and run as a command of its own.
+        raw = 'x|0|%0 ; new-session -d -s PWNED|node|0|%0|sleep|MS-A2\nweb|0|%8|claude|t'
+        self.assertEqual([p.pane for p in a.parse_pane_list(raw)], ['%8'])
 
     def test_candidates(self):
         for command in ('claude', 'codex', 'hermes', 'node', 'python3', 'python3.12', 'bun'):

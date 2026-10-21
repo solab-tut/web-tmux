@@ -134,12 +134,22 @@ def screen_tail(screen: str, lines: int = TAIL_LINES) -> str:
 
 # Claude Code draws its input box and its dialogs under one of these.
 _RULE_RE = re.compile(r'^\s*─{20,}', _M)
+# The input box's prompt line, not a dialog's "❯ 1. Yes".
+_INPUT_BOX_RE = re.compile(r'\A\s*❯(?!\s*\d+\.)')
 
 
 def approval_text(tail: str, region: str | int | None) -> str:
     if region == 'rule':
         rules = list(_RULE_RE.finditer(tail))
-        return tail[rules[-1].end():] if rules else tail
+        if not rules:
+            return tail
+        below = tail[rules[-1].end():]
+        # Some dialogs ("Teach auto mode about your environment?") sit above
+        # the input box, in a rule of their own, while the box stays put.
+        if (len(rules) >= 3
+                and _INPUT_BOX_RE.match(tail[rules[-2].end():rules[-1].start()])):
+            return tail[rules[-3].end():rules[-2].start()] + below
+        return below
     if isinstance(region, int):
         return '\n'.join(tail.split('\n')[-region:])
     return tail
@@ -183,6 +193,9 @@ def classify(command: str, title: str, screen: str,
 
 # Title last: it is free text and may hold the separator itself.
 LIST_FORMAT = '#{session_name}|#{window_index}|#{pane_id}|#{pane_current_command}|#{pane_title}'
+# A session name may hold the separator too, and shift the fields after it.
+# The pane id goes into a tmux command, so it must be nothing but an id.
+_PANE_ID_RE = re.compile(r'%\d+')
 
 
 class PaneInfo(NamedTuple):
@@ -198,7 +211,7 @@ def parse_pane_list(raw: str) -> list[PaneInfo]:
     panes = []
     for line in raw.splitlines():
         p = line.split('|', 4)
-        if len(p) < 5 or not p[1].isdigit() or not p[2].startswith('%'):
+        if len(p) < 5 or not p[1].isdigit() or not _PANE_ID_RE.fullmatch(p[2]):
             continue
         panes.append(PaneInfo(p[0], int(p[1]), p[2], p[3], p[4]))
     return panes
