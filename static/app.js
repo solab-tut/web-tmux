@@ -652,6 +652,44 @@ function shouldSuppressDuplicateTextInput(deduper, data) {
   return false;
 }
 
+// The keys that turn the text `replaced` (just before the cursor) into `data`:
+// a DEL for each character of the old text past what the two share, then
+// the new tail.
+function textReplacementInput(replaced, data) {
+  const oldChars = [...replaced];
+  const newChars = [...data];
+  let same = 0;
+  while (same < oldChars.length && same < newChars.length && oldChars[same] === newChars[same]) same++;
+  return '\x7f'.repeat(oldChars.length - same) + newChars.slice(same).join('');
+}
+
+// iOS dictation inserts each guess as it hears more, putting the new guess in
+// place of the last one, which is still sitting in xterm's textarea. xterm
+// sends every insertText whole, so the shell got "音声音声入力音声入力テスト…".
+// Catch those replacements before xterm does and send only the difference.
+function guardTextReplacement(term, onData) {
+  const textarea = term.textarea;
+  if (!textarea || !term.element) return;
+  let before = null;
+  term.element.addEventListener('beforeinput', (ev) => {
+    before = null;
+    if (ev.target !== textarea || ev.inputType !== 'insertText' || ev.isComposing) return;
+    const { value, selectionStart: start, selectionEnd: end } = textarea;
+    // Only a selection running to the end of the text ends at the shell's cursor.
+    if (start < end && end === value.length) before = { value, start };
+  }, true);
+  term.element.addEventListener('input', (ev) => {
+    const old = before;
+    before = null;
+    if (!old || ev.target !== textarea || ev.inputType !== 'insertText'
+        || !ev.data || ev.isComposing) return;
+    if (textarea.value !== old.value.slice(0, old.start) + ev.data) return;
+    ev.stopImmediatePropagation();
+    const data = textReplacementInput(old.value.slice(old.start), ev.data);
+    if (data) onData(data);
+  }, true);
+}
+
 function scheduleSnapshotRefresh(paneIds) {
   const ids = paneIds && paneIds.length ? paneIds : Object.keys(panes);
   ids.forEach((paneId) => {
@@ -1689,7 +1727,7 @@ function ensurePane(paneId, cols, rows) {
 
   // Send keyboard input to the active pane only.
   // If the Ctrl-toggle is on, apply a Ctrl modifier to the next single character.
-  term.onData((data) => {
+  const onData = (data) => {
     if (shouldSuppressDuplicateTextInput(inputDeduper, data)) return;
     // xterm generates terminal replies on behalf of the pane that requested
     // them. Do not route these through activePane/client-prefix handling, or
@@ -1705,7 +1743,9 @@ function ensurePane(paneId, cols, rows) {
     }
     if (isMouseReportingSequence(sendData) && activePaneId && paneId !== activePaneId) return;
     handleTerminalInput(sendData, activePaneId || paneId);
-  });
+  };
+  term.onData(onData);
+  guardTextReplacement(term, onData);
 
   // Click to focus this pane
   el.addEventListener('mousedown', () => selectPane(paneId));
