@@ -5,7 +5,7 @@ import agent_status as a
 RULE = '─' * 60
 
 # The screens below are cut down from real captures (Claude Code 2.1.304,
-# Codex CLI 0.163.0, Hermes Agent 0.22.2), blank rows and banners trimmed.
+# Codex CLI 0.163.0, Hermes Agent 0.22.2 and 0.22.5), blank rows and banners trimmed.
 
 CLAUDE_IDLE = f'''\
  ▐▛███▛█   Claude Code v2.1.304
@@ -168,6 +168,41 @@ HERMES_APPROVAL = f'''\
 {RULE}
 '''
 
+# Hermes 0.22.5's modern layout, its default: the status line sits under
+# the input box and joins its fields with "·".
+HERMES_MODERN_IDLE = f'''\
+❯ Run the shell command "sleep 20; echo done" with the terminal tool.
+{'─' * 40}
+💻 $ sleep 20 + 1 command  20.3s
+{'─' * 40}
+☤ Hermes
+done
+{'─' * 40}
+─ 26.6s · ran 1 command · 4:36 PM
+{'─' * 30} Run shell command and reply ─
+❯ Ask anything, or type / for commands…
+{RULE}
+ ☤ gpt-6.1-terra · ~8.76K/500K · [░░░░░░░░░░] ~2% · 41s · ⏲ 26s · ✓ 0s · ~/w  / commands · @ files · ! shell
+'''
+
+HERMES_MODERN_THINKING = f'''\
+❯ Run the shell command "sleep 20; echo done" with the terminal tool.
+{'─' * 40}
+── ⠼ 💻 sleep 20 + 1 command · 6s · ↓ 27 tok {'─' * 20} Run shell command and reply ─
+☤ ❯ type to redirect this turn · Tab queues it for after
+{RULE}
+ ☤ gpt-6.1-terra · 8.6K/500K · [░░░░░░░░░░] 2% · 20s · ⏱ 5s · ~/w  enter interrupt · tab queue · ctrl+c stop
+'''
+
+# Under 76 columns the stopwatch and the key hints are gone.
+HERMES_MODERN_THINKING_NARROW = f'''\
+❯ Run "sleep 15" with the terminal tool, then reply ok.
+{'─' * 40}
+── ⠸ 💻 sleep 15 · 5s · ↓ 24 tok {'─' * 27}
+☤ type to redirect this turn · Tab queues it for after
+ ☤ gpt-6.1-terra · 2% · ◎ 66% · 57s · ~/w
+'''
+
 # /model leaves the status bar behind its box, so the ☤ is out of the tail.
 HERMES_MODEL_PICKER = f'''\
 Welcome to Hermes Agent! Type your message or /help for commands.
@@ -216,6 +251,26 @@ class ClassifyTest(unittest.TestCase):
         self.assertState('python3', HERMES_THINKING_TYPING, ('hermes', a.THINKING))
         self.assertState('python3', HERMES_APPROVAL, ('hermes', a.APPROVAL))
         self.assertState('hermes', HERMES_IDLE, ('hermes', a.IDLE))
+
+    def test_hermes_modern_layout(self):
+        self.assertState('python3', HERMES_MODERN_IDLE, ('hermes', a.IDLE))
+        self.assertState('python3', HERMES_MODERN_THINKING, ('hermes', a.THINKING))
+        self.assertState('python3', HERMES_MODERN_THINKING_NARROW, ('hermes', a.THINKING))
+        # Typing replaces the hint; a narrow pane still has the spinner.
+        typing = HERMES_MODERN_THINKING_NARROW.replace(
+            'type to redirect this turn · Tab queues it for after', '❯ and then list it')
+        self.assertState('python3', typing, ('hermes', a.THINKING))
+        # A wide one has the stopwatch too, and the spinner alone also does.
+        rule = HERMES_MODERN_THINKING.split('\n')[2]
+        wide = HERMES_MODERN_THINKING.replace(
+            'type to redirect this turn · Tab queues it for after', 'and then list it')
+        self.assertState('python3', wide.replace(rule, '─' * 60), ('hermes', a.THINKING))
+        self.assertState('python3', wide.replace('⏱ 5s', '⏲ 5s'), ('hermes', a.THINKING))
+        # The approval boxes are the classic layout's, above the new input box.
+        box = HERMES_APPROVAL.split(' ☤ ')[0]
+        approval = box + HERMES_MODERN_THINKING.split('\n', 2)[2].replace(
+            'enter interrupt · tab queue · ctrl+c stop', '')
+        self.assertState('python3', approval, ('hermes', a.APPROVAL))
 
     def test_hermes_waiting_for_a_choice(self):
         self.assertState('hermes', HERMES_MODEL_PICKER, ('hermes', a.APPROVAL))

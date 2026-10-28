@@ -11,7 +11,7 @@ when a tool call needs a yes. Nothing has to be set up on the host, and the
 same rules work for local and ssh hosts alike.
 
 The patterns follow what the agents print today (Claude Code 2.1, Codex CLI
-0.163, Hermes Agent 0.22); an agent that changes its wording falls back to
+0.163, Hermes Agent 0.22.5); an agent that changes its wording falls back to
 "idle" until they are updated here.
 """
 import re
@@ -103,11 +103,20 @@ AGENTS: dict[str, AgentRules] = {
             re.compile(r'🔐 (?:Verification code for|Save login for|Unlock) '),
         ),
         thinking=(
-            # The input line while a turn runs: "☤ ❯ msg=interrupt · /queue …"
+            # The classic layout's input line while a turn runs:
+            # "☤ ❯ msg=interrupt · /queue …"
             re.compile(r'msg=interrupt'),
             re.compile(r'Ctrl\+C cancel'),
-            # The status bar's running stopwatch; a finished turn shows ⏲.
-            re.compile(r'│ ⏱ \d'),
+            # The modern layout (the default in 0.22.5) opens the rule above
+            # the input with a spinner, "── ⠼ 💻 sleep 20 · 6s ───", the
+            # one sign left in a narrow pane, and its input hints at what
+            # typing does now.
+            re.compile(r'^── [⠁-⣿] ', _M),
+            re.compile(r'type to (?:steer|redirect) this turn'
+                       r'|type to queue a message for after this turn'),
+            # The status bar's running stopwatch, after "│" or "·" by width;
+            # a finished turn shows ⏲.
+            re.compile(r'[│·] ⏱ \d'),
         ),
     ),
 }
