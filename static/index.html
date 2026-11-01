@@ -124,51 +124,14 @@
 
     <!-- ── Bottom Bar (touch devices by default; configurable) ──────── -->
     <div id="bottombar">
-      <button class="vkey icon-btn key-wide" data-key="esc" type="button" aria-label="Escape" title="Escape">
-        <svg viewBox="0 0 40 24" aria-hidden="true">
-          <rect x="2.5" y="3.5" width="35" height="17" rx="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-          <text x="20" y="15.2" text-anchor="middle">ESC</text>
-        </svg>
-      </button>
-      <button id="ctrl-toggle" class="icon-btn key-wide" type="button" aria-label="Control" title="Control">
-        <svg viewBox="0 0 40 24" aria-hidden="true">
-          <rect x="2.5" y="3.5" width="35" height="17" rx="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-          <text x="20" y="15.2" text-anchor="middle">CTRL</text>
-        </svg>
-      </button>
-      <button class="vkey icon-btn key-wide" data-key="tab" type="button" aria-label="Tab" title="Tab">
-        <svg viewBox="0 0 32 24" aria-hidden="true">
-          <path d="M6 6v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-          <path d="M9 12h13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-          <path d="M18 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-      <button class="vkey icon-btn key-wide" data-key="enter" type="button" aria-label="Enter" title="Enter">
-        <svg viewBox="0 0 32 24" aria-hidden="true">
-          <path d="M25 6v7H10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M14 9l-4 4 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-      <button class="vkey icon-btn" data-key="up" type="button" aria-label="Up" title="Up">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 6l6 9H6z" fill="currentColor"/>
-        </svg>
-      </button>
-      <button class="vkey icon-btn" data-key="down" type="button" aria-label="Down" title="Down">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 18l-6-9h12z" fill="currentColor"/>
-        </svg>
-      </button>
-      <button class="vkey icon-btn" data-key="left" type="button" aria-label="Left" title="Left">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M6 12l9-6v12z" fill="currentColor"/>
-        </svg>
-      </button>
-      <button class="vkey icon-btn" data-key="right" type="button" aria-label="Right" title="Right">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M18 12l-9 6V6z" fill="currentColor"/>
-        </svg>
-      </button>
+      <button class="vkey" data-key="esc" type="button" aria-label="Escape" title="Escape">esc</button>
+      <button id="ctrl-toggle" type="button" aria-label="Control" title="Control">ctrl</button>
+      <button class="vkey" data-key="tab" type="button" aria-label="Tab" title="Tab">tab</button>
+      <button class="vkey" data-key="enter" type="button" aria-label="Enter" title="Enter">enter</button>
+      <button class="vkey key-arrow" data-key="up" type="button" aria-label="Up" title="Up">↑</button>
+      <button class="vkey key-arrow" data-key="down" type="button" aria-label="Down" title="Down">↓</button>
+      <button class="vkey key-arrow" data-key="left" type="button" aria-label="Left" title="Left">←</button>
+      <button class="vkey key-arrow" data-key="right" type="button" aria-label="Right" title="Right">→</button>
     </div>
 
     <!-- iOS cannot expose Paste on xterm's off-screen input textarea. -->
