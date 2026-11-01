@@ -350,15 +350,7 @@ web-tmux/
 ├── layout_parser.py      # tmux レイアウト文字列パーサー
 ├── layout_store.py       # セッション構成の保存・復元計画・ストア
 ├── agent_status.py       # ペインの画面から AI エージェントの状態を判定
-├── test_security.py      # 認証・検証・制限のテスト
-├── test_server.py        # セッションHTTPハンドラとレイアウト復元のテスト
-├── test_layout_store.py  # レイアウトの取得・並び順・復元計画・ストアのテスト
-├── test_tmux_control.py  # 制御モードの解析・接続・ホスト切替のテスト
-├── test_tmux_hosts.py    # ssh の argv／クォート、ホスト設定、ホスト一覧のテスト
-├── test_agent_status.py  # エージェントの識別と状態判定のテスト
-├── test_tailscale_setup.py # Tailscale からの .web-tmux.env 作成と serve の確認のテスト
-├── test_install_sh.py    # ローカルリポジトリを使った install.sh のテスト
-├── test_server_sh.py     # server.sh の起動・停止・復旧とメッセージのテスト
+├── tests/                # ユニットテスト（.venv/bin/python -m unittest）
 ├── pyproject.toml        # Pythonプロジェクトと固定依存関係
 ├── uv.lock               # uv用ロックファイル
 ├── requirements.txt      # venv + pip用固定依存関係
@@ -384,7 +376,10 @@ web-tmux/
 
 ```bash
 .venv/bin/python -m unittest -v
+.venv/bin/python -m unittest tests.test_server   # 1モジュールだけ
 ```
+
+テストは `tests/` にまとめてあり、web-tmux の実行には使いません。
 
 ## ログ
 

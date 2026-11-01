@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 # The stand-in's setup.sh: records that it ran, and fails on request.
 SETUP_STUB = '''#!/bin/sh

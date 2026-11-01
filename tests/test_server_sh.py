@@ -12,7 +12,7 @@ import time
 import unittest
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 FAKE_SERVER = '''\
 import os, signal, socket, time
 sockets = []

@@ -400,15 +400,7 @@ web-tmux/
 ├── layout_parser.py      # tmux layout string parser
 ├── layout_store.py       # Saved session layouts: capture, restore plan, store
 ├── agent_status.py       # A coding agent's state, read off its pane's screen
-├── test_security.py      # Authentication, validation, and limit tests
-├── test_server.py        # Session HTTP handler and layout restore tests
-├── test_layout_store.py  # Layout capture, ordering, planning, and store tests
-├── test_tmux_control.py  # Control-mode parsing, attach, host switch tests
-├── test_tmux_hosts.py    # ssh argv/quoting, host config, host list tests
-├── test_agent_status.py  # Agent identification and state tests
-├── test_tailscale_setup.py # .web-tmux.env from Tailscale, serve checks
-├── test_install_sh.py    # install.sh against a local repository
-├── test_server_sh.py     # server.sh start/stop/recovery and its messages
+├── tests/                # Unit tests: .venv/bin/python -m unittest
 ├── pyproject.toml        # Python project and pinned dependency
 ├── uv.lock               # Lock file for uv
 ├── requirements.txt      # Pinned dependency for venv + pip
@@ -435,7 +427,10 @@ After running `setup.sh`, run the test suite with the project virtual environmen
 
 ```bash
 .venv/bin/python -m unittest -v
+.venv/bin/python -m unittest tests.test_server   # one module
 ```
+
+The tests live in `tests/`; nothing in them is needed to run web-tmux.
 
 ## Logs
 

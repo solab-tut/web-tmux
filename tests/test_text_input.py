@@ -9,7 +9,7 @@ import subprocess
 import unittest
 
 
-APP = (Path(__file__).parent / 'static/app.js').read_text()
+APP = (Path(__file__).resolve().parent.parent / 'static/app.js').read_text()
 JS = shutil.which('node') or shutil.which('nodejs') or shutil.which('gjs')
 
 
