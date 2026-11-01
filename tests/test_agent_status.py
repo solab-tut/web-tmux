@@ -5,7 +5,8 @@ import agent_status as a
 RULE = '─' * 60
 
 # The screens below are cut down from real captures (Claude Code 2.1.304,
-# Codex CLI 0.163.0, Hermes Agent 0.22.2 and 0.22.5), blank rows and banners trimmed.
+# Codex CLI 0.163.0, Hermes Agent 0.22.2 and 0.22.5; Claude Code 2.1.316 for the
+# background agents), blank rows and banners trimmed.
 
 CLAUDE_IDLE = f'''\
  ▐▛███▛█   Claude Code v2.1.304
@@ -217,6 +218,83 @@ Welcome to Hermes Agent! Type your message or /help for commands.
 {RULE}
 '''
 
+# Claude Code 2.1.316: the turn has ended, but the background agents it
+# started are still running, listed under the mode line.
+CLAUDE_BACKGROUND_AGENTS = f'''\
+● Agent(Sleep 40 seconds)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+● launched
+✻ Waiting for 2 background agents to finish
+{RULE}
+❯
+{RULE}
+  ⏵⏵ auto mode on · 2 shells
+  ● main
+  ◯ general-purpose  Sleep 40 seconds                          3s · ↓ 29.2k tokens
+  ◯ general-purpose  Sleep 70 seconds                          3s · ↓ 29.2k tokens
+'''
+
+# The list focused with ↓.
+CLAUDE_BACKGROUND_AGENTS_FOCUSED = f'''\
+✻ Waiting for 1 background agent to finish
+{RULE}
+❯
+{RULE}
+  ↑/↓ to select
+❯ ● main
+  ◯ general-purpose  Sleep 40 seconds                          2s · ↓ 26.8k tokens
+'''
+
+# The last one has finished: the list is gone, the wait line stays above.
+CLAUDE_BACKGROUND_AGENTS_DONE = f'''\
+✻ Waiting for 1 background agent to finish
+● Agent "Sleep 40 seconds" finished · 43s
+{RULE}
+❯
+{RULE}
+  ⏵⏵ auto mode on (shift+tab to cycle) · /tasks to see subagents
+'''
+
+# A background shell alone is counted in the mode line, never listed.
+CLAUDE_BACKGROUND_SHELL = f'''\
+● started
+✻ Worked for 5s · done 5:42 · 1 shell still running
+{RULE}
+❯
+{RULE}
+  ⏵⏵ auto mode on · 1 shell
+'''
+
+# A background agent's tool call needs a yes, while the main agent waits.
+CLAUDE_BACKGROUND_AGENT_APPROVAL = f'''\
+✻ Waiting for 1 background agent to finish
+{RULE}
+ Create file · from the general-purpose agent
+ note1.txt
+{'╌' * 60}
+  1 hi
+{'╌' * 60}
+ Do you want to create note1.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits for this session (shift+tab)
+   3. No
+ Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agents
+'''
+
+# Hermes 0.22.5: a background delegate_task still running after the turn.
+HERMES_BACKGROUND_SUBAGENT = f'''\
+☤ Hermes
+launched
+{'─' * 40}
+─ 3.9s · delegated 1 task · 5:37 AM
+ Subagents · 1 live · Ctrl+T expand · Ctrl+R collapse
+ ● Run the terminal command `sleep 60` and then report exactly `slept`. · 43s · last: terminal
+{'─' * 30} Run background sleep task ─
+❯ Turn these notes into a to-do list
+{RULE}
+ ☤ gpt-6.1-terra · ~9.08K/500K · [░░░░░░░░░░] ~2% · ⛓ 1 · 1m · ⏲ 3s · ✓ 41s
+'''
+
 
 class ClassifyTest(unittest.TestCase):
     def assertState(self, command, screen, expected, title=''):
@@ -279,6 +357,34 @@ class ClassifyTest(unittest.TestCase):
         # Once picked, only the result line is left.
         switched = HERMES_IDLE.replace('Ran rm', '  ✓ Model switched: gpt-6.1-sol\nRan rm')
         self.assertState('python3', switched, ('hermes', a.IDLE))
+
+    def test_claude_background_agents_are_working(self):
+        self.assertState('claude', CLAUDE_BACKGROUND_AGENTS, ('claude', a.THINKING))
+        self.assertState('claude', CLAUDE_BACKGROUND_AGENTS_FOCUSED, ('claude', a.THINKING))
+        self.assertState('claude', CLAUDE_BACKGROUND_AGENTS_DONE, ('claude', a.IDLE))
+        self.assertState('claude', CLAUDE_BACKGROUND_SHELL, ('claude', a.IDLE))
+        self.assertState('claude', CLAUDE_BACKGROUND_AGENT_APPROVAL, ('claude', a.APPROVAL))
+
+    def test_claude_agent_list_counts_only_in_the_footer(self):
+        # The same rows in Claude's output above its input box.
+        listed = CLAUDE_BACKGROUND_AGENTS.split('  ⏵⏵')[1].split('\n', 1)[1]
+        screen = '● Here is the footer I saw:\n' + listed + CLAUDE_IDLE
+        self.assertState('claude', screen, ('claude', a.IDLE))
+
+    def test_hermes_background_subagents_are_working(self):
+        self.assertState('python3', HERMES_BACKGROUND_SUBAGENT, ('hermes', a.THINKING))
+        heading = ' Subagents · 1 live · Ctrl+T expand · Ctrl+R collapse'
+        for narrow in (' Live work · 1 live · 2 procs · Ctrl+T expand · Ctrl+R restore',
+                       ' 2 live · Ctrl+T · Ctrl+R', ' 1 live'):
+            self.assertState('python3', HERMES_BACKGROUND_SUBAGENT.replace(heading, narrow),
+                             ('hermes', a.THINKING))
+        # Shells alone, or the dock gone once the subagent is done.
+        shells = HERMES_BACKGROUND_SUBAGENT.replace(heading, ' Processes · 1 proc · Ctrl+T expand')
+        self.assertState('python3', shells, ('hermes', a.IDLE))
+        gone = HERMES_BACKGROUND_SUBAGENT.replace(heading + '\n', '').replace(
+            ' ● Run the terminal command `sleep 60` and then report exactly `slept`.'
+            ' · 43s · last: terminal\n', '')
+        self.assertState('python3', gone, ('hermes', a.IDLE))
 
     def test_agents_under_node_are_told_apart(self):
         self.assertState('node', CLAUDE_IDLE, ('claude', a.IDLE))

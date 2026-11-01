@@ -7,11 +7,13 @@ What a coding agent in a pane is doing, read off its screen.
 Claude Code, Codex and Hermes Agent tell no one but the terminal whether they
 are working or waiting, so the sidebar reads the same screen the user would:
 a spinner line or "esc to interrupt" while a turn runs, an approval dialog
-when a tool call needs a yes. Nothing has to be set up on the host, and the
+when a tool call needs a yes. Subagents left running in the background
+count as working too, though the turn that started them has ended: the
+agent picks up again when they finish, and only then is the work done. Nothing has to be set up on the host, and the
 same rules work for local and ssh hosts alike.
 
-The patterns follow what the agents print today (Claude Code 2.1, Codex CLI
-0.163, Hermes Agent 0.22.5); an agent that changes its wording falls back to
+The patterns follow what the agents print today (Claude Code 2.1.316, Codex
+CLI 0.163, Hermes Agent 0.22.5); an agent that changes its wording falls back to
 "idle" until they are updated here.
 """
 import re
@@ -54,6 +56,9 @@ class AgentRules(NamedTuple):
     # diff of this file) must not count: 'rule' looks only below the last
     # full-width ──── line, a number only at that many bottom rows.
     approval_region: str | int | None = None
+    # Seen below the last full-width ──── line only, where Claude Code keeps
+    # its footer: the same words higher up are output, not the footer.
+    footer_thinking: tuple[re.Pattern, ...] = ()
 
 
 AGENTS: dict[str, AgentRules] = {
@@ -73,6 +78,14 @@ AGENTS: dict[str, AgentRules] = {
             re.compile(r'esc to interrupt', _I),
         ),
         approval_region='rule',
+        footer_thinking=(
+            # Background agents still running, listed under the mode line:
+            # "● main" (or "❯ ● main" with the list focused), then a
+            # "◯ general-purpose  Sleep 90 seconds  9s · ↓ 32.8k tokens" row
+            # each. A finished agent leaves the list, the last one takes the
+            # list with it, and background shells alone never show it.
+            re.compile(r'^\s*(?:❯\s*)?[●◯]\s+main\s*$', _M),
+        ),
     ),
     'codex': AgentRules(
         signature=re.compile(r'OpenAI Codex|Ask Codex|^\s*› ', _M),
@@ -117,6 +130,12 @@ AGENTS: dict[str, AgentRules] = {
             # The status bar's running stopwatch, after "│" or "·" by width;
             # a finished turn shows ⏲.
             re.compile(r'[│·] ⏱ \d'),
+            # Background subagents still running, after the turn that
+            # started them has ended: the dock above the input box reads
+            # "Subagents · 1 live · Ctrl+T expand · …", or from "1 live" on
+            # when narrow ("Live work · 1 live · 2 procs" with shells too).
+            # Background shells alone read "Processes · 1 proc" instead.
+            re.compile(r'^\s*(?:(?:Subagents|Live work) · )?[1-9]\d* live(?: ·|\s*$)', _M),
         ),
     ),
 }
@@ -145,6 +164,13 @@ def screen_tail(screen: str, lines: int = TAIL_LINES) -> str:
 _RULE_RE = re.compile(r'^\s*─{20,}', _M)
 # The input box's prompt line, not a dialog's "❯ 1. Yes".
 _INPUT_BOX_RE = re.compile(r'\A\s*❯(?!\s*\d+\.)')
+
+
+def below_last_rule(tail: str) -> str:
+    """What lies under the last full-width rule: Claude Code's footer, or a
+    dialog. Nothing when there is no rule at all."""
+    rules = list(_RULE_RE.finditer(tail))
+    return tail[rules[-1].end():] if rules else ''
 
 
 def approval_text(tail: str, region: str | int | None) -> str:
@@ -192,7 +218,9 @@ def classify(command: str, title: str, screen: str,
     if (any(p.search(dialog) for p in rules.approval)
             or (rules.title_approval is not None and rules.title_approval.search(title))):
         return agent, APPROVAL
+    footer = below_last_rule(tail) if rules.footer_thinking else ''
     if (any(p.search(tail) for p in rules.thinking)
+            or any(p.search(footer) for p in rules.footer_thinking)
             or (rules.title_thinking is not None and rules.title_thinking.search(title))):
         return agent, THINKING
     return agent, IDLE
