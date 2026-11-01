@@ -3391,6 +3391,8 @@ function applyCtrlModifier(data) {
 function sendVirtualKey(name) {
   const data = VIRTUAL_KEYS[name];
   if (!data) return;
+  // ctrl applies to the next key only, and a virtual key is that key.
+  if (_ctrlActive) setCtrlActive(false);
   sendPaneInput(data);
 }
 
