@@ -1,11 +1,66 @@
 # web-tmux
 
-A lightweight web frontend for [tmux](https://github.com/tmux/tmux). Access and control your tmux sessions from a browser — including mobile — through Tailscale Serve.
+Your tmux sessions in a browser — on your laptop, tablet or phone — reached privately over [Tailscale](https://tailscale.com).
 
 [日本語](README.ja.md)
 
+<p>
+  <img src="docs/images/screenshot-desktop.png" alt="web-tmux in a desktop browser: the sidebar lists three sessions and the current session's windows and panes; the terminal shows a window split into vim, a test run and git log" width="68%">
+  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with Esc, Ctrl, Tab, Enter and arrow keys along the bottom" width="26%">
+</p>
+
+- **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later
+- **Made for phones and tablets too**: zoom any pane to full screen with a tap, Esc / Ctrl / Tab / arrow keys, Japanese and other IME input
+- **Keeps an eye on coding agents**: Claude Code, Codex and Hermes Agent panes show whether they are working, waiting for you, or done
+- **tmux on other machines** over SSH, from the same page, without putting them on your tailnet
+- **Private by design**: only your own tailnet login gets in; nothing is open to the internet or the LAN
+
+## Quick start
+
+You need tmux, git, Python 3.10 or later (or [uv](https://github.com/astral-sh/uv)), and [Tailscale](https://tailscale.com/download) installed and connected on the machine that runs tmux. In the Tailscale [admin console](https://login.tailscale.com/admin/dns), MagicDNS and HTTPS certificates must be on (setup tells you if they are not).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/solab-tut/web-tmux/main/install.sh | bash
 ```
-Browser (xterm.js)  ←─WebSocket─→  server.py  ←─PTY─→  tmux -CC
+
+This installs the latest release into `~/web-tmux` and runs `./setup.sh`, which
+
+1. builds the Python environment in `.venv`,
+2. reads this machine's tailnet name and your login from `tailscale status`, shows them, and writes `.web-tmux.env` once you confirm,
+3. offers to run the `tailscale serve` command that publishes web-tmux to your tailnet (on Linux with `sudo`).
+
+Then start web-tmux and open the address it prints, from any device on your tailnet:
+
+```bash
+cd ~/web-tmux && ./server.sh
+# Open  https://<machine>.<tailnet>.ts.net:8766/
+```
+
+The installer adds no packages and needs no `sudo` — only the optional `tailscale serve` step does, on Linux, and only after asking. If a tool is missing, the installer names it and the command to get it. Prefer to read the script first, or to use git yourself?
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/solab-tut/web-tmux/main/install.sh
+less install.sh && bash install.sh
+# or
+git clone https://github.com/solab-tut/web-tmux.git && cd web-tmux && ./setup.sh
+```
+
+**Getting the prerequisites**
+
+| System | Command |
+|--------|---------|
+| macOS | `brew install tmux git python`, and the [Tailscale app](https://tailscale.com/download/mac) |
+| Ubuntu 22.04 or later | `sudo apt install tmux git python3 python3-venv`, and [Tailscale for Linux](https://tailscale.com/download/linux) |
+| Ubuntu 20.04 | Python is 3.8 there: install [uv](https://docs.astral.sh/uv/getting-started/installation/), or Python 3.10 from the `deadsnakes` PPA (`python3.10 python3.10-venv`) |
+
+**Updating:** run the same `curl … | bash` again (in a clone of your own, `git pull && ./setup.sh`), then `./server.sh restart`. Your `.web-tmux.env` is kept.
+
+## Why Tailscale
+
+web-tmux gives whoever opens it a shell, so it is never reachable directly. The server listens on `127.0.0.1` only, and [Tailscale Serve](https://tailscale.com/kb/1312/serve) brings it to your tailnet over HTTPS. Tailscale tells web-tmux who is asking, and web-tmux lets in only the logins listed in `.web-tmux.env` — no password to choose, no port to open on your router, and the same address works from home, the office or a phone on mobile data. Opening `http://127.0.0.1:8766` directly is refused on purpose.
+
+```
+Browser (xterm.js)  ←─HTTPS / WebSocket─→  tailscale serve  ─→  server.py  ←─PTY─→  tmux -CC
 ```
 
 ## Network architecture
@@ -32,64 +87,11 @@ See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configura
 - Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
 - Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown, and images (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG), including those a Markdown document shows from the same host. Works on SSH hosts too; text is cut at 200 KiB, images over 4 MiB are not shown, and only regular files open
 - Coding agent status: a pane running Claude Code, Codex or Hermes Agent gets an icon in the sidebar — a prompt (`❯_`) when idle, a turning blue arc while thinking, a pulsing orange warning sign while it waits for you (an approval, or a choice such as Hermes's model picker), and a green check mark when a turn ended, until you type a key into that pane or, having had its window on screen, move to another window (a click or a scroll doesn't count). That holds while its window is on screen too, so a tab in the background or a desk left for a while still tells you. While any agent is waiting for you or finished, the ☰ button turns orange or green (and carries a small turning arc while any agent is working), and the tab's title (`⚠1 ✓2 …`) and icon say so too, for when the sidebar is closed or the tab is in the background. Window and session rows show the most pressing state among their panes. Other reachable SSH hosts are covered too, on their session rows, and count towards the ☰ button and the tab. The server reads the bottom of those panes' screens and matches what each agent prints (`esc to interrupt`, `Do you want to proceed?`, …), so nothing needs to be set up: every 2 seconds or so on the host being viewed, and every 10 seconds on the others while a browser is connected. A change in an agent's wording can throw it off
-- **Mobile-friendly:** fullscreen single-pane view, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
+- **Mobile-friendly:** zoom a pane to full screen, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
 
-## Requirements
+## Running the server
 
-- Python 3.10 or later
-- tmux
-- A modern browser (Chrome, Safari, Firefox)
-
-`setup.sh` handles the Python environment automatically. If [uv](https://github.com/astral-sh/uv) is already installed, it runs `uv sync --frozen` from `uv.lock`. Otherwise, it uses an existing Python 3.10+ installation with `venv` + `pip`. The script never downloads uv itself or executes `curl | sh`.
-
-The browser terminal assets are vendored under `static/vendor/`, so the app does
-not need CDN access at runtime.
-
-## Installation
-
-### macOS
-
-```bash
-brew install tmux
-git clone https://github.com/solab-tut/web-tmux.git
-cd web-tmux
-./setup.sh    # creates .venv and installs dependencies
-cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-# Edit the Tailnet HTTPS origin and Tailscale login in .web-tmux.env
-./server.sh   # start the server
-```
-
-### Linux (Ubuntu 22.04 / 24.04)
-
-```bash
-sudo apt install tmux
-git clone https://github.com/solab-tut/web-tmux.git
-cd web-tmux
-./setup.sh    # creates .venv and installs dependencies
-cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-# Edit the Tailnet HTTPS origin and Tailscale login in .web-tmux.env
-./server.sh   # start the server
-```
-
-### Linux (Ubuntu 20.04)
-
-Ubuntu 20.04 ships Python 3.8 by default. Install Python 3.10+ first, or install uv separately using its [official instructions](https://docs.astral.sh/uv/getting-started/installation/). To install Python manually:
-
-```bash
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt update
-sudo apt install tmux python3.10 python3.10-venv
-git clone https://github.com/solab-tut/web-tmux.git
-cd web-tmux
-./setup.sh
-cp .web-tmux.env.example .web-tmux.env && chmod 600 .web-tmux.env
-# Edit the Tailnet HTTPS origin and Tailscale login in .web-tmux.env
-./server.sh
-```
-
-Complete the [Tailscale setup](#remote-access-with-tailscale), then open the Tailnet HTTPS URL in your browser. Direct browser access through localhost is intentionally disabled.
-
-### Configuration
+Run these in the web-tmux directory (`~/web-tmux` after the quick start).
 
 **Custom tmux session name** (default: `web`):
 
@@ -168,7 +170,7 @@ Apps that take over the mouse (Claude Code's fullscreen view, vim with `mouse=a`
 
 On screens ≤ 768 px wide:
 
-- Only the active pane is shown fullscreen
+- A split window is shown as it is; tap a pane in the sidebar to zoom it to full screen, and tap it again to go back
 - Tap the **☰** button to open / close the sidebar
 - The top-bar **Paste** icon opens a paste sheet. Long-press its text area, paste, then tap **Send to terminal**
 
@@ -280,17 +282,17 @@ All ssh calls to a host share one connection (`ControlMaster`, kept for 10
 minutes), with sockets and a per-host ssh log in
 `~/.local/share/web-tmux/ssh/`.
 
-## Remote access with Tailscale
+## Manual setup
 
-[Tailscale Serve](https://tailscale.com/kb/1312/serve) exposes web-tmux to your Tailnet over HTTPS. web-tmux validates the exact browser origin and the `Tailscale-User-Login` identity header before issuing a signed session cookie.
+`./setup.sh` does all of this for you. This section says what it does, for setting it up by hand or changing it later. `./setup.sh` can be run again at any time and keeps an existing `.web-tmux.env`; `./setup.sh --yes` answers yes to its questions, for scripts.
 
-### How it works
+### Python environment
 
-web-tmux listens on one local port, `127.0.0.1:8766`: the page and its files over HTTP, and the terminal over a WebSocket on `/ws`. `tailscale serve` exposes that port to your tailnet over HTTPS, and the browser then connects to the WebSocket with `wss://`.
+If [uv](https://github.com/astral-sh/uv) is installed, `setup.sh` runs `uv sync --frozen` from `uv.lock`. Otherwise it uses an existing Python 3.10+ with `venv` + `pip` and `requirements.txt`. It never downloads uv itself. The browser terminal assets are vendored under `static/vendor/`, so the app needs no CDN at runtime.
 
-### Setup
+### `.web-tmux.env`
 
-Create `.web-tmux.env`, keep its mode at 600, and configure only your Tailnet HTTPS origin and Tailscale login:
+`setup.sh` writes this file from `tailscale status`: this machine's HTTPS address on your tailnet, and the login of the machine's owner. To write it yourself, copy `.web-tmux.env.example`, keep its mode at 600, and set:
 
 ```dotenv
 WEB_TMUX_ALLOWED_ORIGINS=https://<machine>.<tailnet>.ts.net:8766
@@ -303,49 +305,48 @@ WEB_TMUX_TAILSCALE_USERS=you@example.com
 |----------|---------|
 | `WEB_TMUX_ALLOWED_ORIGINS` | Comma-separated exact-match list of allowed HTTP origins |
 | `WEB_TMUX_TAILSCALE_USERS` | Comma-separated exact-match list of allowed `Tailscale-User-Login` values |
+| `WEB_TMUX_SSH_HOSTS` | Optional: tmux on other machines (see [tmux on other hosts](#tmux-on-other-hosts-ssh)) |
+| `WEB_TMUX_STATE_DIR` | Optional: where saved layouts live (default `~/.local/share/web-tmux`) |
 
-Restart the server after editing `.web-tmux.env`:
+To let a second person in, add their login to `WEB_TMUX_TAILSCALE_USERS`. On a [tagged](https://tailscale.com/kb/1068/tags) machine `setup.sh` cannot tell who owns it, and asks. Restart the server after editing `.web-tmux.env`:
 
 ```bash
-./server.sh stop && ./server.sh start
+./server.sh restart
 ```
 
-Then expose the port via `tailscale serve`:
+### `tailscale serve`
+
+web-tmux listens on one local port, `127.0.0.1:8766`: the page and its files over HTTP, and the terminal over a WebSocket on `/ws`. `tailscale serve` exposes that port to your tailnet over HTTPS, and the browser then connects to the WebSocket with `wss://`. web-tmux checks the exact browser origin and the `Tailscale-User-Login` identity header before issuing a signed session cookie.
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
-`./server.sh` reads `tailscale serve status` when it starts (no `sudo` needed for that) and warns if this forwarding is missing.
+> **Linux:** `tailscale serve` requires `sudo` (unless your user was made tailscaled's operator). On macOS it typically does not.
 
-> **Linux:** `tailscale serve` requires `sudo`. On macOS it typically does not.
-
-Access the app at:
-
-```
-https://<machine-name>.<tailnet>.ts.net:8766/
-```
-
-### Verify
+`./server.sh` reads `tailscale serve status` when it starts (no `sudo` needed for that) and warns if this forwarding is missing. To check it yourself:
 
 ```bash
 tailscale serve status
 ```
-
-Expected output:
 
 ```
 https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 |-- / proxy http://127.0.0.1:8766
 ```
 
-### Stop
+To stop publishing web-tmux:
 
 ```bash
 tailscale serve --https=8766 off
 ```
 
-> **Linux:** `sudo` is required here as well.
+### Troubleshooting
+
+- **The page says "this address or Tailscale user is not allowed here".** `server.log` names the reason: `host not allowed` means the address you opened is not in `WEB_TMUX_ALLOWED_ORIGINS`; `tailscale user not allowed` means your login is not in `WEB_TMUX_TAILSCALE_USERS`; `missing tailscale identity` means the request did not come through `tailscale serve` (or came from a tagged device, which has no user).
+- **The page does not load at all.** Check that `./server.sh` printed `server started` and that `tailscale serve status` shows the forwarding above.
+- **The page loads but the terminal never connects.** Reload once; a tab opened before an update may still run the old page.
+- `curl -I` gets no answer: web-tmux serves `GET` only. Use `curl -s -o /dev/null -w '%{http_code}\n' <URL>`.
 
 ### Upgrading from two ports
 
@@ -405,11 +406,16 @@ web-tmux/
 ├── test_tmux_control.py  # Control-mode parsing, attach, host switch tests
 ├── test_tmux_hosts.py    # ssh argv/quoting, host config, host list tests
 ├── test_agent_status.py  # Agent identification and state tests
+├── test_tailscale_setup.py # .web-tmux.env from Tailscale, serve checks
+├── test_install_sh.py    # install.sh against a local repository
+├── test_server_sh.py     # server.sh start/stop/recovery and its messages
 ├── pyproject.toml        # Python project and pinned dependency
 ├── uv.lock               # Lock file for uv
 ├── requirements.txt      # Pinned dependency for venv + pip
 ├── .web-tmux.env.example # Tailnet configuration example
-├── setup.sh              # One-time environment setup (creates .venv)
+├── tailscale_setup.py    # Reads Tailscale for setup.sh and server.sh
+├── install.sh            # One-command install / update (clones, runs setup.sh)
+├── setup.sh              # Python environment, .web-tmux.env, tailscale serve
 ├── server.sh             # Start / stop the server
 └── static/
     ├── index.html
