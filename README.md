@@ -6,7 +6,7 @@ Your tmux sessions in a browser — on your laptop, tablet or phone — reached 
 
 <p>
   <img src="docs/images/screenshot-desktop.png" alt="web-tmux in a desktop browser: the sidebar lists three sessions and the current session's windows and panes; the terminal shows a window split into vim, a test run and git log" width="68%">
-  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with esc, tab, ctrl, enter and arrow keys along the bottom" width="26%">
+  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with esc, tab, Shift+Tab, ctrl, enter and arrow keys along the bottom" width="26%">
 </p>
 
 - **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later

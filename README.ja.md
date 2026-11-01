@@ -6,7 +6,7 @@
 
 <p>
   <img src="docs/images/screenshot-desktop.png" alt="デスクトップのブラウザで動く web-tmux：サイドバーに3つのセッションと、現在のセッションのウィンドウ・ペインが並び、端末は vim・テスト実行・git log の3ペインに分割されている" width="68%">
-  <img src="docs/images/screenshot-phone.png" alt="スマホで動く web-tmux：vim のペインをズームして全画面表示し、下部に esc・tab・ctrl・enter・矢印キーが並ぶ" width="26%">
+  <img src="docs/images/screenshot-phone.png" alt="スマホで動く web-tmux：vim のペインをズームして全画面表示し、下部に esc・tab・Shift+Tab・ctrl・enter・矢印キーが並ぶ" width="26%">
 </p>
 
 - **セッション・ウィンドウ・ペインをサイドバーで一覧**：切り替え、分割、リネーム、ズーム、レイアウト全体の保存と復帰
