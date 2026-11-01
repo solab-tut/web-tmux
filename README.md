@@ -6,11 +6,11 @@ Your tmux sessions in a browser — on your laptop, tablet or phone — reached 
 
 <p>
   <img src="docs/images/screenshot-desktop.png" alt="web-tmux in a desktop browser: the sidebar lists three sessions and the current session's windows and panes; the terminal shows a window split into vim, a test run and git log" width="68%">
-  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with Esc, Ctrl, Tab, Enter and arrow keys along the bottom" width="26%">
+  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with esc, tab, ctrl, enter and arrow keys along the bottom" width="26%">
 </p>
 
 - **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later
-- **Made for phones and tablets too**: zoom any pane to full screen with a tap, Esc / Ctrl / Tab / arrow keys, Japanese and other IME input
+- **Made for phones and tablets too**: zoom any pane to full screen with a tap, Esc / Tab / Ctrl / arrow keys, Japanese and other IME input
 - **Keeps an eye on coding agents**: Claude Code, Codex and Hermes Agent panes show whether they are working, waiting for you, or done
 - **tmux on other machines** over SSH, from the same page, without putting them on your tailnet
 - **Private by design**: only your own tailnet login gets in; nothing is open to the internet or the LAN
@@ -87,7 +87,7 @@ See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configura
 - Save every open session's shape (window names, split layout, each pane's working directory) to a named layout and restore it later
 - Read-only file viewer: browse from a pane's working directory (top-bar folder icon, or the folder button on a pane in the sidebar) and read text files, with a rendered preview for Markdown, and images (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG), including those a Markdown document shows from the same host. Works on SSH hosts too; text is cut at 200 KiB, images over 4 MiB are not shown, and only regular files open
 - Coding agent status: a pane running Claude Code, Codex or Hermes Agent gets an icon in the sidebar — a prompt (`❯_`) when idle, a turning blue arc while thinking, a pulsing orange warning sign while it waits for you (an approval, or a choice such as Hermes's model picker), and a green check mark when a turn ended, until you type a key into that pane or, having had its window on screen, move to another window (a click or a scroll doesn't count). That holds while its window is on screen too, so a tab in the background or a desk left for a while still tells you. While any agent is waiting for you or finished, the ☰ button turns orange or green (and carries a small turning arc while any agent is working), and the tab's title (`⚠1 ✓2 …`) and icon say so too, for when the sidebar is closed or the tab is in the background. Window and session rows show the most pressing state among their panes. Other reachable SSH hosts are covered too, on their session rows, and count towards the ☰ button and the tab. The server reads the bottom of those panes' screens and matches what each agent prints (`esc to interrupt`, `Do you want to proceed?`, …), so nothing needs to be set up: every 2 seconds or so on the host being viewed, and every 10 seconds on the others while a browser is connected. A change in an agent's wording can throw it off
-- **Mobile-friendly:** zoom a pane to full screen, virtual keyboard (Esc / Ctrl / Tab / Enter / arrows), IME support
+- **Mobile-friendly:** zoom a pane to full screen, virtual keyboard (Esc / Tab / Ctrl / Enter / arrows), IME support
 
 ## Running the server
 
@@ -174,13 +174,13 @@ On screens ≤ 768 px wide:
 - Tap the **☰** button to open / close the sidebar
 - The top-bar **Paste** icon opens a paste sheet. Long-press its text area, paste, then tap **Send to terminal**
 
-The **bottom toolbar** (virtual keys for `Esc`, `Ctrl`, `Tab`, `Enter`, and the arrow keys) is shown automatically on touch-capable devices regardless of screen width. Because detection is based on touch input rather than the user agent, it also covers iPads using iPadOS's desktop-style user agent. The keyboard icon in the top bar offers three modes, saved for the next visit:
+The **bottom toolbar** (virtual keys for `esc`, `tab`, `ctrl`, `enter`, and the arrow keys) is shown automatically on touch-capable devices regardless of screen width. Because detection is based on touch input rather than the user agent, it also covers iPads using iPadOS's desktop-style user agent. The keyboard icon in the top bar offers three modes, saved for the next visit:
 
 - **Auto** — show on touch devices or at widths of 768 px or less (default)
 - **On** — always show
 - **Off** — always hide
 
-Enable the `Ctrl` toggle to apply Ctrl to the next character. This setting controls web-tmux's virtual-key toolbar, not the iOS / iPadOS software keyboard itself.
+Enable the `ctrl` toggle to apply Ctrl to the next character. This setting controls web-tmux's virtual-key toolbar, not the iOS / iPadOS software keyboard itself.
 
 On iOS / iPadOS the software keyboard carries an AutoFill bar above it, showing key, card and location icons. It is not specific to password fields: it appears whenever a form control has focus, and the terminal focuses xterm.js's hidden `<textarea>`. **A page cannot suppress it** — only a native `WKWebView` host can override `inputAccessoryView`, and no device setting turns it off. `static/app.js` already sets `autocomplete="off"`, which WebKit ignores. Twelve shapes were tried on an iOS 26 device — a wrapping `<form>`, several `input` types, `contenteditable`, several `inputmode` values, off-screen placement — and the bar stayed up for all of them.
 
