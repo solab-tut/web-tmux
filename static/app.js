@@ -62,6 +62,7 @@ const CLIENT_DIAGNOSTICS = true;
 const VIRTUAL_KEYS = {
   esc:   '\x1b',
   tab:   '\t',
+  btab:  '\x1b[Z',   // Shift+Tab: AI CLIs cycle their modes with it
   enter: '\r',
   up:    '\x1b[A',
   down:  '\x1b[B',
