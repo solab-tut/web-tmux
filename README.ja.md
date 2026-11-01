@@ -106,7 +106,7 @@ TMUX_SESSION=my-session ./server.sh
 ./server.sh stop   # 停止のみ（再起動しない）
 ```
 
-`server.sh` は、このチェックアウトのサーバーと確認できるプロセスだけを停止します。Linuxでは、PIDファイルが失われたり古くなった場合も、`/proc` の所有者・作業ディレクトリ・起動引数を確認して停止できます。無関係なPIDは停止せず、別のチェックアウトやアプリが8765/8766を使用している場合は、そのプロセスをkillせず起動を中止します。
+`server.sh` は、このチェックアウトのサーバーと確認できるプロセスだけを停止します。Linuxでは、PIDファイルが失われたり古くなった場合も、`/proc` の所有者・作業ディレクトリ・起動引数を確認して停止できます。無関係なPIDは停止せず、別のチェックアウトやアプリが8766を使用している場合は、そのプロセスをkillせず起動を中止します。
 
 ## 使い方
 
@@ -236,14 +236,7 @@ WEB_TMUX_SSH_HOSTS=lan-box,mac-mini:/opt/homebrew/bin/tmux
 
 ### 仕組み
 
-web-tmux は 2 つのローカルポートを使用します:
-
-| ポート | 用途 |
-|--------|------|
-| 8766 | 静的ファイル（HTTP） |
-| 8765 | WebSocket 端末 I/O |
-
-両方を `tailscale serve` で公開する必要があります。ページが HTTPS で配信されると、ブラウザは WebSocket 接続を自動的に `wss://` へ切り替えます。
+web-tmux が使うローカルポートは `127.0.0.1:8766` の1つです。ページとそのファイルは HTTP で、端末は `/ws` の WebSocket で、同じポートから配信します。このポートを `tailscale serve` で Tailnet に HTTPS 公開すると、ブラウザは WebSocket に `wss://` で接続します。
 
 ### 設定
 
@@ -267,12 +260,13 @@ WEB_TMUX_TAILSCALE_USERS=you@example.com
 ./server.sh stop && ./server.sh start
 ```
 
-続けて両方のポートを `tailscale serve` で公開します:
+続けてこのポートを `tailscale serve` で公開します:
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
-tailscale serve --bg --https=8765 http://127.0.0.1:8765
 ```
+
+`./server.sh` は起動時に `tailscale serve status` を読み（これには `sudo` は不要です）、この転送がなければ警告します。
 
 > **Linux の場合：** `tailscale serve` には `sudo` が必要です。macOS では通常不要です。
 
@@ -291,9 +285,6 @@ tailscale serve status
 以下のような出力が得られれば正常です:
 
 ```
-https://<machine-name>.<tailnet>.ts.net:8765/ (tailnet only)
-|-- / proxy http://127.0.0.1:8765
-
 https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 |-- / proxy http://127.0.0.1:8766
 ```
@@ -302,10 +293,19 @@ https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 
 ```bash
 tailscale serve --https=8766 off
-tailscale serve --https=8765 off
 ```
 
 > **Linux の場合：** こちらのコマンドにも `sudo` が必要です。
+
+### 2ポート構成からの更新
+
+以前のバージョンは WebSocket をポート 8765 でも配信していました。更新したら、その転送を削除してください。残っている間は `./server.sh` が起動時に知らせます:
+
+```bash
+tailscale serve --https=8765 off
+```
+
+古いページを開いたままのタブは端末につながりません。一度リロードしてください。
 
 ### Tailscale Funnel による外部公開
 
@@ -323,7 +323,7 @@ tailscale serve --https=8765 off
 - `no-store` はCookieを発行する応答だけに付けます。アプリ本体は毎回再検証、`/vendor/` 配下のバージョン付きファイルはキャッシュ可能にしてあり、ブラウザがネットワークに戻らずページを復元できます（いずれも端末の内容や秘密情報を含みません）。
 - 不正なOrigin、ID、メッセージ、レート超過は、端末入力やCookie値を含めず `server.log` に記録します。再接続時にはページが接続状態の短い診断行（`client ...`）も記録します。端末の内容は含みません。不要なら `static/app.js` の `CLIENT_DIAGNOSTICS = false` で止められます。
 - 保存したレイアウトは `~/.local/share/web-tmux/layouts.json` に、モード700のディレクトリ内でモード600のファイルとして書き出されます。作業ディレクトリのパスを含むため機密として扱ってください。ネットワークには出ず、リポジトリにも含まれません。
-- `tailscale serve status` が上記2ポートのtailnet-only公開だけになっていることを維持してください。
+- `tailscale serve status` が上記のtailnet-only公開1つだけになっていることを維持してください。
 - `WEB_TMUX_SSH_HOSTS` を設定した場合、web-tmux に入れた人（許可済みTailscale ID、または盗まれたセッションCookie）は、列挙した全ホストと途中の踏み台ホストでシェルを得られます。tmux 自体が任意のコマンドを実行できるため `command=` による鍵の制限は効きません。ただし各リモートの `authorized_keys` に `restrict,pty,from="<このサーバーのtailnet IP>"` を付ければ、鍵の他所での利用やフォワーディングを防げます。ssh は agent／X11 フォワーディングを無効にし、設定済みのフォワーディングもすべて解除して実行します。ssh ソケットのディレクトリはモード700です。サインイン画面で入力したパスフレーズやパスワードは、認証済みの WebSocket からモード600のソケットを経て ssh に渡るだけで、ディスクにもログにも残りません。プロンプトに答えられるのはサインインを始めたブラウザだけです。ssh は制御端末なしで、サインイン以外のプロンプトをすべて拒否する askpass 付きで動きます。リモートのエラー文は（短く1行にして）ログに残しますがブラウザには送らず、端末の内容はログに残しません。
 
 ## サードパーティのブラウザアセット

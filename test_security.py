@@ -23,17 +23,18 @@ class AccessControllerTest(unittest.TestCase):
         )
 
     def test_remote_session_requires_allowed_tailscale_identity(self):
-        context = self.controller.authorize_http(
+        context, reason = self.controller.authorize_http(
             'host.example.ts.net:8766', 'owner@example.com'
         )
         self.assertIsNotNone(context)
+        self.assertEqual(reason, '')
         cookie_header = self.controller.session_cookie(context)
         self.assertIn('Secure', cookie_header)
         cookie = cookie_header.split(';', 1)[0]
 
         accepted, _ = self.controller.authorize_websocket(
             origin_value='https://host.example.ts.net:8766',
-            host='host.example.ts.net:8765',
+            host='host.example.ts.net:8766',
             tailscale_login='intruder@example.com',
             cookie_header=cookie,
         )
@@ -41,15 +42,48 @@ class AccessControllerTest(unittest.TestCase):
 
         accepted, reason = self.controller.authorize_websocket(
             origin_value='https://host.example.ts.net:8766',
-            host='host.example.ts.net:8765',
+            host='host.example.ts.net:8766',
             tailscale_login='owner@example.com',
             cookie_header=cookie,
         )
         self.assertEqual(reason, '')
         self.assertEqual(accepted.identity, 'owner@example.com')
 
+    def test_websocket_must_come_to_the_page_own_port(self):
+        context, _ = self.controller.authorize_http(
+            'host.example.ts.net:8766', 'owner@example.com'
+        )
+        cookie = self.controller.session_cookie(context).split(';', 1)[0]
+        for host in ('host.example.ts.net:8765', 'host.example.ts.net', 'other.example:8766'):
+            with self.subTest(host=host):
+                accepted, reason = self.controller.authorize_websocket(
+                    origin_value='https://host.example.ts.net:8766',
+                    host=host,
+                    tailscale_login='owner@example.com',
+                    cookie_header=cookie,
+                )
+                self.assertIsNone(accepted)
+                self.assertEqual(reason, 'host does not match origin')
+
+    def test_http_rejection_says_which_setting_to_check(self):
+        cases = (
+            ('evil.example:8766', 'owner@example.com', 'host not allowed'),
+            ('host.example.ts.net:8765', 'owner@example.com', 'host not allowed'),
+            ('host.example.ts.net:8766', None, 'missing tailscale identity'),
+            ('host.example.ts.net:8766', '  ', 'missing tailscale identity'),
+            ('host.example.ts.net:8766', 'intruder@example.com', 'tailscale user not allowed'),
+        )
+        for host, login, expected in cases:
+            with self.subTest(host=host, login=login):
+                context, reason = self.controller.authorize_http(host, login)
+                self.assertIsNone(context)
+                self.assertEqual(reason, expected)
+
+    def test_csp_names_the_page_own_port_for_the_websocket(self):
+        self.assertEqual(self.controller.csp_connect_sources, ('wss://host.example.ts.net:8766',))
+
     def test_cookie_tampering_expiry_and_host_binding(self):
-        context = self.controller.authorize_http(
+        context, _ = self.controller.authorize_http(
             'host.example.ts.net:8766', 'owner@example.com'
         )
         cookie = self.controller.session_cookie(context).split(';', 1)[0]

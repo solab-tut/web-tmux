@@ -3,8 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 umask 077
 
-HTTP_PORT="8766"
-WS_PORT="8765"
+PORT="8766"
 PID_FILE="server.pid"
 PYTHON=".venv/bin/python"
 CONFIG_FILE=".web-tmux.env"
@@ -128,6 +127,43 @@ stop_recorded_server() {
   rm -f "$PID_FILE"
 }
 
+check_tailscale_serve() {
+  # Warn, never stop: the server runs either way, but without the right
+  # `tailscale serve` no browser can reach it. Reading the status needs no sudo.
+  command -v tailscale >/dev/null 2>&1 || return 0
+  "$PYTHON" - "$PORT" "${WEB_TMUX_ALLOWED_ORIGINS:-}" "$(uname -s)" <<'PY' >&2 || true
+import json
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+port, origins, system = sys.argv[1], sys.argv[2], sys.argv[3]
+sudo = 'sudo ' if system == 'Linux' else ''
+try:
+    result = subprocess.run(['tailscale', 'serve', 'status', '--json'],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode != 0:
+        sys.exit(0)   # tailscaled not running, or not logged in
+    web = json.loads(result.stdout or '{}').get('Web') or {}
+except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+    sys.exit(0)   # a CLI that says it differently
+target = f'http://127.0.0.1:{port}'
+for origin in filter(None, (o.strip() for o in origins.split(','))):
+    parts = urlsplit(origin)
+    if parts.scheme != 'https':
+        continue
+    proxy = (web.get(parts.netloc, {}).get('Handlers', {}).get('/') or {}).get('Proxy')
+    if proxy != target:
+        print(f'WARNING: tailscale serve does not forward {origin}/ to this server. Run:\n'
+              f'  {sudo}tailscale serve --bg --https={parts.port} {target}')
+for host, config in web.items():
+    if host.endswith(':8765') and (config.get('Handlers', {}).get('/') or {}).get('Proxy') == 'http://127.0.0.1:8765':
+        print('WARNING: web-tmux no longer uses port 8765; its old tailscale serve entry is still there. Remove it with:\n'
+              f'  {sudo}tailscale serve --https=8765 off')
+        break
+PY
+}
+
 port_is_free() {
   "$PYTHON" -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.close()' "$1"
 }
@@ -146,13 +182,15 @@ do_start() {
     echo "ERROR: .venv is missing; run ./setup.sh first." >&2
     exit 1
   fi
+  if [ -z "${WEB_TMUX_ALLOWED_ORIGINS:-}" ]; then
+    echo "ERROR: no WEB_TMUX_ALLOWED_ORIGINS in $CONFIG_FILE; copy .web-tmux.env.example to $CONFIG_FILE (mode 600) and fill it in — see the README." >&2
+    exit 1
+  fi
   stop_recorded_server
-  for port in "$WS_PORT" "$HTTP_PORT"; do
-    if ! port_is_free "$port"; then
-      echo "ERROR: port $port is already in use; no process was killed." >&2
-      exit 1
-    fi
-  done
+  if ! port_is_free "$PORT"; then
+    echo "ERROR: port $PORT is already in use; no process was killed." >&2
+    exit 1
+  fi
   : > server.log
   chmod 600 server.log
   nohup env -u TMUX -u TMUX_PANE "$PYTHON" server.py >> server.log 2>&1 &
@@ -165,8 +203,13 @@ do_start() {
     exit 1
   fi
   echo "server started: pid=$(sed -n '1p' "$PID_FILE")"
-  echo "HTTP  http://127.0.0.1:${HTTP_PORT}/"
-  echo "WS    ws://127.0.0.1:${WS_PORT}/"
+  local origin
+  IFS=',' read -ra origins <<< "$WEB_TMUX_ALLOWED_ORIGINS"
+  for origin in "${origins[@]}"; do
+    origin="${origin// /}"
+    [ -n "$origin" ] && echo "Open  $origin/"
+  done
+  check_tailscale_serve
 }
 
 case "${1:-}" in

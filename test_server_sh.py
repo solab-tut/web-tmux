@@ -1,4 +1,5 @@
 """Exercise launcher recovery with real processes and isolated TCP ports."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -31,19 +32,15 @@ while True:
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('bash'),
                      'launcher PID recovery uses Linux /proc')
 class ServerLauncherTest(unittest.TestCase):
+    ORIGIN = 'https://box.example.ts.net:8766'
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='web-tmux-launcher-')
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.ports = []
-        sockets = [socket.socket(), socket.socket()]
-        try:
-            for sock in sockets:
-                sock.bind(('127.0.0.1', 0))
-                self.ports.append(sock.getsockname()[1])
-        finally:
-            for sock in sockets:
-                sock.close()
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            self.ports = [sock.getsockname()[1]]
         self.make_checkout(self.directory)
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith('WEB_TMUX_')}
@@ -57,10 +54,19 @@ class ServerLauncherTest(unittest.TestCase):
         tmux = directory / 'bin/tmux'
         tmux.write_text('#!/bin/sh\nexit 0\n')
         tmux.chmod(0o700)
+        # Stands in for the real CLI, which on a developer's machine would
+        # report that machine's serve config: `serve status --json` answers
+        # with serve.json, or fails as if tailscaled were down.
+        tailscale = directory / 'bin/tailscale'
+        tailscale.write_text('#!/bin/sh\nexec cat "$(dirname "$0")/../serve.json"\n')
+        tailscale.chmod(0o700)
         launcher = (ROOT / 'server.sh').read_text()
-        launcher = launcher.replace('HTTP_PORT="8766"', f'HTTP_PORT="{self.ports[0]}"')
-        launcher = launcher.replace('WS_PORT="8765"', f'WS_PORT="{self.ports[1]}"')
+        launcher = launcher.replace('PORT="8766"', f'PORT="{self.ports[0]}"')
         (directory / 'server.sh').write_text(launcher)
+        config = directory / '.web-tmux.env'
+        config.write_text(f'WEB_TMUX_ALLOWED_ORIGINS={self.ORIGIN}\n'
+                          'WEB_TMUX_TAILSCALE_USERS=me@example.com\n')
+        config.chmod(0o600)
         (directory / 'server.py').write_text(f'PORTS = {self.ports!r}\n' + FAKE_SERVER)
 
     def run_launcher(self, *args):
@@ -99,7 +105,7 @@ class ServerLauncherTest(unittest.TestCase):
             with socket.create_connection(('127.0.0.1', port), timeout=1):
                 pass
 
-    def test_start_and_repeated_restart_release_both_ports(self):
+    def test_start_and_repeated_restart_release_the_port(self):
         pids = []
         for args in [(), ('restart',), ('start',)]:
             result = self.run_launcher(*args)
@@ -131,7 +137,7 @@ class ServerLauncherTest(unittest.TestCase):
         self.assertIsNotNone(old.poll())
         self.assert_listening()
 
-    def test_another_checkout_on_the_same_ports_is_not_stopped(self):
+    def test_another_checkout_on_the_same_port_is_not_stopped(self):
         temporary = tempfile.TemporaryDirectory(prefix='web-tmux-other-')
         self.addCleanup(temporary.cleanup)
         other_dir = Path(temporary.name)
@@ -164,3 +170,35 @@ class ServerLauncherTest(unittest.TestCase):
             with socket.socket() as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(('127.0.0.1', port))
+
+    def write_serve_status(self, web):
+        (self.directory / 'serve.json').write_text(json.dumps({'Web': web}))
+
+    def test_start_says_which_address_to_open(self):
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'Open  {self.ORIGIN}/', result.stdout)
+
+    def test_missing_configuration_stops_with_a_pointer(self):
+        (self.directory / '.web-tmux.env').unlink()
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('.web-tmux.env', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertFalse((self.directory / 'server.pid').exists())
+
+    def test_serve_config_that_reaches_the_server_brings_no_warning(self):
+        self.write_serve_status({'box.example.ts.net:8766': {
+            'Handlers': {'/': {'Proxy': f'http://127.0.0.1:{self.ports[0]}'}}}})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('WARNING', result.stderr)
+
+    def test_missing_serve_and_the_old_ws_port_are_pointed_out(self):
+        self.write_serve_status({'box.example.ts.net:8765': {
+            'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8765'}}}})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'tailscale serve --bg --https=8766 http://127.0.0.1:{self.ports[0]}',
+                      result.stderr)
+        self.assertIn('tailscale serve --https=8765 off', result.stderr)

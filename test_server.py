@@ -3,12 +3,12 @@ import base64
 import os
 import re
 import shutil
+import socket
 import tempfile
 import threading
+import time
 import unittest
-from functools import partial
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault(
@@ -16,75 +16,129 @@ os.environ.setdefault(
 )
 os.environ.setdefault('WEB_TMUX_TAILSCALE_USERS', 'owner@example.com')
 
+from websockets.asyncio.server import serve
+
 import server
 import tmux_hosts
 from web_security import AccessController
 
 
 class AuthSessionEndpointTest(unittest.TestCase):
+    """The one port, as a browser behind Tailscale Serve sees it: the cookie,
+    the static files and the WebSocket upgrade all go through
+    server._process_request."""
+
+    ORIGIN = 'https://host.example.ts.net:8766'
+
     @classmethod
     def setUpClass(cls):
         cls.access = AccessController(
-            ('https://host.example.ts.net:8766',),
+            (cls.ORIGIN,),
             ('owner@example.com',),
             secret=b'z' * 32,
         )
         cls.patcher = patch.object(server, 'ACCESS', cls.access)
         cls.patcher.start()
-        handler = partial(server.SecureStaticHandler, directory=server.STATIC_DIR)
-        cls.httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
-        cls.port = cls.httpd.server_address[1]
-        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.loop = asyncio.new_event_loop()
+        started = threading.Event()
+
+        async def idle(websocket):
+            await websocket.wait_closed()
+
+        async def start():
+            cls.listener = await serve(
+                idle, '127.0.0.1', 0,
+                origins=cls.access.allowed_origin_values,
+                process_request=server._process_request,
+                server_header=None,
+            )
+            cls.port = cls.listener.sockets[0].getsockname()[1]
+
+        def run():
+            asyncio.set_event_loop(cls.loop)
+            cls.loop.run_until_complete(start())
+            started.set()
+            cls.loop.run_forever()
+
+        cls.thread = threading.Thread(target=run, daemon=True)
         cls.thread.start()
+        started.wait(5)
 
     @classmethod
     def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
+        async def stop():
+            cls.listener.close()
+            await cls.listener.wait_closed()
+        asyncio.run_coroutine_threadsafe(stop(), cls.loop).result(5)
+        cls.loop.call_soon_threadsafe(cls.loop.stop)
+        cls.thread.join(5)
+        cls.loop.close()
         cls.patcher.stop()
 
     def _request(
         self,
-        method,
+        method='GET',
         *,
         path='/auth/session',
         host='host.example.ts.net:8766',
         login='owner@example.com',
+        headers=None,
     ):
         conn = HTTPConnection('127.0.0.1', self.port, timeout=5)
-        headers = {'Host': host}
+        sent = {'Host': host, **(headers or {})}
         if login is not None:
-            headers['Tailscale-User-Login'] = login
-        conn.request(method, path, headers=headers)
+            sent['Tailscale-User-Login'] = login
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for name, value in sent.items():
+            conn.putheader(name, value)
+        conn.endheaders()
         resp = conn.getresponse()
-        data = resp.read()
+        data = resp.read() if resp.status != 101 else b''
         conn.close()
         return resp, data
 
+    def _cookie(self):
+        resp, _ = self._request()
+        return resp.getheader('Set-Cookie').split(';', 1)[0]
+
+    def _upgrade(self, path, cookie):
+        return self._request(path=path, headers={
+            'Upgrade': 'websocket',
+            'Connection': 'Upgrade',
+            'Sec-WebSocket-Key': base64.b64encode(b'k' * 16).decode(),
+            'Sec-WebSocket-Version': '13',
+            'Origin': self.ORIGIN,
+            **({'Cookie': cookie} if cookie else {}),
+        })
+
     def test_allowed_tailscale_user_gets_cookie(self):
-        resp, _ = self._request('GET')
+        resp, _ = self._request()
         self.assertEqual(resp.status, 204)
         self.assertIn('web_tmux_session=', resp.getheader('Set-Cookie', ''))
         self.assertIn('Secure', resp.getheader('Set-Cookie', ''))
+        self.assertIsNone(resp.getheader('Content-Length'))
 
     def test_missing_or_wrong_tailscale_user_is_rejected(self):
-        resp, _ = self._request('GET', login=None)
+        resp, _ = self._request(login=None)
         self.assertEqual(resp.status, 403)
         self.assertIsNone(resp.getheader('Set-Cookie'))
-        resp, _ = self._request('GET', login='intruder@example.com')
+        resp, _ = self._request(login='intruder@example.com')
         self.assertEqual(resp.status, 403)
         self.assertIsNone(resp.getheader('Set-Cookie'))
 
     def test_disallowed_host_is_rejected(self):
-        resp, _ = self._request('GET', host='evil.example:8766')
+        resp, _ = self._request(host='evil.example:8766')
         self.assertEqual(resp.status, 403)
 
-    def test_get_and_head_issue_cookie(self):
-        for method in ('GET', 'HEAD'):
-            with self.subTest(method=method):
-                resp, _ = self._request(method)
-                self.assertEqual(resp.status, 204)
-                self.assertIn('web_tmux_session=', resp.getheader('Set-Cookie', ''))
+    def test_a_refusal_says_where_to_look_and_names_nothing(self):
+        with self.assertLogs(server.log, 'WARNING') as logs:
+            resp, body = self._request(path='/', login='intruder@example.com')
+        self.assertEqual(resp.status, 403)
+        text = body.decode()
+        self.assertIn('server.log', text)
+        for secret in ('host.example', 'owner@', 'intruder@', 'WEB_TMUX'):
+            self.assertNotIn(secret, text)
+        self.assertIn('tailscale user not allowed', '\n'.join(logs.output))
 
     def test_served_files_are_cacheable_but_still_locked_down(self):
         cases = (
@@ -96,7 +150,7 @@ class AuthSessionEndpointTest(unittest.TestCase):
         )
         for path, expected, unstored in cases:
             with self.subTest(path=path):
-                resp, _ = self._request('GET', path=path)
+                resp, _ = self._request(path=path)
                 cache_control = resp.getheader('Cache-Control', '')
                 self.assertIn(expected, cache_control)
                 self.assertEqual('no-store' in cache_control, unstored)
@@ -104,6 +158,70 @@ class AuthSessionEndpointTest(unittest.TestCase):
                     "frame-ancestors 'none'",
                     resp.getheader('Content-Security-Policy', ''),
                 )
+
+    def test_static_files_arrive_whole_with_their_type(self):
+        for path, name, content_type in (
+            ('/', 'index.html', 'text/html'),
+            ('/app.js', 'app.js', 'javascript'),
+            ('/style.css', 'style.css', 'text/css'),
+        ):
+            with self.subTest(path=path):
+                resp, body = self._request(path=path)
+                self.assertEqual(resp.status, 200)
+                self.assertIn(content_type, resp.getheader('Content-Type', ''))
+                with open(os.path.join(server.STATIC_DIR, name), 'rb') as fh:
+                    self.assertEqual(body, fh.read())
+
+    def test_unchanged_file_revalidates_without_its_body(self):
+        resp, _ = self._request(path='/app.js')
+        etag = resp.getheader('ETag')
+        self.assertTrue(etag)
+        resp, body = self._request(path='/app.js', headers={'If-None-Match': etag})
+        self.assertEqual(resp.status, 304)
+        self.assertEqual(body, b'')
+        resp, _ = self._request(path='/app.js', headers={'If-None-Match': '"stale"'})
+        self.assertEqual(resp.status, 200)
+
+    def test_nothing_outside_the_static_files_is_served(self):
+        for path in ('/../server.py', '/%2e%2e/server.py', '/vendor/../../server.py',
+                     '/vendor/%2e%2e/%2e%2e/server.py', '/..%2fserver.py', '/.git/config',
+                     '/vendor', '/vendor/', '/ws', '/missing.js'):
+            with self.subTest(path=path):
+                resp, _ = self._request(path=path)
+                self.assertEqual(resp.status, 404)
+
+    def test_a_symlink_out_of_the_static_files_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as root:
+            static = os.path.join(root, 'static')
+            os.mkdir(static)
+            with open(os.path.join(root, 'secret.txt'), 'w') as fh:
+                fh.write('no')
+            os.symlink(os.path.join(root, 'secret.txt'), os.path.join(static, 'link.txt'))
+            with patch.object(server, 'STATIC_DIR', static):
+                self.assertIsNone(server._static_file('/link.txt'))
+
+    def test_a_request_that_is_not_get_is_logged_on_one_line(self):
+        with self.assertLogs('websockets.server', 'WARNING') as logs:
+            with socket.create_connection(('127.0.0.1', self.port), timeout=5) as sock:
+                sock.sendall(b'HEAD / HTTP/1.1\r\nHost: host.example.ts.net:8766\r\n\r\n')
+                self.assertEqual(sock.recv(1024), b'')
+            # The server logs why once the client has gone too.
+            deadline = time.monotonic() + 5
+            while not logs.records and time.monotonic() < deadline:
+                time.sleep(.01)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn('only GET', logs.output[0])
+        self.assertIn('HEAD', logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)
+
+    def test_websocket_upgrades_on_its_path_only(self):
+        cookie = self._cookie()
+        resp, _ = self._upgrade('/ws', cookie)
+        self.assertEqual(resp.status, 101)
+        resp, _ = self._upgrade('/ws', None)
+        self.assertEqual(resp.status, 403)
+        resp, _ = self._upgrade('/', cookie)
+        self.assertEqual(resp.status, 404)
 
 
 class ServiceWorkerShellTest(unittest.TestCase):

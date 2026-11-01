@@ -61,13 +61,11 @@ class AllowedOrigin:
         return self.hostname if self.http_port == default_port else f'{self.hostname}:{self.http_port}'
 
     @property
-    def ws_host(self) -> str:
-        return f'{self.hostname}:8765'
-
-    @property
     def ws_source(self) -> str:
+        # The WebSocket shares the page's host and port, which CSP 'self'
+        # already covers in current browsers; named outright for older WebKit.
         scheme = 'wss' if self.scheme == 'https' else 'ws'
-        return f'{scheme}://{self.ws_host}'
+        return f'{scheme}://{self.http_host}'
 
     @property
     def remote(self) -> bool:
@@ -150,16 +148,22 @@ class AccessController:
                 return origin
         return None
 
-    def authorize_http(self, host: str, tailscale_login: str | None) -> AuthContext | None:
+    def authorize_http(
+        self, host: str, tailscale_login: str | None,
+    ) -> tuple[AuthContext | None, str]:
+        """The caller's context, or None and why — for the log only, since the
+        reason says which setting to check."""
         origin = self._origin_for_http_host(host)
         if origin is None:
-            return None
+            return None, 'host not allowed'
         if not origin.remote:
-            return AuthContext(origin.hostname, 'local', False)
+            return AuthContext(origin.hostname, 'local', False), ''
         login = (tailscale_login or '').strip().lower()
+        if not login:
+            return None, 'missing tailscale identity'
         if login not in self.tailscale_users:
-            return None
-        return AuthContext(origin.hostname, login, True)
+            return None, 'tailscale user not allowed'
+        return AuthContext(origin.hostname, login, True), ''
 
     def _session_token(self, context: AuthContext) -> str:
         payload = {
@@ -231,7 +235,7 @@ class AccessController:
         if host_parts is None:
             return None, 'invalid host'
         hostname, port = host_parts
-        if hostname != origin.hostname or port != 8765:
+        if hostname != origin.hostname or (port or 80) != origin.http_port:
             return None, 'host does not match origin'
 
         if origin.remote:

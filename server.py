@@ -4,28 +4,28 @@ from __future__ import annotations
 """
 web-tmux control mode server
 
-  HTTP  127.0.0.1:8766  — static files
-  WS    127.0.0.1:8765  — terminal events
+  127.0.0.1:8766  — static files, and terminal events over a WebSocket on /ws
 """
 import asyncio
 import base64
 import contextlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
 import signal
-import threading
 import time
 from datetime import datetime
-from functools import partial
+from email.utils import formatdate
 from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 import agent_status
 import askpass
@@ -42,11 +42,32 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
 )
 log = logging.getLogger(__name__)
+# websockets logs every plain HTTP answer as a rejected handshake; the static
+# files and the cookie are logged below instead.
+logging.getLogger('websockets.server').setLevel(logging.WARNING)
+
+
+class _OneLineHandshakeFailure(logging.Filter):
+    """A request websockets can't parse — anything but GET, `curl -I` say —
+    is dropped unanswered, and logged with a full traceback. One line is
+    enough to say why."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() == 'opening handshake failed' and record.exc_info:
+            exc = record.exc_info[1]
+            cause = exc.__cause__ if exc is not None and exc.__cause__ is not None else exc
+            record.msg, record.args = 'request not understood (only GET is served): %s', (cause,)
+            record.exc_info = record.exc_text = None
+            record.levelno, record.levelname = logging.WARNING, 'WARNING'   # the client's fault
+        return True
+
+
+logging.getLogger('websockets.server').addFilter(_OneLineHandshakeFailure())
 
 HERE       = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, 'static')
-WS_PORT    = 8765
-HTTP_PORT  = 8766
+PORT       = 8766
+WS_PATH    = '/ws'
 SESSION    = os.environ.get('TMUX_SESSION', 'web')
 AUTH_PATH     = '/auth/session'
 VENDOR_PREFIX = '/vendor/'
@@ -169,75 +190,73 @@ def _security_headers() -> tuple[tuple[str, str], ...]:
     )
 
 
-class SecureStaticHandler(SimpleHTTPRequestHandler):
-    server_version = 'web-tmux'
-    sys_version = ''
+# Shown in the browser on a 403. It names no setting or identity: the reason
+# goes to server.log, for whoever runs the server.
+FORBIDDEN_TEXT = (
+    'web-tmux: this address or Tailscale user is not allowed here.\n'
+    'The reason is in server.log on the web-tmux server.\n'
+)
 
-    def version_string(self) -> str:
-        return self.server_version
 
-    def end_headers(self) -> None:
-        for name, value in _cache_headers(self._path()):
-            self.send_header(name, value)
-        for name, value in _security_headers():
-            self.send_header(name, value)
-        super().end_headers()
+def _http_response(
+    connection: ServerConnection,
+    status: HTTPStatus,
+    path: str,
+    body: bytes = b'',
+    headers: tuple[tuple[str, str], ...] = (),
+) -> Response:
+    """A plain HTTP answer, sent in place of a WebSocket handshake."""
+    all_headers = Headers([
+        ('Date', formatdate(usegmt=True)),
+        ('Connection', 'close'),
+        *headers,
+        *_cache_headers(path),
+        *_security_headers(),
+    ])
+    if status not in (HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED):
+        all_headers['Content-Length'] = str(len(body))
+    # websockets drops the connection as soon as the handshake returns, and
+    # by default the handshake returns with up to a quarter of its write
+    # limit still queued. A limit of zero makes it wait for the last byte.
+    connection.transport.set_write_buffer_limits(0)
+    log.info('http GET %s %d', path[:128], status)
+    return Response(status.value, status.phrase, all_headers, body)
 
-    def _path(self) -> str:
-        try:
-            return urlsplit(self.path).path
-        except ValueError:
-            return ''
 
-    # The completion line below (log_request) only appears once a response has
-    # been written. Logging the arrival too is what tells a request that never
-    # reached us apart from one that reached us and stalled.
-    def _log_arrival(self) -> None:
-        log.info('http start %s %s', self.command, self._path()[:128])
-
-    def _authorize(self):
-        return ACCESS.authorize_http(
-            _single_header(self.headers, 'Host') or '',
-            _single_header(self.headers, 'Tailscale-User-Login'),
-        )
-
-    def _forbidden(self) -> None:
-        log.warning('HTTP request rejected path=%s', urlsplit(self.path).path[:128])
-        self.send_response(HTTPStatus.FORBIDDEN)
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def _auth_session(self, context) -> None:
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header('Set-Cookie', ACCESS.session_cookie(context))
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def do_GET(self) -> None:
-        self._log_arrival()
-        context = self._authorize()
-        if context is None:
-            self._forbidden()
-            return
-        if self._path() == AUTH_PATH:
-            self._auth_session(context)
-            return
-        super().do_GET()
-
-    def do_HEAD(self) -> None:
-        self._log_arrival()
-        context = self._authorize()
-        if context is None:
-            self._forbidden()
-            return
-        if self._path() == AUTH_PATH:
-            self._auth_session(context)
-            return
-        super().do_HEAD()
-
-    def list_directory(self, path):
-        self.send_error(HTTPStatus.NOT_FOUND)
+def _static_file(path: str) -> str | None:
+    """The file under STATIC_DIR a request path names, or None: only regular
+    files, nothing hidden, and nothing outside STATIC_DIR by way of `..`, an
+    encoded slash or a symlink. A directory means its index.html."""
+    parts = [part for part in unquote(path).split('/') if part]
+    if any(part.startswith('.') or '\\' in part or '\0' in part for part in parts):
         return None
+    candidate = os.path.join(STATIC_DIR, *parts)
+    if os.path.isdir(candidate):
+        candidate = os.path.join(candidate, 'index.html')
+    root = os.path.realpath(STATIC_DIR)
+    real = os.path.realpath(candidate)
+    if os.path.commonpath((root, real)) != root or not os.path.isfile(real):
+        return None
+    return real
+
+
+def _static_response(connection: ServerConnection, request: Request, path: str) -> Response:
+    file_path = _static_file(path)
+    if file_path is None:
+        return _http_response(connection, HTTPStatus.NOT_FOUND, path)
+    stat = os.stat(file_path)
+    etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+    headers = (('ETag', etag), ('Last-Modified', formatdate(stat.st_mtime, usegmt=True)))
+    # The shell is revalidated on every use (see _cache_headers); an
+    # unchanged file costs a 304 rather than the whole of it.
+    supplied = _single_header(request.headers, 'If-None-Match') or ''
+    if etag in (tag.strip() for tag in supplied.split(',')):
+        return _http_response(connection, HTTPStatus.NOT_MODIFIED, path, headers=headers)
+    with open(file_path, 'rb') as stream:
+        body = stream.read()
+    content_type = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+    return _http_response(connection, HTTPStatus.OK, path, body,
+                          (('Content-Type', content_type), *headers))
 
 
 def _pane_id(value) -> str:
@@ -383,16 +402,6 @@ async def _run_tmux_size_safe(*args: str, host: TmuxHost | None = None) -> int:
         return await _run_tmux(*args, host=host)
     finally:
         await _run_tmux('set-option', '-g', 'window-size', 'latest', host=host)
-
-
-# ──────────────────────────────────────────── HTTP (static files, background thread)
-
-def _start_http() -> None:
-    handler = partial(SecureStaticHandler, directory=STATIC_DIR)
-    server = ThreadingHTTPServer(('127.0.0.1', HTTP_PORT), handler)
-    server.daemon_threads = True
-    log.info('HTTP  http://127.0.0.1:%d/', HTTP_PORT)
-    server.serve_forever()
 
 
 # ──────────────────────────────────────────── WebSocket
@@ -1807,7 +1816,34 @@ def _queue_file_request(client, msg: dict) -> asyncio.Task | None:
 
 # ──────────────────────────────────────────── main
 
-def _ws_process_request(connection: ServerConnection, request):
+def _process_request(connection: ServerConnection, request: Request):
+    """Everything on the one port comes through here. A WebSocket upgrade on
+    WS_PATH is checked and let through to ws_handler; anything else gets a
+    plain HTTP answer — the session cookie or a static file."""
+    try:
+        path = urlsplit(request.path).path
+    except ValueError:
+        path = ''
+    upgrade = (_single_header(request.headers, 'Upgrade') or '').lower() == 'websocket'
+    if upgrade and path == WS_PATH:
+        return _authorize_websocket(connection, request)
+    context, reason = ACCESS.authorize_http(
+        _single_header(request.headers, 'Host') or '',
+        _single_header(request.headers, 'Tailscale-User-Login'),
+    )
+    if context is None:
+        log.warning('HTTP request rejected: %s path=%s', reason, path[:128])
+        return _http_response(connection, HTTPStatus.FORBIDDEN, path, FORBIDDEN_TEXT.encode(),
+                              (('Content-Type', 'text/plain; charset=utf-8'),))
+    if upgrade:
+        return _http_response(connection, HTTPStatus.NOT_FOUND, path)
+    if path == AUTH_PATH:
+        return _http_response(connection, HTTPStatus.NO_CONTENT, path,
+                              headers=(('Set-Cookie', ACCESS.session_cookie(context)),))
+    return _static_response(connection, request, path)
+
+
+def _authorize_websocket(connection: ServerConnection, request: Request):
     if len(_active_connections) >= MAX_CONNECTIONS:
         return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, 'Too many connections\n')
     context, reason = ACCESS.authorize_websocket(
@@ -1825,10 +1861,6 @@ def _ws_process_request(connection: ServerConnection, request):
 
 async def main() -> None:
     global tmux, ASKPASS
-
-    # Static file server in a daemon thread
-    t = threading.Thread(target=_start_http, daemon=True)
-    t.start()
 
     # tmux control mode
     tmux_hosts.ensure_control_dir(HOSTS.values())
@@ -1857,14 +1889,15 @@ async def main() -> None:
         asyncio.get_running_loop().add_signal_handler(
             sig, lambda: stopping.done() or stopping.set_result(None))
 
-    # WebSocket server
-    log.info('WS    ws://127.0.0.1:%d/', WS_PORT)
+    # One port: the page and its files over HTTP, the terminal over the
+    # WebSocket on WS_PATH (see _process_request).
+    log.info('listening on http://127.0.0.1:%d/', PORT)
     async with serve(
         ws_handler,
         '127.0.0.1',
-        WS_PORT,
+        PORT,
         origins=ACCESS.allowed_origin_values,
-        process_request=_ws_process_request,
+        process_request=_process_request,
         compression=None,
         max_size=WS_MAX_MESSAGE_BYTES,
         max_queue=4,

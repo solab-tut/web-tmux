@@ -1,7 +1,7 @@
 'use strict';
 
 // WebSocket URL: when served over HTTPS (e.g. Tailscale serve), use wss://.
-const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:8765`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const FONT_FAMILY = '"SF Mono", Menlo, "Cascadia Code", "Fira Code", monospace';
 const MOBILE_BP   = 768;
 const CLIENT_PREFIX_KEY = '\x01'; // Ctrl+A, matching this app's tmux setup.

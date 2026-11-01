@@ -106,7 +106,7 @@ TMUX_SESSION=my-session ./server.sh
 ./server.sh stop   # stop without restarting
 ```
 
-`server.sh` only stops processes verified to be this checkout's server. On Linux, it can recover a missing or stale PID file by checking the process owner, working directory, and arguments in `/proc`. An unrelated PID is left alone; if another checkout or application occupies ports 8765/8766, startup aborts without killing it.
+`server.sh` only stops processes verified to be this checkout's server. On Linux, it can recover a missing or stale PID file by checking the process owner, working directory, and arguments in `/proc`. An unrelated PID is left alone; if another checkout or application occupies port 8766, startup aborts without killing it.
 
 ## Usage
 
@@ -286,14 +286,7 @@ minutes), with sockets and a per-host ssh log in
 
 ### How it works
 
-web-tmux listens on two local ports:
-
-| Port | Purpose |
-|------|---------|
-| 8766 | Static files (HTTP) |
-| 8765 | WebSocket terminal I/O |
-
-Both need to be exposed via `tailscale serve`. The browser automatically upgrades the WebSocket connection to `wss://` when the page is served over HTTPS.
+web-tmux listens on one local port, `127.0.0.1:8766`: the page and its files over HTTP, and the terminal over a WebSocket on `/ws`. `tailscale serve` exposes that port to your tailnet over HTTPS, and the browser then connects to the WebSocket with `wss://`.
 
 ### Setup
 
@@ -317,12 +310,13 @@ Restart the server after editing `.web-tmux.env`:
 ./server.sh stop && ./server.sh start
 ```
 
-Then expose both ports via `tailscale serve`:
+Then expose the port via `tailscale serve`:
 
 ```bash
 tailscale serve --bg --https=8766 http://127.0.0.1:8766
-tailscale serve --bg --https=8765 http://127.0.0.1:8765
 ```
+
+`./server.sh` reads `tailscale serve status` when it starts (no `sudo` needed for that) and warns if this forwarding is missing.
 
 > **Linux:** `tailscale serve` requires `sudo`. On macOS it typically does not.
 
@@ -341,9 +335,6 @@ tailscale serve status
 Expected output:
 
 ```
-https://<machine-name>.<tailnet>.ts.net:8765/ (tailnet only)
-|-- / proxy http://127.0.0.1:8765
-
 https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 |-- / proxy http://127.0.0.1:8766
 ```
@@ -352,10 +343,19 @@ https://<machine-name>.<tailnet>.ts.net:8766/ (tailnet only)
 
 ```bash
 tailscale serve --https=8766 off
-tailscale serve --https=8765 off
 ```
 
 > **Linux:** `sudo` is required here as well.
+
+### Upgrading from two ports
+
+Earlier versions also served the WebSocket on port 8765. After updating, remove that forwarding — `./server.sh` reminds you while it is still there:
+
+```bash
+tailscale serve --https=8765 off
+```
+
+A browser tab still running the old page cannot reach the terminal; reload it once.
 
 ### Public access (Tailscale Funnel)
 
@@ -373,7 +373,7 @@ tailscale serve --https=8765 off
 - Only the cookie-issuing response is `no-store`. The app shell is revalidated on every use and the versioned files under `/vendor/` are cached, so a browser can restore the page without going back to the network — none of it contains terminal data or secrets.
 - Invalid origins, identities, messages, and rate-limit violations are recorded in `server.log` without terminal input or cookie values. The page also reports a short connection diagnostic there when it reconnects (`client ...`), carrying only connection state — no terminal data. Set `CLIENT_DIAGNOSTICS = false` in `static/app.js` to turn it off.
 - Saved layouts are written to `~/.local/share/web-tmux/layouts.json` with mode 600 inside a mode 700 directory. They record working-directory paths, so treat the file as private; it never leaves the machine and is not part of the repository.
-- Keep `tailscale serve status` limited to the two tailnet-only listeners shown above.
+- Keep `tailscale serve status` limited to the tailnet-only listener shown above.
 - With `WEB_TMUX_SSH_HOSTS` set, anyone who gets into web-tmux (an allowed Tailscale identity, or a stolen session cookie) gets a shell on every listed host and on the jump hosts in between. Restricting the key with `command=` does not help — tmux itself can run anything — but `restrict,pty,from="<this server's tailnet IP>"` in each remote `authorized_keys` keeps the key from being used elsewhere or for forwarding. ssh runs with agent and X11 forwarding off and all configured forwardings cleared. The ssh socket directory is mode 700. Passphrases and passwords typed in the sign-in dialog only travel over the authenticated WebSocket to a mode-600 socket and on to ssh; they are never written to disk or logs, and only the browser that started a sign-in can answer its prompts. ssh runs without a controlling terminal and with an askpass that refuses everything outside a sign-in. Remote error text is logged (shortened, one line) but never sent to the browser, and terminal contents are not logged.
 
 ## Third-party browser assets
