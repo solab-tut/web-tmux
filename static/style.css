@@ -948,11 +948,12 @@ html.virtual-keyboard-visible #bottombar {
 }
 
 #bottombar button {
-  /* Each key as wide as its name; keys that don't fit scroll the bar. */
+  /* Square where the name fits, wider where it doesn't; keys that don't
+     fit the bar scroll it. */
   flex: 0 0 auto;
-  min-width: 44px;
+  min-width: 40px;
   height: 40px;
-  padding: 0 8px;
+  padding: 0 5px;
   color: var(--text-near);
   background: var(--btn-bar-bg);
   border: 1px solid var(--btn-bar-border);
@@ -960,7 +961,7 @@ html.virtual-keyboard-visible #bottombar {
   /* Key names in the system's UI face, as on a phone keyboard: the
      terminal's monospace reads small and wide at this size. */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-size: 13px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
   touch-action: manipulation;
@@ -971,7 +972,7 @@ html.virtual-keyboard-visible #bottombar {
 }
 #bottombar button:active { background: var(--btn-bar-bg-active); }
 #bottombar button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); box-shadow: none; }
-#bottombar .key-arrow { font-size: 15px; }
+#bottombar .key-arrow { font-size: 13px; }
 
 .sheet {
   position: absolute;
