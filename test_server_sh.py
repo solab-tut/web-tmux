@@ -63,6 +63,7 @@ class ServerLauncherTest(unittest.TestCase):
         launcher = (ROOT / 'server.sh').read_text()
         launcher = launcher.replace('PORT="8766"', f'PORT="{self.ports[0]}"')
         (directory / 'server.sh').write_text(launcher)
+        shutil.copyfile(ROOT / 'tailscale_setup.py', directory / 'tailscale_setup.py')
         config = directory / '.web-tmux.env'
         config.write_text(f'WEB_TMUX_ALLOWED_ORIGINS={self.ORIGIN}\n'
                           'WEB_TMUX_TAILSCALE_USERS=me@example.com\n')
@@ -189,7 +190,7 @@ class ServerLauncherTest(unittest.TestCase):
 
     def test_serve_config_that_reaches_the_server_brings_no_warning(self):
         self.write_serve_status({'box.example.ts.net:8766': {
-            'Handlers': {'/': {'Proxy': f'http://127.0.0.1:{self.ports[0]}'}}}})
+            'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8766'}}}})
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('WARNING', result.stderr)
@@ -199,6 +200,5 @@ class ServerLauncherTest(unittest.TestCase):
             'Handlers': {'/': {'Proxy': 'http://127.0.0.1:8765'}}}})
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f'tailscale serve --bg --https=8766 http://127.0.0.1:{self.ports[0]}',
-                      result.stderr)
+        self.assertIn('tailscale serve --bg --https=8766 http://127.0.0.1:8766', result.stderr)
         self.assertIn('tailscale serve --https=8765 off', result.stderr)

@@ -143,4 +143,8 @@ else
 fi
 
 echo ""
-echo "Setup complete. Run ./server.sh to start the server."
+echo "Python environment ready."
+echo ""
+# Tailscale: .web-tmux.env and `tailscale serve`. Asks before it writes or
+# runs anything; --yes answers yes for it.
+"$VENV_DIR/bin/python" tailscale_setup.py setup "$@"

@@ -130,38 +130,7 @@ stop_recorded_server() {
 check_tailscale_serve() {
   # Warn, never stop: the server runs either way, but without the right
   # `tailscale serve` no browser can reach it. Reading the status needs no sudo.
-  command -v tailscale >/dev/null 2>&1 || return 0
-  "$PYTHON" - "$PORT" "${WEB_TMUX_ALLOWED_ORIGINS:-}" "$(uname -s)" <<'PY' >&2 || true
-import json
-import subprocess
-import sys
-from urllib.parse import urlsplit
-
-port, origins, system = sys.argv[1], sys.argv[2], sys.argv[3]
-sudo = 'sudo ' if system == 'Linux' else ''
-try:
-    result = subprocess.run(['tailscale', 'serve', 'status', '--json'],
-                            capture_output=True, text=True, timeout=5)
-    if result.returncode != 0:
-        sys.exit(0)   # tailscaled not running, or not logged in
-    web = json.loads(result.stdout or '{}').get('Web') or {}
-except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
-    sys.exit(0)   # a CLI that says it differently
-target = f'http://127.0.0.1:{port}'
-for origin in filter(None, (o.strip() for o in origins.split(','))):
-    parts = urlsplit(origin)
-    if parts.scheme != 'https':
-        continue
-    proxy = (web.get(parts.netloc, {}).get('Handlers', {}).get('/') or {}).get('Proxy')
-    if proxy != target:
-        print(f'WARNING: tailscale serve does not forward {origin}/ to this server. Run:\n'
-              f'  {sudo}tailscale serve --bg --https={parts.port} {target}')
-for host, config in web.items():
-    if host.endswith(':8765') and (config.get('Handlers', {}).get('/') or {}).get('Proxy') == 'http://127.0.0.1:8765':
-        print('WARNING: web-tmux no longer uses port 8765; its old tailscale serve entry is still there. Remove it with:\n'
-              f'  {sudo}tailscale serve --https=8765 off')
-        break
-PY
+  "$PYTHON" tailscale_setup.py check-serve "$WEB_TMUX_ALLOWED_ORIGINS" || true
 }
 
 port_is_free() {
@@ -183,7 +152,7 @@ do_start() {
     exit 1
   fi
   if [ -z "${WEB_TMUX_ALLOWED_ORIGINS:-}" ]; then
-    echo "ERROR: no WEB_TMUX_ALLOWED_ORIGINS in $CONFIG_FILE; copy .web-tmux.env.example to $CONFIG_FILE (mode 600) and fill it in — see the README." >&2
+    echo "ERROR: no WEB_TMUX_ALLOWED_ORIGINS in $CONFIG_FILE; run ./setup.sh to write it from your Tailscale settings." >&2
     exit 1
   fi
   stop_recorded_server
