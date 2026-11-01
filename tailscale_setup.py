@@ -246,8 +246,11 @@ def setup(assume_yes: bool = False) -> int:
         for message, args in serve_problems(serve, origins):
             print(f'{message}\n  {shown(args)}')
             if _confirm('Run it now?', False, assume_yes):
-                done = subprocess.run([*sudo_prefix(), cli, *args])
-                if done.returncode != 0:
+                try:
+                    ok = subprocess.run([*sudo_prefix(), cli, *args]).returncode == 0
+                except OSError:   # no sudo on this machine, say
+                    ok = False
+                if not ok:
                     print('That did not work; run the command above yourself.')
 
     print('\nNext: start web-tmux with ./server.sh')

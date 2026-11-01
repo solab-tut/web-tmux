@@ -183,6 +183,15 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(self.calls(), ['serve --bg --https=8766 http://127.0.0.1:8766'])
         self.assertIn(f'open {ORIGIN}/', out)
 
+    def test_a_forward_that_cannot_be_run_is_left_to_the_user(self):
+        self.answer('status.json', status())
+        self.answer('serve.json', {})
+        with patch.object(tailscale_setup, 'sudo_prefix', lambda: ['/nonexistent/sudo']):
+            code, out = self.run_setup(assume_yes=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn('run the command above yourself', out)
+        self.assertTrue(self.config().exists())
+
     def test_without_a_terminal_or_yes_nothing_is_written(self):
         self.answer('status.json', status())
         code, out = self.run_setup()
