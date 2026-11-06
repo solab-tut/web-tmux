@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import os
+import re
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
+import time
 import unittest
 
 import tmux_hosts
@@ -58,9 +61,9 @@ class ArgvTest(unittest.TestCase):
         argv = REMOTE.master_argv()
         for flag in ('-N', '-f'):
             self.assertIn(flag, argv)
-        self.assertIn('ControlMaster=yes', argv)
-        # -M on top of ControlMaster=yes would make it an "ask" master that
-        # wants every shared session approved through askpass.
+        self.assertIn('ControlMaster=auto', argv)
+        # -M on top of the option could make it an "ask" master that wants
+        # every shared session approved through askpass.
         self.assertNotIn('-M', argv)
         self.assertNotIn('-M', REMOTE.master_argv(interactive=True))
         self.assertIn('ControlPersist=10m', argv)
@@ -402,6 +405,80 @@ class FakeSshIntegrationTest(unittest.TestCase):
         self.assertEqual(image['mime'], 'image/png')
         self.assertEqual(base64.b64decode(image['data']), png)
 
+@unittest.skipUnless(os.path.exists('/usr/sbin/sshd') and shutil.which('ssh'), 'needs OpenSSH')
+class StaleSocketTest(unittest.TestCase):
+    """A real ssh against a private sshd: what a socket left behind by a power
+    cut does is OpenSSH's behaviour, which a stand-in couldn't show."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='wt', dir='/tmp')   # short: unix socket paths
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        for key in ('hostkey', 'userkey'):
+            subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '',
+                            '-f', os.path.join(self.tmp, key)], check=True)
+        shutil.copy(os.path.join(self.tmp, 'userkey.pub'), os.path.join(self.tmp, 'authorized_keys'))
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        sshd_config = os.path.join(self.tmp, 'sshd_config')
+        with open(sshd_config, 'w') as fh:
+            fh.write(f'''Port {port}
+ListenAddress 127.0.0.1
+HostKey {self.tmp}/hostkey
+AuthorizedKeysFile {self.tmp}/authorized_keys
+PasswordAuthentication no
+StrictModes no
+UsePAM no
+PidFile {self.tmp}/sshd.pid
+''')
+        sshd = subprocess.Popen(['/usr/sbin/sshd', '-D', '-f', sshd_config, '-E', f'{self.tmp}/sshd.log'])
+        self.addCleanup(sshd.wait)
+        self.addCleanup(sshd.terminate)
+        for _ in range(50):
+            with socket.socket() as probe:
+                if probe.connect_ex(('127.0.0.1', port)) == 0:
+                    break
+            time.sleep(0.1)
+        with open(os.path.join(self.tmp, 'hostkey.pub')) as fh:
+            hostkey = fh.read()
+        with open(os.path.join(self.tmp, 'known_hosts'), 'w') as fh:
+            fh.write(f'[127.0.0.1]:{port} {hostkey}')
+        self.config = os.path.join(self.tmp, 'ssh_config')
+        with open(self.config, 'w') as fh:
+            fh.write(f'''Host box
+  HostName 127.0.0.1
+  Port {port}
+  IdentityFile {self.tmp}/userkey
+  IdentitiesOnly yes
+  IdentityAgent none
+  UserKnownHostsFile {self.tmp}/known_hosts
+''')
+        self.host = TmuxHost('box', 'tmux', self.tmp)
+        # By name, not `-O exit`: a master without its socket can't be told to.
+        self.addCleanup(subprocess.run, ['pkill', '-f', f'ControlPath={self.tmp}/'])
+
+    def ssh(self, argv):
+        return subprocess.run(['ssh', '-F', self.config, *argv[1:]], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=20)
+
+    def test_master_replaces_a_socket_left_by_a_crash(self):
+        # The path as ssh really expands it: `ssh -G` hashes %C differently.
+        missing = self.ssh(self.host.master_ctl_argv('check')).stderr
+        path = re.search(r'Control socket connect\((.+?)\):', missing).group(1)
+        with socket.socket(socket.AF_UNIX) as stale:
+            stale.bind(path)    # closed unlistened: exists, refuses connections
+        self.assertIn('Connection refused', self.ssh(self.host.master_ctl_argv('check')).stderr)
+
+        # Off any pipe, as in _start_master: a master that doesn't get its
+        # socket keeps stderr open, and reading it would never finish.
+        master = subprocess.run(['ssh', '-F', self.config, *self.host.master_argv()[1:]],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=20)
+        self.assertEqual(master.returncode, 0)
+
+        self.assertEqual(self.ssh(self.host.master_ctl_argv('check')).returncode, 0)
+
+
 class SignInIntegrationTest(unittest.TestCase):
     """The whole askpass path with real processes: a stand-in `ssh` whose
     master asks "$SSH_ASKPASS" for a password the way OpenSSH does, the
@@ -420,7 +497,7 @@ class SignInIntegrationTest(unittest.TestCase):
 case " $* " in
   *" -O check "*) [ -e {self.up} ] && exit 0; exit 255 ;;
   *" -O exit "*) rm -f {self.up}; exit 0 ;;
-  *"ControlMaster=yes"*)
+  *"ControlMaster=auto"*)
     case " $* " in *"BatchMode=yes"*) echo "me@box: Permission denied (password)." >&2; exit 255 ;; esac
     tries=0
     while [ $tries -lt 3 ]; do

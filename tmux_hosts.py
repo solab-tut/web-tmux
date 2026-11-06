@@ -10,8 +10,8 @@ the browser can only pick one of the configured aliases.
 Every tmux invocation goes through TmuxHost.argv(), so the rest of the code
 runs the same tmux commands whether the server is local or remote. Remote
 commands share one ssh connection per host (ControlMaster), started
-explicitly by ensure_master() — see there for why it is not left to
-ControlMaster=auto.
+explicitly by ensure_master() — see there for why ordinary calls don't start
+it themselves.
 
 HostDirectory keeps a cached, never-blocking view of every host's sessions
 for the sidebar; a dead host costs a background timeout, not a stalled UI.
@@ -139,13 +139,17 @@ class TmuxHost:
         return [*self._ssh_options(), '-T', '--', self.name, self._remote(['sh', '-c', script])]
 
     def master_argv(self, interactive: bool = False) -> list[str]:
-        argv = self._ssh_options(master='yes')
+        # auto, not yes: a socket left by a crash or a power cut still exists,
+        # and only auto replaces it. With yes, ssh would sign in, then find the
+        # name taken and carry on with no socket: a connection nothing can
+        # share, and a host that looks signed out to every other call.
+        argv = self._ssh_options(master='auto')
         if interactive:
             # Let ssh ask; SSH_ASKPASS sends the questions to the browser.
             argv[argv.index('BatchMode=yes')] = 'BatchMode=no'
         persist = AUTH_CONTROL_PERSIST if interactive else CONTROL_PERSIST
-        # ControlMaster=yes alone, never with -M as well: ssh counts that as
-        # -M given twice, an "ask" master that wants askpass to approve
+        # Never -M as well: with ControlMaster=yes ssh counts that as -M given
+        # twice, an "ask" master that wants askpass to approve
         # every command sharing the connection — which ours refuses.
         return [*argv, '-o', f'ControlPersist={persist}', '-N', '-f', '--', self.name]
 
@@ -405,8 +409,8 @@ async def ensure_master(host: TmuxHost, ask=None) -> str:
     """Make sure `host` has a live shared ssh connection: '' when it does,
     else 'unreachable' or 'auth_required'.
 
-    Started on its own with -f and stdio off any pipe. With
-    ControlMaster=auto, whichever ordinary call happened to come first would
+    Started on its own with -f and stdio off any pipe. If ordinary calls
+    used ControlMaster=auto, whichever happened to come first would
     become the master and keep its stdout pipe (or the control client's PTY)
     open for the whole ControlPersist time, so that call would never see EOF.
     All other calls use ControlMaster=no: they ride the socket when it is
