@@ -306,8 +306,6 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 
 #topbar-spacer { flex: 1 1 0; min-width: 0; }
 
-#font-size-picker,
-#theme-picker,
 #virtual-keyboard-picker {
   flex-shrink: 0;
 }
@@ -338,14 +336,10 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 .topbar-btn.on     { background: var(--bg-active); color: var(--text-bright); }
 
 /* ── Top-bar pickers ─────────────────────────────── */
-#theme-picker,
-#font-size-picker,
 #virtual-keyboard-picker {
   position: relative;
 }
 
-#theme-menu,
-#font-size-menu,
 #virtual-keyboard-menu {
   position: absolute;
   right: 0;
@@ -362,12 +356,8 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   gap: 2px;
 }
 
-#theme-menu[hidden],
-#font-size-menu[hidden],
 #virtual-keyboard-menu[hidden] { display: none; }
 
-#theme-menu button,
-#font-size-menu button,
 #virtual-keyboard-menu button {
   width: 100%;
   padding: 6px 10px;
@@ -381,15 +371,11 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
   font-size: 13px;
 }
 
-#theme-menu button:hover,
-#font-size-menu button:hover,
 #virtual-keyboard-menu button:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
 }
 
-#theme-menu button.active,
-#font-size-menu button.active,
 #virtual-keyboard-menu button.active {
   color: var(--accent);
 }
@@ -810,6 +796,27 @@ body > div[style*="top: -50000px"][style*="width: 50000px"] {
 }
 
 /* ── Backdrop (mobile drawer overlay) ────────────── */
+/* Stays in sight however long the lists above it grow. */
+#settings-open {
+  position: sticky;
+  bottom: 0;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  color: var(--text);
+  border: 0;
+  border-top: 1px solid var(--border-sub);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#settings-open:hover { background: var(--bg-hover); color: var(--text-bright); }
+#settings-open svg { width: 16px; height: 16px; flex: none; }
+
 #sidebar-backdrop {
   display: none;
   position: absolute;
@@ -1027,6 +1034,34 @@ html.virtual-keyboard-visible #bottombar {
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
+}
+
+.settings-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.settings-choices button {
+  flex: 1 1 0;
+  min-width: 44px;
+  min-height: 36px;
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  background: var(--bg-ctrl);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.settings-choices button.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+#settings-sheet .sheet-card {
+  left: 50%;
+  right: auto;
+  width: min(420px, calc(100% - 24px));
+  transform: translateX(-50%);
 }
 
 .sheet-label {

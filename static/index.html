@@ -47,35 +47,6 @@
           <button data-virtual-keyboard-mode="off" type="button">Off</button>
         </div>
       </div>
-      <div id="font-size-picker">
-        <button id="font-size-toggle" class="topbar-btn" type="button" aria-label="Font size" title="Change font size">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <text x="3" y="17" font-family="serif" font-size="14" font-weight="bold" fill="currentColor">A</text>
-            <text x="13" y="20" font-family="serif" font-size="10" fill="currentColor">a</text>
-          </svg>
-        </button>
-        <div id="font-size-menu" hidden>
-          <button data-font-size="11" type="button">11</button>
-          <button data-font-size="12" type="button">12</button>
-          <button data-font-size="13" type="button">13</button>
-          <button data-font-size="14" type="button">14</button>
-          <button data-font-size="16" type="button">16</button>
-          <button data-font-size="18" type="button">18</button>
-        </div>
-      </div>
-      <div id="theme-picker">
-        <button id="theme-toggle" class="topbar-btn" type="button" aria-label="Theme" title="Change theme">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>
-            <path d="M12 4a8 8 0 010 16z" fill="currentColor"/>
-          </svg>
-        </button>
-        <div id="theme-menu" hidden>
-          <button data-theme-name="dark" type="button">Dark</button>
-          <button data-theme-name="light" type="button">Light</button>
-          <button data-theme-name="nord" type="button">Nord</button>
-        </div>
-      </div>
       <div id="status" class="disconnected" title="disconnected">●</div>
     </div>
 
@@ -120,6 +91,14 @@
           </div>
           <div id="layout-list"></div>
         </div>
+        <button id="settings-open" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h9M17 7h3M4 17h3M11 17h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <circle cx="15" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <circle cx="9" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+          <span>Settings</span>
+        </button>
       </div>
       <div id="main">
         <div id="pane-area"></div>
@@ -138,6 +117,31 @@
       <button class="vkey key-arrow" data-key="down" type="button" aria-label="Down" title="Down">↓</button>
       <button class="vkey key-arrow" data-key="left" type="button" aria-label="Left" title="Left">←</button>
       <button class="vkey key-arrow" data-key="right" type="button" aria-label="Right" title="Right">→</button>
+    </div>
+
+    <div id="settings-sheet" class="sheet hidden" aria-hidden="true">
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="sheet-head">
+          <div id="settings-title">Settings</div>
+          <button id="settings-close" class="sheet-close" type="button" aria-label="Close settings">×</button>
+        </div>
+        <div class="sheet-label">Theme</div>
+        <div id="settings-theme" class="settings-choices">
+          <button data-theme-name="dark" type="button">Dark</button>
+          <button data-theme-name="light" type="button">Light</button>
+          <button data-theme-name="nord" type="button">Nord</button>
+        </div>
+        <div class="sheet-label">Font size</div>
+        <div id="settings-font-size" class="settings-choices">
+          <button data-font-size="11" type="button">11</button>
+          <button data-font-size="12" type="button">12</button>
+          <button data-font-size="13" type="button">13</button>
+          <button data-font-size="14" type="button">14</button>
+          <button data-font-size="16" type="button">16</button>
+          <button data-font-size="18" type="button">18</button>
+        </div>
+      </div>
     </div>
 
     <!-- iOS cannot expose Paste on xterm's off-screen input textarea. -->

@@ -152,7 +152,7 @@ Layouts live in `~/.local/share/web-tmux/layouts.json` (see
 
 ### Theme and font size
 
-Click the **◑** (theme) or **Aa** (font size) icons in the top-right corner to open a dropdown. Both settings are saved in `localStorage` and restored on the next visit.
+Open **Settings** at the bottom of the sidebar to change them. Both settings are saved in `localStorage` and restored on the next visit.
 
 | Theme | Description |
 |-------|-------------|

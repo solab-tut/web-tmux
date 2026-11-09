@@ -140,7 +140,7 @@ function applyTheme(name, save = true) {
   Object.values(panes).forEach(p => { p.term.options.theme = xt; });
   // Overlay rows are coloured from the theme at build time, so drop them.
   if (window.HistoryOverlay) HistoryOverlay.close();
-  document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
+  document.querySelectorAll('#settings-theme [data-theme-name]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.themeName === name);
   });
 }
@@ -171,7 +171,7 @@ function applyFontSize(size, save = true) {
   Object.values(panes).forEach(p => { p.term.options.fontSize = size; });
   // Row height changes, so the overlay's metrics and rows are both stale.
   if (window.HistoryOverlay) HistoryOverlay.close();
-  document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
+  document.querySelectorAll('#settings-font-size [data-font-size]').forEach(btn => {
     btn.classList.toggle('active', parseInt(btn.dataset.fontSize, 10) === size);
   });
   if (Object.keys(panes).length > 0) {
@@ -4144,40 +4144,39 @@ function applyViewportFix() {
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
-document.getElementById('theme-toggle').addEventListener('click', (e) => {
-  const menu = document.getElementById('theme-menu');
-  menu.hidden = !menu.hidden;
-  e.stopPropagation();
+document.querySelectorAll('#settings-theme [data-theme-name]').forEach(btn => {
+  btn.addEventListener('click', () => applyTheme(btn.dataset.themeName));
 });
 
-document.querySelectorAll('#theme-menu [data-theme-name]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    applyTheme(btn.dataset.themeName);
-    document.getElementById('theme-menu').hidden = true;
-  });
+document.querySelectorAll('#settings-font-size [data-font-size]').forEach(btn => {
+  btn.addEventListener('click', () => applyFontSize(parseInt(btn.dataset.fontSize, 10)));
 });
 
 document.addEventListener('click', () => {
-  const menu = document.getElementById('theme-menu');
-  if (menu) menu.hidden = true;
-  const fsMenu = document.getElementById('font-size-menu');
-  if (fsMenu) fsMenu.hidden = true;
   const keyboardMenu = document.getElementById('virtual-keyboard-menu');
   if (keyboardMenu) keyboardMenu.hidden = true;
 });
 
-document.getElementById('font-size-toggle').addEventListener('click', (e) => {
-  const menu = document.getElementById('font-size-menu');
-  menu.hidden = !menu.hidden;
-  e.stopPropagation();
-});
+function setSettingsSheetOpen(open) {
+  const sheet = document.getElementById('settings-sheet');
+  sheet.classList.toggle('hidden', !open);
+  sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
 
-document.querySelectorAll('#font-size-menu [data-font-size]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    applyFontSize(parseInt(btn.dataset.fontSize, 10));
-    document.getElementById('font-size-menu').hidden = true;
-  });
+function closeSettingsSheet() {
+  setSettingsSheetOpen(false);
+  focusActivePane();
+}
+
+document.getElementById('settings-open').addEventListener('click', () => {
+  // On a phone the sidebar would cover the terminal the choices restyle.
+  if (isMobileWidth()) setSidebarOpen(false);
+  setSettingsSheetOpen(true);
+  // Keys must not reach the terminal behind it, and iOS drops its keyboard.
+  document.activeElement?.blur();
 });
+document.getElementById('settings-close').addEventListener('click', closeSettingsSheet);
+document.querySelector('#settings-sheet .sheet-backdrop').addEventListener('click', closeSettingsSheet);
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
