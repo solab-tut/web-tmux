@@ -45,6 +45,7 @@
     isMobile:      () => false,
     getTheme:      () => ({}),
     focusPane:     () => {},
+    onSelectionMode: () => {},
   };
 
   let root      = null;   // #hist
@@ -61,6 +62,7 @@
   let buildEnd     = 0;      // one past the last materialised line
   let totalLines   = 0;      // buffer.length at last sync
   let padFrame     = null;
+  let touchStartX  = 0;
   let touchStartY  = 0;
   let touchStartAt = 0;
   let touchMoved   = false;
@@ -235,7 +237,8 @@
 
   function renderLine(line, cell, theme, ratio) {
     const last = lastMeaningfulCol(line, cell);
-    if (last < 0) return '<div class="hist-row"></div>';
+    const open = line.isWrapped ? '<div class="hist-row hist-wrapped">' : '<div class="hist-row">';
+    if (last < 0) return open + '</div>';
 
     let html = '';
     let runText = '';
@@ -256,7 +259,7 @@
       runText += chars === '' ? ' ' : chars;
     }
     if (runKey !== null) html += span(runText, runStyle);
-    return '<div class="hist-row">' + html + '</div>';
+    return open + html + '</div>';
   }
 
   function span(text, style) {
@@ -425,6 +428,7 @@
     if (pinned === on) return;
     pinned = on;
     root.classList.toggle('selecting', on);
+    deps.onSelectionMode(on);
     if (exitBtn) {
       const label = on ? 'Close selection' : 'Back to live';
       exitBtn.setAttribute('aria-label', label);
@@ -569,21 +573,37 @@
   function onOverlayTouchStart(e) {
     if (!attachedPane) return;
     touching = true;
+    touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
     touchStartAt = Date.now();
     touchMoved = false;
     if (bottomResetTimer) { clearTimeout(bottomResetTimer); bottomResetTimer = null; }
+    cancelOverlayPress();
+    // Armed at the bottom the rows are hidden, so a long press has nothing to
+    // select yet: it opens selection mode, as it does in a mouse-tracking pane.
+    if (!pinned && !engaged && e.touches.length === 1) {
+      const pane = attachedPane;
+      overlayPressTimer = setTimeout(() => {
+        overlayPressTimer = null;
+        if (attachedPane === pane && !touchMoved) openSelection(pane);
+      }, LONG_PRESS_MS);
+    }
     // Built here, before the pan has moved a pixel — never from onScroll, where
     // it would cost a frame at the very start of the gesture.
     if (buildStart >= buildEnd) materialise(attachedPane);
   }
 
   function onOverlayTouchMove(e) {
-    if (Math.abs(e.touches[0].clientY - touchStartY) > TAP_MOVE_PX) touchMoved = true;
+    if (Math.abs(e.touches[0].clientY - touchStartY) > TAP_MOVE_PX
+        || Math.abs(e.touches[0].clientX - touchStartX) > TAP_MOVE_PX) {
+      touchMoved = true;
+      cancelOverlayPress();
+    }
   }
 
   function onOverlayTouchEnd(e) {
     touching = false;
+    cancelOverlayPress();
     if (!attachedPane) return;
     if (!pinned && !touchMoved && Date.now() - touchStartAt < TAP_MAX_MS && atBottom()) {
       // A tap on the transparent armed surface means "focus the terminal".
@@ -614,9 +634,14 @@
   let swipe = null;       // { pane, col, row, x, y, startX, startY, lastY, lastAt, acc, step, v }
   let flingFrame = null;
   let longPressTimer = null;
+  let overlayPressTimer = null;   // the same press, on the armed overlay
 
   // Holding a finger still for this long turns the screen into selectable text.
   const LONG_PRESS_MS = 500;
+
+  function cancelOverlayPress() {
+    if (overlayPressTimer) { clearTimeout(overlayPressTimer); overlayPressTimer = null; }
+  }
 
   function cancelLongPress() {
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
@@ -635,6 +660,64 @@
     scroller.scrollTop = maxScrollTop();
     setPinned(true);
     setEngaged(true);
+  }
+
+  function toggleSelection() {
+    if (pinned) {
+      close();
+      deps.focusPane();
+    } else {
+      openSelection(deps.getActivePane());
+    }
+  }
+
+  // Whether the user is holding text in the overlay, which focusing the
+  // terminal would collapse.
+  function isSelecting() {
+    if (pinned) return true;
+    if (!engaged) return false;
+    const sel = window.getSelection();
+    return !!sel && !sel.isCollapsed && rowsEl.contains(sel.anchorNode);
+  }
+
+  // Once text is selected focus has left xterm's textarea, so keys arrive
+  // here. Escape is caught even while the textarea has focus: it means "leave
+  // selection mode", not a key for the application.
+  function onSelectionKey(e) {
+    if (!pinned || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (['Shift', 'CapsLock', 'Meta', 'Control', 'Alt'].includes(e.key)) return;
+    const pane = attachedPane;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      deps.focusPane();
+      return;
+    }
+    if (!pane || document.activeElement === pane.term.textarea) return;   // xterm's input closes it
+    if (document.activeElement && document.activeElement.matches('input, textarea')) return;
+    close();
+    deps.focusPane();
+    if (e.key.length === 1 && !e.isComposing) {
+      e.preventDefault();
+      pane.term._core.coreService.triggerDataEvent(e.key, true);
+    }
+  }
+
+  // Rows are one block each, so a native copy breaks a long line wherever the
+  // terminal wrapped it. Rebuild the text with those rows joined back up.
+  function onOverlayCopy(e) {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount || !rowsEl.contains(sel.anchorNode)) return;
+    const rows = sel.getRangeAt(0).cloneContents().querySelectorAll('.hist-row');
+    if (rows.length < 2) return;
+    let text = '';
+    rows.forEach((row, i) => {
+      if (i > 0 && !row.classList.contains('hist-wrapped')) text += '\n';
+      text += row.textContent;
+    });
+    e.clipboardData.setData('text/plain', text);
+    e.preventDefault();
   }
 
   function stopFling() {
@@ -752,6 +835,8 @@
     // The pane already is the active one; suppress the pane-wrap handler so a
     // selection drag inside the overlay is not interrupted by a refocus.
     root.addEventListener('mousedown', (e) => { if (engaged) e.stopPropagation(); });
+    root.addEventListener('copy', onOverlayCopy);
+    document.addEventListener('keydown', onSelectionKey, { capture: true });
 
     if (exitBtn) {
       exitBtn.addEventListener('click', () => {
@@ -779,5 +864,7 @@
     sync,
     noteOutput,
     isEngaged: () => engaged,
+    isSelecting,
+    toggleSelection,
   };
 })();

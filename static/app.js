@@ -1818,6 +1818,8 @@ function selectPane(paneId, opts) {
 // hand focus back to xterm.
 function fieldOwnsKeyboard() {
   if (document.querySelector('.sheet:not(.hidden)')) return true;
+  // Focusing xterm's textarea collapses a text selection in the overlay.
+  if (HistoryOverlay.isSelecting()) return true;
   return !!document.activeElement?.classList.contains('item-inline-input');
 }
 
@@ -3206,13 +3208,12 @@ function buildSnapshotFrame(msg, term) {
   //
   // Draw with every mode that moves or clips the cursor at its default:
   // full scroll region, absolute addressing, autowrap, replace mode, plain
-  // attributes and the ASCII charset. MOUSE_DISABLE_SEQS before and after the
-  // rows neutralizes any mouse-enable sequence inside the captured content;
-  // the modes tmux reports are switched back on at the end.
+  // attributes and the ASCII charset. The mouse modes are left alone until the
+  // end of the frame: passing through "tracking off" makes xterm drop the
+  // listeners of a drag in progress, and it never gets them back.
   const parts = [asciiBytes(
     '\x1b[?25l\x1b[?1049l' +
-    '\x1b[r\x1b[?6l\x1b[?7h\x1b[4l\x1b[0m\x1b(B\x0f' +
-    MOUSE_DISABLE_SEQS
+    '\x1b[r\x1b[?6l\x1b[?7h\x1b[4l\x1b[0m\x1b(B\x0f'
   )];
 
   const rows = splitCaptureRows(b64ToUint8(msg.data || ''));
@@ -3225,14 +3226,15 @@ function buildSnapshotFrame(msg, term) {
   }
 
   // capture-pane -e leaves the last row's attributes active.
-  let tail = '\x1b[0m' + MOUSE_DISABLE_SEQS;
-  // Mouse tracking the application really asked for (Claude Code, htop, vim
-  // with mouse=a) comes back from tmux's state, not from the captured bytes:
-  // wheel and swipe reach the application only while it is on.
+  let tail = '\x1b[0m';
+  // Mouse tracking follows tmux's state, not the captured bytes: wheel and
+  // swipe reach the application only while it is on. Setting one protocol
+  // replaces the previous one directly, so tracking never goes off in between.
   if (flag('mouse_all_flag', false)) tail += '\x1b[?1003h';
   else if (flag('mouse_button_flag', false)) tail += '\x1b[?1002h';
   else if (flag('mouse_standard_flag', false)) tail += '\x1b[?1000h';
-  if (flag('mouse_sgr_flag', false)) tail += '\x1b[?1006h';
+  else tail += MOUSE_DISABLE_SEQS;
+  tail += flag('mouse_sgr_flag', false) ? '\x1b[?1006h' : '\x1b[?1006l';
   if (!fullRegion) tail += `\x1b[${regionTop + 1};${regionBottom + 1}r`;
   if (!flag('wrap_flag', true)) tail += '\x1b[?7l';
   if (flag('insert_flag', false)) tail += '\x1b[4h';
@@ -3446,6 +3448,7 @@ document.getElementById('ctrl-toggle').addEventListener('click', () => {
 });
 
 document.getElementById('paste-toggle').addEventListener('click', openPasteSheet);
+document.getElementById('select-toggle').addEventListener('click', () => HistoryOverlay.toggleSelection());
 document.getElementById('paste-close').addEventListener('click', closePasteSheet);
 document.getElementById('paste-cancel').addEventListener('click', closePasteSheet);
 document.getElementById('paste-send').addEventListener('click', sendPasteSheetText);
@@ -4183,6 +4186,11 @@ HistoryOverlay.init({
   isMobile:      usesTouchInterface,
   getTheme:      () => XTERM_THEMES[currentThemeName()] || XTERM_THEMES.dark,
   focusPane:     () => focusActivePane({ retries: 2 }),
+  onSelectionMode: (on) => {
+    const btn = document.getElementById('select-toggle');
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  },
 });
 
 const _host = location.hostname.split('.')[0];
