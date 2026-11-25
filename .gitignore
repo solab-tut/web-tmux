@@ -5,3 +5,4 @@ server.pid
 .DS_Store
 .venv/
 .web-tmux.env
+docs/verification-*.md
