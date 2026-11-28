@@ -1,17 +1,19 @@
 # web-tmux
 
-Your tmux sessions in a browser — on your laptop, tablet or phone — reached privately over [Tailscale](https://tailscale.com).
+**Check on your coding agents from your phone.** web-tmux puts your tmux sessions in the browser and shows which Claude Code, Codex or Hermes Agent pane is waiting for you — answer it right there, over your own [Tailscale](https://tailscale.com) network.
 
 [日本語](README.ja.md)
 
 <p>
-  <img src="docs/images/screenshot-desktop.png" alt="web-tmux in a desktop browser: the sidebar lists three sessions and the current session's windows and panes; the terminal shows a window split into vim, a test run and git log" width="68%">
-  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with esc, tab, Shift+Tab, ctrl, enter and arrow keys along the bottom" width="26%">
+  <img src="docs/demo/web-tmux-desktop.gif" alt="web-tmux in a desktop browser: Claude Code works in one pane, then stops at &quot;Do you want to run this command?&quot; and its window, pane and session in the sidebar turn to a warning sign; after Yes is chosen in the browser the tests run, pass, and the sign becomes a check mark" width="68%">
+  <img src="docs/demo/web-tmux-mobile.gif" alt="web-tmux on a phone: the Claude Code pane is zoomed to full screen from the sidebar, the approval prompt is answered Yes with the key bar along the bottom (esc, tab, Shift+Tab, ctrl, enter, arrows), and the tests run and pass" width="26%">
 </p>
 
-- **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later
+<sub>Recorded with a fictional demo project; the agent pane is scripted. Also as MP4: <a href="docs/demo/web-tmux-desktop.mp4">desktop</a> · <a href="docs/demo/web-tmux-mobile.mp4">phone</a>.</sub>
+
+- **See which agent is waiting for you**: Claude Code, Codex and Hermes Agent panes are marked working, waiting for you, or done — in the sidebar, on the ☰ button and in the browser tab's title — with nothing to set up
 - **Made for phones and tablets too**: zoom any pane to full screen with a tap, Esc / Tab / Shift+Tab / Ctrl / arrow keys, Japanese and other IME input
-- **Keeps an eye on coding agents**: Claude Code, Codex and Hermes Agent panes show whether they are working, waiting for you, or done
+- **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later
 - **tmux on other machines** over SSH, from the same page, without putting them on your tailnet
 - **Private by design**: only your own tailnet login gets in; nothing is open to the internet or the LAN
 
@@ -76,6 +78,11 @@ This example places the web-tmux server inside a private LAN protected by a fire
 See [tmux on other hosts (SSH)](#tmux-on-other-hosts-ssh) for SSH host configuration.
 
 ## Features
+
+<p>
+  <img src="docs/images/screenshot-desktop.png" alt="web-tmux in a desktop browser: the sidebar lists three sessions and the current session's windows and panes; the terminal shows a window split into vim, a test run and git log" width="68%">
+  <img src="docs/images/screenshot-phone.png" alt="web-tmux on a phone: the vim pane zoomed to full screen, with esc, tab, Shift+Tab, ctrl, enter and arrow keys along the bottom" width="26%">
+</p>
 
 - Sidebar showing sessions, windows, and panes with live updates
 - Switch, rename, and delete sessions and windows inline
@@ -439,3 +446,7 @@ tail -f server.log
 ```
 
 `server.log` is recreated at startup with mode 600. Rejection reasons are logged, but terminal contents, input data, and cookie values are not.
+
+## License
+
+web-tmux is released under the [MIT License](LICENSE). The browser assets vendored in `static/vendor/` keep their own licenses; see [Third-party browser assets](#third-party-browser-assets).

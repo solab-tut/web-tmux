@@ -1,17 +1,19 @@
 # web-tmux
 
-ノートPCでも、タブレットでも、スマホでも。ブラウザからいつもの tmux を操作できます。接続は [Tailscale](https://tailscale.com) の中だけで完結します。
+**コーディングエージェントの承認待ちを、スマホから。** web-tmux はいつもの tmux をブラウザで開き、Claude Code・Codex・Hermes Agent のどのペインがあなたを待っているかを一目で表示します。その場で答えて、作業を続けさせられます。接続は自分の [Tailscale](https://tailscale.com) の中だけで完結します。
 
 [English](README.md)
 
 <p>
-  <img src="docs/images/screenshot-desktop.png" alt="デスクトップのブラウザで動く web-tmux：サイドバーに3つのセッションと、現在のセッションのウィンドウ・ペインが並び、端末は vim・テスト実行・git log の3ペインに分割されている" width="68%">
-  <img src="docs/images/screenshot-phone.png" alt="スマホで動く web-tmux：vim のペインをズームして全画面表示し、下部に esc・tab・Shift+Tab・ctrl・enter・矢印キーが並ぶ" width="26%">
+  <img src="docs/demo/web-tmux-desktop.gif" alt="デスクトップのブラウザで動く web-tmux：あるペインで Claude Code が作業し、「Do you want to run this command?」で止まると、サイドバーのセッション・ウィンドウ・ペインに警告マークが付く。ブラウザで Yes を選ぶとテストが走って通り、マークがチェックに変わる" width="68%">
+  <img src="docs/demo/web-tmux-mobile.gif" alt="スマホで動く web-tmux：サイドバーから Claude Code のペインを全画面にズームし、下部のキーバー（esc・tab・Shift+Tab・ctrl・enter・矢印）で承認の問いに Yes と答えると、テストが走って通る" width="26%">
 </p>
 
-- **セッション・ウィンドウ・ペインをサイドバーで一覧**：切り替え、分割、リネーム、ズーム、レイアウト全体の保存と復帰
+<sub>架空のデモ用プロジェクトで録画しています。エージェントのペインは台本どおりに動くスクリプトです。MP4 版：<a href="docs/demo/web-tmux-desktop.mp4">デスクトップ</a> · <a href="docs/demo/web-tmux-mobile.mp4">スマホ</a></sub>
+
+- **どのエージェントがあなたを待っているか**：Claude Code・Codex・Hermes Agent のペインが、作業中か、あなたの応答待ちか、完了したかを、サイドバー・☰ ボタン・ブラウザのタブのタイトルに表示。設定は不要です
 - **スマホやタブレットでも使いやすく**：タップ1つでペインを全画面にズーム、Esc / Tab / Shift+Tab / Ctrl / 矢印の仮想キー、日本語 IME 入力
-- **コーディングエージェントを見守る**：Claude Code・Codex・Hermes Agent のペインが、作業中か、あなたの応答待ちか、完了したかを表示
+- **セッション・ウィンドウ・ペインをサイドバーで一覧**：切り替え、分割、リネーム、ズーム、レイアウト全体の保存と復帰
 - **他のマシンの tmux も** SSH 経由で同じ画面から。そのマシンを Tailnet に入れる必要はありません
 - **安全な設計**：入れるのはあなたの Tailnet ログインだけ。インターネットにも LAN にも公開しません
 
@@ -76,6 +78,11 @@ Browser (xterm.js)  ←─HTTPS / WebSocket─→  tailscale serve  ─→  serv
 SSH接続先の設定は[他のホストの tmux（SSH）](#他のホストの-tmuxssh)を参照してください。
 
 ## 主な機能
+
+<p>
+  <img src="docs/images/screenshot-desktop.png" alt="デスクトップのブラウザで動く web-tmux：サイドバーに3つのセッションと、現在のセッションのウィンドウ・ペインが並び、端末は vim・テスト実行・git log の3ペインに分割されている" width="68%">
+  <img src="docs/images/screenshot-phone.png" alt="スマホで動く web-tmux：vim のペインをズームして全画面表示し、下部に esc・tab・Shift+Tab・ctrl・enter・矢印キーが並ぶ" width="26%">
+</p>
 
 - セッション・ウィンドウ・ペインをサイドバーにリアルタイム表示
 - セッション・ウィンドウのインライン切り替え・リネーム・削除
@@ -388,3 +395,7 @@ tail -f server.log
 ```
 
 起動時に `server.log` は新しく作り直され、権限600になります。拒否理由は記録しますが、端末内容、入力データ、Cookie値は記録しません。
+
+## ライセンス
+
+web-tmux は [MIT ライセンス](LICENSE)で公開しています。`static/vendor/` に同梱しているブラウザ用アセットはそれぞれのライセンスに従います（[サードパーティのブラウザアセット](#サードパーティのブラウザアセット)を参照）。
