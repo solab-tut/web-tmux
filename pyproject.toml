@@ -1,7 +1,7 @@
 [project]
 name = "web-tmux"
 version = "1.10.0"
-description = "Check on your coding agents from your phone: tmux in the browser over Tailscale"
+description = "Your tmux sessions in any browser, desk or phone, over Tailscale, with coding-agent status at a glance"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
