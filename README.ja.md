@@ -6,7 +6,7 @@
 
 <p>
   <img src="docs/demo/web-tmux-desktop.gif" alt="デスクトップのブラウザで動く web-tmux：あるペインで Claude Code が作業し、「Do you want to run this command?」で止まると、サイドバーのセッション・ウィンドウ・ペインに警告マークが付く。ブラウザで Yes を選ぶとテストが走って通り、マークがチェックに変わる" width="68%">
-  <img src="docs/demo/web-tmux-mobile.gif" alt="スマホで動く web-tmux：サイドバーから Claude Code のペインを全画面にズームし、下部のキーバー（esc・tab・Shift+Tab・ctrl・enter・矢印）で承認の問いに Yes と答えると、テストが走って通る" width="26%">
+  <img src="docs/demo/web-tmux-mobile.gif" alt="スマホで動く web-tmux：サイドバーから Claude Code のペインを全画面にズームし、下部のキーバー（esc・tab・Shift+Tab・ctrl・enter・矢印）で承認の問いに Yes と答えると、テストが走って通る" width="25%">
 </p>
 
 <sub>架空のデモ用プロジェクトで録画しています。エージェントのペインは台本どおりに動くスクリプトです。MP4 版：<a href="docs/demo/web-tmux-desktop.mp4">デスクトップ</a> · <a href="docs/demo/web-tmux-mobile.mp4">スマホ</a></sub>
