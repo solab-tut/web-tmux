@@ -1,7 +1,9 @@
 [project]
 name = "web-tmux"
-version = "0.1.0"
-description = "Lightweight web frontend for tmux"
+version = "1.10.0"
+description = "Check on your coding agents from your phone: tmux in the browser over Tailscale"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "websockets==16.1.1",
