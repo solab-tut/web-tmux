@@ -1,6 +1,6 @@
 # web-tmux
 
-**Check on your coding agents from your phone.** web-tmux puts your tmux sessions in the browser and shows which Claude Code, Codex or Hermes Agent pane is waiting for you — answer it right there, over your own [Tailscale](https://tailscale.com) network.
+**Your tmux sessions in any browser — at your desk or on your phone.** See every session, window and pane at a glance, and which Claude Code, Codex or Hermes Agent pane is waiting for you. Reached privately over your own [Tailscale](https://tailscale.com) network.
 
 [日本語](README.ja.md)
 
@@ -11,10 +11,12 @@
 
 <sub>Recorded with a fictional demo project; the agent pane is scripted. Also as MP4: <a href="docs/demo/web-tmux-desktop.mp4">desktop</a> · <a href="docs/demo/web-tmux-mobile.mp4">phone</a>.</sub>
 
-- **See which agent is waiting for you**: Claude Code, Codex and Hermes Agent panes are marked working, waiting for you, or done — in the sidebar, on the ☰ button and in the browser tab's title — with nothing to set up
-- **Made for phones and tablets too**: zoom any pane to full screen with a tap, Esc / Tab / Shift+Tab / Ctrl / arrow keys, Japanese and other IME input
-- **Every session, window and pane** in a sidebar: switch, split, rename, zoom, and save the whole layout to restore later
-- **tmux on other machines** over SSH, from the same page, without putting them on your tailnet
+- **Every session, window and pane** in a sidebar: switch, split, rename and zoom without remembering a single key binding
+- **See which agent is waiting for you**: Claude Code, Codex and Hermes Agent panes are marked working, waiting for you, or done — in the sidebar, on the ☰ button and in the browser tab's title (`⚠1 ✓2`), so you notice from another tab, or from web-tmux open on your phone. Nothing to set up
+- **The same screen from any computer**: home, office or laptop — any browser on your tailnet, with no SSH client or terminal to configure
+- **tmux on other machines** over SSH, from the same page and with their agents' status too, without putting them on your tailnet
+- **Files and layouts**: read Markdown (rendered) and images from a pane's working directory, and save every session's windows and splits to restore later
+- **On phones and tablets too**: zoom any pane to full screen with a tap, Esc / Tab / Shift+Tab / Ctrl / arrow keys, Japanese and other IME input
 - **Private by design**: only your own tailnet login gets in; nothing is open to the internet or the LAN
 
 ## Quick start
