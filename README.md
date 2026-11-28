@@ -6,7 +6,7 @@
 
 <p>
   <img src="docs/demo/web-tmux-desktop.gif" alt="web-tmux in a desktop browser: Claude Code works in one pane, then stops at &quot;Do you want to run this command?&quot; and its window, pane and session in the sidebar turn to a warning sign; after Yes is chosen in the browser the tests run, pass, and the sign becomes a check mark" width="68%">
-  <img src="docs/demo/web-tmux-mobile.gif" alt="web-tmux on a phone: the Claude Code pane is zoomed to full screen from the sidebar, the approval prompt is answered Yes with the key bar along the bottom (esc, tab, Shift+Tab, ctrl, enter, arrows), and the tests run and pass" width="26%">
+  <img src="docs/demo/web-tmux-mobile.gif" alt="web-tmux on a phone: the Claude Code pane is zoomed to full screen from the sidebar, the approval prompt is answered Yes with the key bar along the bottom (esc, tab, Shift+Tab, ctrl, enter, arrows), and the tests run and pass" width="25%">
 </p>
 
 <sub>Recorded with a fictional demo project; the agent pane is scripted. Also as MP4: <a href="docs/demo/web-tmux-desktop.mp4">desktop</a> · <a href="docs/demo/web-tmux-mobile.mp4">phone</a>.</sub>
